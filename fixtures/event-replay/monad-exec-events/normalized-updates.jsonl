@@ -1,0 +1,4 @@
+{"kind":"Head","cursor":{"chainId":"143","blockNumber":"700","blockHash":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","transactionIndex":null,"logIndex":null,"sourceSequence":"1000","sourceSubIndex":null,"commitment":"Realtime"}}
+{"kind":"Log","address":"0x0000000000000000000000000000000000000001","topics":["0x0000000000000000000000000000000000000000000000000000000000000001"],"data":"0x","removed":false,"cursor":{"chainId":"143","blockNumber":"700","blockHash":null,"transactionIndex":"0","logIndex":"0","sourceSequence":"1004","sourceSubIndex":"0","commitment":"Realtime"}}
+{"kind":"Head","cursor":{"chainId":"143","blockNumber":"700","blockHash":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","transactionIndex":null,"logIndex":null,"sourceSequence":"1005","sourceSubIndex":null,"commitment":"Canonical"}}
+{"kind":"Gap","cursor":null,"reason":"Monad parser subscription gap; skipped=3"}

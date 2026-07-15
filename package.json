@@ -1,0 +1,10 @@
+{
+  "name": "@lunarbase/math-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "build": "tsc -b packages/math/tsconfig.json packages/client/tsconfig.json",
+    "test": "node --test packages/math/dist/*.test.js"
+  }
+}

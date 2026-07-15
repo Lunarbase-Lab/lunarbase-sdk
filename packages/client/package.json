@@ -1,0 +1,8 @@
+{
+  "name": "@lunarbase/client",
+  "version": "0.1.0",
+  "type": "module",
+  "dependencies": { "@lunarbase/math": "workspace:*" },
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "scripts": { "build": "tsc -p tsconfig.json" }
+}

@@ -1,0 +1,17 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .: {}
+
+  packages/client:
+    dependencies:
+      '@lunarbase/math':
+        specifier: workspace:*
+        version: link:../math
+
+  packages/math: {}

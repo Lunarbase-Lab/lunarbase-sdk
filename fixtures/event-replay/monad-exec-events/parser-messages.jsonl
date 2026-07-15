@@ -1,0 +1,6 @@
+{"jsonrpc":"2.0","id":1,"result":"sub_1"}
+{"jsonrpc":"2.0","id":2,"result":"sub_2"}
+{"jsonrpc":"2.0","method":"subscription","result":{"subscription":"sub_2","type":"newHead","commitment":"proposed","seqno":1000,"timestampNs":1,"blockNumber":700,"header":{"blockTag":{"id":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","blockNumber":700}}}}
+{"jsonrpc":"2.0","method":"subscription","result":{"subscription":"sub_1","type":"log","kind":"event","seqno":1004,"blockNumber":700,"logIndex":0,"transactionIndex":0,"address":"0x0000000000000000000000000000000000000001","topics":["0x0000000000000000000000000000000000000000000000000000000000000001"],"data":"0x"}}
+{"jsonrpc":"2.0","method":"subscription","result":{"subscription":"sub_2","type":"newHead","commitment":"finalized","seqno":1005,"timestampNs":2,"blockNumber":700,"header":{"blockTag":{"id":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","blockNumber":700}}}}
+{"jsonrpc":"2.0","method":"subscriptionGap","params":{"skipped":3,"resubscribeRequired":true}}

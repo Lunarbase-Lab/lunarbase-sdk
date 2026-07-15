@@ -1,0 +1,8 @@
+/target/
+/node_modules/
+/\.pnpm-store/
+packages/*/dist/
+packages/*/node_modules/
+solidity-reference/target/
+*.tsbuildinfo
+.DS_Store
