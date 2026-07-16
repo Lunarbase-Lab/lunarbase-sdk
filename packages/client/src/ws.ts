@@ -167,6 +167,10 @@ export class WsRpcBackend implements NormalizedBackend {
             return;
           }
           if (lastHead) {
+            if (parsed.cursor.blockNumber > lastHead.blockNumber + 1n) {
+              yield gap("RPC WebSocket skipped one or more block heads; canonical recovery required", lastHead);
+              return;
+            }
             const discontinuity = parsed.cursor.blockNumber <= lastHead.blockNumber
               || (parsed.cursor.blockNumber === lastHead.blockNumber + 1n && parsed.parentHash !== undefined && lastHead.blockHash !== undefined && parsed.parentHash !== lastHead.blockHash);
             if (discontinuity) {
@@ -207,7 +211,7 @@ function parseHead(value: unknown, chainId: bigint): { cursor: ChainCursor; pare
   const object = value as Record<string, unknown>;
   const blockHash = object.hash === null || object.hash === undefined ? undefined : parseHash(object.hash, "head.hash");
   const parentHash = object.parentHash === null || object.parentHash === undefined ? undefined : parseHash(object.parentHash, "head.parentHash");
-  return { cursor: { chainId, blockNumber: parseHexU64(object.number, "head.number"), blockHash, commitment: CommitmentValue.Realtime }, parentHash };
+  return { cursor: { chainId, blockNumber: parseHexU64(object.number, "head.number"), blockHash, sourceSequence: object.l1BlockNumber === undefined || object.l1BlockNumber === null ? undefined : parseHexU64(object.l1BlockNumber, "head.l1BlockNumber"), commitment: CommitmentValue.Realtime }, parentHash };
 }
 
 function gap(reason: string, cursor?: ChainCursor): ChainUpdate {
@@ -221,13 +225,13 @@ function decodeFrame(data: unknown): string | undefined {
   return undefined;
 }
 
-function defaultWebSocketFactory(url: string): WebSocketLike {
+export function defaultWebSocketFactory(url: string): WebSocketLike {
   const constructor = (globalThis as typeof globalThis & { WebSocket?: new (url: string) => WebSocketLike }).WebSocket;
   if (!constructor) throw new RpcError("INVALID", "global WebSocket is unavailable; inject a WebSocketFactory");
   return new constructor(url);
 }
 
-class BoundedFrameQueue {
+export class BoundedFrameQueue {
   private readonly values: string[] = [];
   private readonly waiters: Array<(value: string | undefined) => void> = [];
   private opened = false;

@@ -15,7 +15,9 @@ workers, and filesystem state:
   accepts a JavaScript `number`.
 - `crates/lunarbase-client` and `packages/client` own normalized source
   boundaries, ordered reducers, immutable snapshots, checkpoint namespaces,
-  gap handling, and bounded in-memory Redis-compatible stores.
+  gap handling, and bounded Redis-backed stores. Rust can retry a managed Redis
+  connection once after transport failure; TypeScript accepts an injected Redis
+  connection/command transport so the application can choose its native pool.
 - `crates/lunarbase-monad-sidecar` is the safe normalized boundary for a
   colocated Monad execution-events reader.
 
@@ -67,3 +69,19 @@ The parser's `seqno` is global across all execution events. Filtered `logs`
 therefore have sparse seqnos; the adapter only rejects regressions and
 duplicates, while complete raw-ring readers may use strict contiguous gap
 detection.
+
+The TypeScript client exposes the same normalized sidecar protocol through
+`MonadSidecarBackend`; inject a bounded WebSocket implementation in Node and
+use the ordinary HTTP RPC backend for canonical snapshot/backfill.
+
+For Base, use `BaseFlashblocksBackend` with the documented `pendingLogs` and
+`newFlashblocks` subscriptions. For Arbitrum, use `ArbitrumNitroBackend` on
+executed Nitro state; it fails closed when a realtime head omits the
+EVM-visible parent block context.
+
+The high-level clients start realtime ingestion before the block-tagged
+snapshot, apply a bounded handoff, persist checkpoints after accepted updates,
+and resnapshot/backfill after gaps, reorgs, removed logs, or code-hash
+mismatches. Redis itself is an external service; the library manages keys,
+leases, atomic checkpoint/stream writes, deduplication, health, and shutdown,
+but does not spawn a Redis server.

@@ -19,7 +19,10 @@ can be checked against the same vectors and wire formats.
 │   │   └── lib.rs                # small public facade
 │   ├── lunarbase-client/src/
 │   │   ├── model.rs              # cursors, updates, deployment and errors
-│   │   ├── sources.rs            # Base/Monad/Arbitrum normalization
+│   │   ├── sources.rs            # common source boundary and overlays
+│   │   ├── ws.rs                 # bounded JSON-RPC WebSocket source
+│   │   ├── flashblocks.rs        # Base pendingLogs/newFlashblocks adapter
+│   │   ├── nitro.rs              # executed Arbitrum Nitro adapter
 │   │   ├── bootstrap.rs          # snapshot handoff and bounded buffering
 │   │   ├── abi.rs                # pinned Core event decoder
 │   │   ├── reducer.rs             # ordered single-writer state transitions
@@ -27,10 +30,10 @@ can be checked against the same vectors and wire formats.
 │   │   ├── persistence.rs         # Redis and in-memory stores
 │   │   ├── indexer.rs              # lifecycle, freshness and quote facade
 │   │   └── lib.rs                 # client facade/re-exports
-│   └── lunarbase-monad-sidecar/  # normalized execution-event boundary
+│   └── lunarbase-monad-sidecar/  # normalized execution-event WebSocket sidecar
 ├── packages/
 │   ├── math/src/                 # bigint counterpart of lunarbase-math
-│   └── client/src/                # TypeScript counterpart of lunarbase-client
+│   └── client/src/                # TypeScript counterpart and network adapters
 └── SPECIFICATION.md              # protocol and acceptance requirements
 ```
 

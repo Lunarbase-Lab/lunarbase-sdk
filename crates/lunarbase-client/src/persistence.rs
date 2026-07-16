@@ -5,9 +5,13 @@ use crate::codec::{
 use crate::{ChainCursor, ChainUpdate, Checkpoint, Commitment, RedisMeta, RedisNamespace};
 use lunarbase_math::QuoteOutcome;
 use redis::Commands;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
+
+/// Shared store handle used by the high-level client. The reducer remains the
+/// single writer; this lock only serializes checkpoint publication.
+pub type SharedCheckpointStore = std::sync::Arc<tokio::sync::Mutex<Box<dyn CheckpointStore>>>;
 /// The in-memory implementation is used by deterministic tests and by callers
 /// that provide a Redis implementation at the process boundary. It commits a
 /// complete checkpoint and ordered update payload atomically.
@@ -20,9 +24,11 @@ pub trait CheckpointStore: Send + Sync {
 /// A concrete synchronous Redis checkpoint implementation. Redis is used for
 /// durable state and catch-up, never as the hot quote path.
 pub struct RedisCheckpointStore {
+    client: redis::Client,
     connection: Mutex<redis::Connection>,
     namespace: RedisNamespace,
     max_updates: usize,
+    dedup_ttl_seconds: u64,
 }
 
 type RedisStreamEntries = Vec<(String, Vec<(String, Vec<u8>)>)>;
@@ -33,43 +39,78 @@ impl RedisCheckpointStore {
         namespace: RedisNamespace,
         max_updates: usize,
     ) -> redis::RedisResult<Self> {
+        Self::connect_with_config(url, namespace, max_updates, 86_400)
+    }
+
+    pub fn connect_with_config(
+        url: &str,
+        namespace: RedisNamespace,
+        max_updates: usize,
+        dedup_ttl_seconds: u64,
+    ) -> redis::RedisResult<Self> {
         if max_updates == 0 {
             return Err(redis::RedisError::from((
                 redis::ErrorKind::InvalidClientConfig,
                 "max_updates must be non-zero",
             )));
         }
+        if dedup_ttl_seconds == 0 {
+            return Err(redis::RedisError::from((
+                redis::ErrorKind::InvalidClientConfig,
+                "dedup_ttl_seconds must be non-zero",
+            )));
+        }
         let client = redis::Client::open(url)?;
+        let connection = client.get_connection()?;
         Ok(Self {
-            connection: Mutex::new(client.get_connection()?),
+            client,
+            connection: Mutex::new(connection),
             namespace,
             max_updates,
+            dedup_ttl_seconds,
         })
     }
 
-    pub fn load_checked(&self) -> Result<Option<Checkpoint>, String> {
+    /// Execute a Redis operation on the managed connection. A transport error
+    /// causes one bounded reconnect-and-retry; the commit Lua script is
+    /// idempotent, so retrying after an ambiguous socket close cannot append a
+    /// duplicate update.
+    fn with_connection<T>(
+        &self,
+        mut operation: impl FnMut(&mut redis::Connection) -> redis::RedisResult<T>,
+    ) -> Result<T, String> {
         let mut connection = self
             .connection
             .lock()
-            .map_err(|_| "redis connection lock poisoned")?;
-        let bytes: Option<Vec<u8>> = connection
-            .get(&self.namespace.checkpoint)
-            .map_err(|error| error.to_string())?;
+            .map_err(|_| "redis connection lock poisoned".to_string())?;
+        match operation(&mut connection) {
+            Ok(value) => Ok(value),
+            Err(first) => {
+                let replacement = self.client.get_connection().map_err(|retry| {
+                    format!("Redis operation failed: {first}; reconnect failed: {retry}")
+                })?;
+                *connection = replacement;
+                operation(&mut connection)
+                    .map_err(|retry| format!("Redis operation failed after reconnect: {retry}"))
+            }
+        }
+    }
+
+    pub fn load_checked(&self) -> Result<Option<Checkpoint>, String> {
+        let bytes: Option<Vec<u8>> =
+            self.with_connection(|connection| connection.get(&self.namespace.checkpoint))?;
         bytes.map(|bytes| decode_checkpoint(&bytes)).transpose()
     }
 
     pub fn load_meta(&self) -> Result<Option<RedisMeta>, String> {
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| "redis connection lock poisoned")?;
-        let values: Vec<Option<String>> = redis::cmd("HMGET")
-            .arg(&self.namespace.meta)
-            .arg("schema_version")
-            .arg("math_compatibility_version")
-            .arg("expected_runtime_code_hash")
-            .query(&mut *connection)
-            .map_err(|error: redis::RedisError| error.to_string())?;
+        let values: Vec<Option<String>> = self.with_connection(|connection| {
+            redis::cmd("HMGET")
+                .arg(&self.namespace.meta)
+                .arg("schema_version")
+                .arg("math_compatibility_version")
+                .arg("expected_runtime_code_hash")
+                .query(connection)
+        })?;
         if values.iter().all(Option::is_none) {
             return Ok(None);
         }
@@ -95,45 +136,77 @@ impl RedisCheckpointStore {
         }))
     }
 
+    pub fn validate_meta(
+        &self,
+        expected_runtime_code_hash: [u8; 32],
+        math_compatibility_version: &str,
+    ) -> Result<bool, String> {
+        let Some(meta) = self.load_meta()? else {
+            return Ok(false);
+        };
+        Ok(meta.schema_version == crate::SCHEMA_VERSION
+            && meta.math_compatibility_version == math_compatibility_version
+            && meta.expected_runtime_code_hash == expected_runtime_code_hash)
+    }
+
+    pub fn health(&self) -> Result<(), String> {
+        let response: String =
+            self.with_connection(|connection| redis::cmd("PING").query(connection))?;
+        if response == "PONG" {
+            Ok(())
+        } else {
+            Err(format!("unexpected Redis PING response: {response}"))
+        }
+    }
+
     pub fn acquire_writer_lease(&self, owner: &str, ttl_seconds: u64) -> redis::RedisResult<bool> {
-        let mut connection = self.connection.lock().map_err(|_| {
-            redis::RedisError::from((redis::ErrorKind::IoError, "redis connection lock poisoned"))
-        })?;
-        let result: Option<String> = redis::cmd("SET")
-            .arg(&self.namespace.writer_lease)
-            .arg(owner)
-            .arg("NX")
-            .arg("EX")
-            .arg(ttl_seconds)
-            .query(&mut *connection)?;
-        Ok(result.is_some())
+        self.with_connection(|connection| {
+            let result: Option<String> = redis::cmd("SET")
+                .arg(&self.namespace.writer_lease)
+                .arg(owner)
+                .arg("NX")
+                .arg("EX")
+                .arg(ttl_seconds)
+                .query(connection)?;
+            Ok(result.is_some())
+        })
+        .map_err(|error| {
+            redis::RedisError::from((
+                redis::ErrorKind::IoError,
+                "managed Redis operation failed",
+                error,
+            ))
+        })
     }
 
     pub fn release_writer_lease(&self, owner: &str) -> redis::RedisResult<()> {
-        let mut connection = self.connection.lock().map_err(|_| {
-            redis::RedisError::from((redis::ErrorKind::IoError, "redis connection lock poisoned"))
-        })?;
         let script = redis::Script::new(
             "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
         );
-        let _: i32 = script
-            .key(&self.namespace.writer_lease)
-            .arg(owner)
-            .invoke(&mut *connection)?;
-        Ok(())
+        self.with_connection(|connection| {
+            let _: i32 = script
+                .key(&self.namespace.writer_lease)
+                .arg(owner)
+                .invoke(connection)?;
+            Ok(())
+        })
+        .map_err(|error| {
+            redis::RedisError::from((
+                redis::ErrorKind::IoError,
+                "managed Redis operation failed",
+                error,
+            ))
+        })
     }
 
     pub fn updates_checked(&self) -> Result<Vec<ChainUpdate>, String> {
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| "redis connection lock poisoned")?;
-        let entries: RedisStreamEntries = redis::cmd("XRANGE")
-            .arg(&self.namespace.updates)
-            .arg("-")
-            .arg("+")
-            .query(&mut *connection)
-            .map_err(|error: redis::RedisError| error.to_string())?;
+        let entries: RedisStreamEntries = self.with_connection(|connection| {
+            redis::cmd("XRANGE")
+                .arg(&self.namespace.updates)
+                .arg("-")
+                .arg("+")
+                .query(connection)
+        })?;
         entries
             .into_iter()
             .flat_map(|(_, fields)| {
@@ -153,49 +226,46 @@ impl CheckpointStore for RedisCheckpointStore {
     fn commit(&mut self, checkpoint: Checkpoint, updates: Vec<ChainUpdate>) -> Result<(), String> {
         let checkpoint_bytes = encode_checkpoint(&checkpoint)?;
         let meta_hash = bytes32_hex(checkpoint.expected_runtime_code_hash);
-        let mut pipeline = redis::pipe();
-        pipeline
-            .atomic()
-            .cmd("SET")
-            .arg(&self.namespace.checkpoint)
-            .arg(&checkpoint_bytes)
-            .ignore()
-            .cmd("SET")
-            .arg(&self.namespace.state)
-            .arg(&checkpoint_bytes)
-            .ignore()
-            .cmd("HSET")
-            .arg(&self.namespace.meta)
-            .arg("schema_version")
-            .arg(checkpoint.schema_version)
-            .arg("math_compatibility_version")
-            .arg(&checkpoint.math_compatibility_version)
-            .arg("expected_runtime_code_hash")
-            .arg(meta_hash)
-            .ignore();
-        for update in &updates {
-            pipeline
-                .cmd("XADD")
-                .arg(&self.namespace.updates)
-                .arg("*")
-                .arg("payload")
-                .arg(encode_update(update))
-                .ignore();
-        }
-        pipeline
-            .cmd("XTRIM")
-            .arg(&self.namespace.updates)
-            .arg("MAXLEN")
-            .arg("~")
-            .arg(self.max_updates)
-            .ignore();
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| "redis connection lock poisoned")?;
-        pipeline
-            .query::<()>(&mut *connection)
-            .map_err(|error| error.to_string())
+        let script = redis::Script::new(
+            r#"
+redis.call('SET', KEYS[1], ARGV[1])
+redis.call('SET', KEYS[2], ARGV[1])
+redis.call('HSET', KEYS[3], 'schema_version', ARGV[2], 'math_compatibility_version', ARGV[3], 'expected_runtime_code_hash', ARGV[4])
+local count = tonumber(ARGV[5])
+for i = 1, count do
+  local payload_index = 6 + ((i - 1) * 2)
+  local payload = ARGV[payload_index]
+  local ttl = ARGV[payload_index + 1]
+  local dedup = KEYS[4 + i]
+  if redis.call('SET', dedup, '1', 'NX', 'EX', ttl) then
+    redis.call('XADD', KEYS[4], '*', 'payload', payload)
+  end
+end
+redis.call('XTRIM', KEYS[4], 'MAXLEN', '~', ARGV[6 + (count * 2)])
+return 1
+"#,
+        );
+        self.with_connection(|connection| {
+            let mut invocation = script.prepare_invoke();
+            invocation
+                .key(&self.namespace.checkpoint)
+                .key(&self.namespace.state)
+                .key(&self.namespace.meta)
+                .key(&self.namespace.updates)
+                .arg(&checkpoint_bytes)
+                .arg(checkpoint.schema_version)
+                .arg(&checkpoint.math_compatibility_version)
+                .arg(&meta_hash)
+                .arg(updates.len());
+            for update in &updates {
+                invocation
+                    .key(update_dedup_key(&self.namespace, update))
+                    .arg(encode_update(update))
+                    .arg(self.dedup_ttl_seconds);
+            }
+            invocation.arg(self.max_updates).invoke::<i32>(connection)
+        })
+        .map(|_| ())
     }
     fn updates(&self) -> Vec<ChainUpdate> {
         self.updates_checked().unwrap_or_default()
@@ -207,12 +277,14 @@ pub struct InMemoryRedisStore {
     checkpoint: Option<Checkpoint>,
     updates: VecDeque<ChainUpdate>,
     max_updates: usize,
+    dedup: HashSet<String>,
 }
 
 impl InMemoryRedisStore {
     pub fn new(max_updates: usize) -> Self {
         Self {
             max_updates,
+            dedup: HashSet::new(),
             ..Default::default()
         }
     }
@@ -228,9 +300,12 @@ impl CheckpointStore for InMemoryRedisStore {
         }
         self.checkpoint = Some(checkpoint);
         for update in updates {
-            self.updates.push_back(update);
-            while self.updates.len() > self.max_updates {
-                self.updates.pop_front();
+            let identity = update_identity(&update);
+            if self.dedup.insert(identity) {
+                self.updates.push_back(update);
+                while self.updates.len() > self.max_updates {
+                    self.updates.pop_front();
+                }
             }
         }
         Ok(())
@@ -238,6 +313,34 @@ impl CheckpointStore for InMemoryRedisStore {
     fn updates(&self) -> Vec<ChainUpdate> {
         self.updates.iter().cloned().collect()
     }
+}
+
+pub(crate) fn update_dedup_key(namespace: &RedisNamespace, update: &ChainUpdate) -> String {
+    format!("lb:{{{}}}:dedup:{}", namespace.tag, update_identity(update))
+}
+
+fn update_identity(update: &ChainUpdate) -> String {
+    let (kind, cursor) = match update {
+        ChainUpdate::Head(cursor) => ("head", Some(cursor)),
+        ChainUpdate::Log(log) => ("log", Some(&log.cursor)),
+        ChainUpdate::Reorg { new_head, .. } => ("reorg", Some(new_head)),
+        ChainUpdate::Gap { cursor, .. } => ("gap", cursor.as_ref()),
+        ChainUpdate::SourceHealth { healthy, .. } => {
+            return format!("health:{}", u8::from(*healthy));
+        }
+    };
+    cursor.map_or_else(
+        || kind.to_owned(),
+        |cursor| {
+            format!(
+                "{kind}:{}:{}:{}:{}",
+                cursor.block_number,
+                cursor.transaction_index.unwrap_or_default(),
+                cursor.log_index.unwrap_or_default(),
+                cursor.source_sequence.unwrap_or_default()
+            )
+        },
+    )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

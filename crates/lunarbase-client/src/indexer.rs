@@ -2,14 +2,19 @@ use crate::{
     decode_core_event, BackfillRequest, BootstrapSnapshot, ChainCursor, ChainEventSource,
     ChainUpdate, Checkpoint, ClientQuote, Commitment, ContractFilter, ContractLog,
     DeploymentConfig, FreshnessPolicy, IndexerHealth, LogDecodeError, QuoteEvent, QuoteReducer,
-    ReducerError, SnapshotProvider, SourceError, MATH_COMPATIBILITY_VERSION, SCHEMA_VERSION,
+    ReducerError, SharedCheckpointStore, SnapshotProvider, SourceError, MATH_COMPATIBILITY_VERSION,
+    SCHEMA_VERSION,
 };
+use futures_util::StreamExt;
 use lunarbase_math::{
     Address, QuoteContext, QuoteError, QuoteOutcome, QuoteRequest, QuoteState, U256,
 };
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
+use tokio::sync::{mpsc, Mutex, Notify};
+use tokio::task::JoinHandle;
+use tokio::time::sleep;
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum IndexerError {
     #[error("not ready")]
@@ -38,6 +43,7 @@ pub struct QuoteIndexer {
     pub expected_code_hash: [u8; 32],
     pub math_compatibility_version: String,
     pub last_commitment: Commitment,
+    last_observed_at: SystemTime,
 }
 
 impl QuoteIndexer {
@@ -56,6 +62,7 @@ impl QuoteIndexer {
             reducer: QuoteReducer::from_checkpoint(checkpoint),
             expected_code_hash,
             math_compatibility_version: MATH_COMPATIBILITY_VERSION.into(),
+            last_observed_at: SystemTime::now(),
         })
     }
 
@@ -65,10 +72,13 @@ impl QuoteIndexer {
             expected_code_hash,
             math_compatibility_version: MATH_COMPATIBILITY_VERSION.into(),
             last_commitment: Commitment::Realtime,
+            last_observed_at: SystemTime::now(),
         }
     }
 
     pub fn bootstrap(&mut self, snapshot_cursor: ChainCursor) {
+        self.last_commitment = snapshot_cursor.commitment;
+        self.last_observed_at = SystemTime::now();
         self.reducer.bootstrap(snapshot_cursor);
     }
 
@@ -108,6 +118,7 @@ impl QuoteIndexer {
         self.reducer = QuoteReducer::new(snapshot.state);
         self.reducer.bootstrap(snapshot.cursor.clone());
         self.last_commitment = snapshot.cursor.commitment;
+        self.last_observed_at = SystemTime::now();
         for update in buffered {
             match &update {
                 ChainUpdate::Gap { reason, .. } => {
@@ -171,6 +182,7 @@ impl QuoteIndexer {
             .reducer
             .cursor()
             .map_or(snapshot_cursor.commitment, |cursor| cursor.commitment);
+        self.last_observed_at = SystemTime::now();
         self.reducer.publish_ready();
         Ok(())
     }
@@ -192,6 +204,7 @@ impl QuoteIndexer {
                         return Err(error.into());
                     }
                     self.last_commitment = log.cursor.commitment;
+                    self.last_observed_at = SystemTime::now();
                 }
             }
             ChainUpdate::Head(cursor) => {
@@ -202,6 +215,7 @@ impl QuoteIndexer {
                 if let Some(current) = self.reducer.cursor() {
                     self.last_commitment = current.commitment;
                 }
+                self.last_observed_at = SystemTime::now();
             }
             ChainUpdate::Reorg { .. } => {
                 self.reducer.mark_not_ready();
@@ -242,7 +256,7 @@ impl QuoteIndexer {
     /// is intentionally conservative: the source must provide a canonical
     /// or finalized head, removed logs fail closed, and readiness is restored
     /// only after every backfilled log has been decoded and applied.
-    pub async fn recover_from_source<S: ChainEventSource>(
+    pub async fn recover_from_source<S: ChainEventSource + ?Sized>(
         &mut self,
         source: &S,
         filter: ContractFilter,
@@ -288,6 +302,7 @@ impl QuoteIndexer {
         }
         self.apply_update(ChainUpdate::Head(head), &|_| None)?;
         self.reducer.publish_ready();
+        self.last_observed_at = SystemTime::now();
         Ok(())
     }
 
@@ -333,13 +348,14 @@ impl QuoteIndexer {
                 return Err(IndexerError::FreshnessUnavailable);
             }
         }
-        let observed_at = SystemTime::now();
+        let observed_at = self.last_observed_at;
+        let age = observed_at.elapsed().unwrap_or(Duration::ZERO);
         Ok(ClientQuote {
             outcome: self.quote(request, execution_block_number)?,
             cursor: cursor.clone(),
             commitment: cursor.commitment,
             observed_at,
-            age: Duration::ZERO,
+            age,
             stale: false,
             contract_code_hash: self.expected_code_hash,
             math_compatibility_version: self.math_compatibility_version.clone(),
@@ -385,6 +401,382 @@ impl QuoteIndexer {
     pub fn checkpoint(&self) -> Option<Checkpoint> {
         self.reducer.checkpoint(self.expected_code_hash)
     }
+}
+
+/// Parameters shared by the high-level client lifecycle. The source is
+/// started before the block-tagged snapshot so updates cannot be lost during
+/// bootstrap. All queue and reconnect bounds are explicit.
+#[derive(Clone, Debug)]
+pub struct ClientConnectConfig {
+    pub deployment: DeploymentConfig,
+    pub filter: ContractFilter,
+    pub lane_assets: Vec<Address>,
+    pub routers: Vec<Address>,
+    pub buffer_capacity: usize,
+    pub reconnect_delay: Duration,
+}
+
+impl ClientConnectConfig {
+    pub fn validate(&self) -> Result<(), IndexerError> {
+        self.deployment.validate()?;
+        if self.filter.address != self.deployment.core {
+            return Err(SourceError::NetworkMismatch.into());
+        }
+        if self.buffer_capacity == 0 || self.reconnect_delay.is_zero() {
+            return Err(SourceError::Unavailable(
+                "client buffer and reconnect bounds must be non-zero".into(),
+            )
+            .into());
+        }
+        Ok(())
+    }
+}
+
+/// Fully connected asynchronous client. The reducer remains single-writer;
+/// quote callers only receive cloned/immutable state snapshots.
+pub struct ConnectedQuoteClient {
+    indexer: Arc<Mutex<QuoteIndexer>>,
+    source: Arc<dyn ChainEventSource>,
+    filter: ContractFilter,
+    checkpoint_store: Option<SharedCheckpointStore>,
+    ready: Arc<Notify>,
+    stop: Option<JoinHandle<()>>,
+    pump: Option<JoinHandle<()>>,
+}
+
+impl ConnectedQuoteClient {
+    pub async fn connect<P, S>(
+        provider: &P,
+        source: Arc<S>,
+        config: ClientConnectConfig,
+    ) -> Result<Self, IndexerError>
+    where
+        P: SnapshotProvider,
+        S: ChainEventSource + 'static,
+    {
+        Self::connect_with_store(provider, source, config, None).await
+    }
+
+    /// Connect the client and optionally publish every accepted transition to
+    /// a shared checkpoint store. Redis is deliberately injected at this
+    /// boundary so the pure reducer remains independent of the transport.
+    pub async fn connect_with_store<P, S>(
+        provider: &P,
+        source: Arc<S>,
+        config: ClientConnectConfig,
+        checkpoint_store: Option<SharedCheckpointStore>,
+    ) -> Result<Self, IndexerError>
+    where
+        P: SnapshotProvider,
+        S: ChainEventSource + 'static,
+    {
+        config.validate()?;
+        if source.network() != config.deployment.network {
+            return Err(SourceError::NetworkMismatch.into());
+        }
+        let mut initial = QuoteIndexer::new(
+            QuoteState::default(),
+            config.deployment.expected_runtime_code_hash,
+        );
+        let (updates_tx, mut updates_rx) = mpsc::channel(config.buffer_capacity);
+        let pump_source = source.clone();
+        let pump_filter = config.filter.clone();
+        let reconnect_delay = config.reconnect_delay;
+        let pump = tokio::spawn(async move {
+            source_pump(pump_source, pump_filter, updates_tx, reconnect_delay).await;
+        });
+
+        let snapshot = match provider
+            .snapshot(&config.deployment, &config.lane_assets, &config.routers)
+            .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                pump.abort();
+                return Err(error.into());
+            }
+        };
+        let mut buffered = Vec::new();
+        while let Ok(update) = updates_rx.try_recv() {
+            buffered.push(update);
+        }
+        let initial_updates = buffered.clone();
+        let handoff_block = snapshot.cursor.block_number;
+        if let Err(error) = initial.bootstrap_normalized(snapshot, buffered) {
+            pump.abort();
+            return Err(error);
+        }
+        if let Some(store) = &checkpoint_store {
+            let persisted = match initial.checkpoint() {
+                Some(checkpoint) => store
+                    .lock()
+                    .await
+                    .commit(checkpoint, initial_updates)
+                    .map_err(|error| {
+                        IndexerError::Source(SourceError::Unavailable(format!(
+                            "checkpoint commit failed: {error}"
+                        )))
+                    }),
+                None => Err(IndexerError::NoCursor),
+            };
+            if let Err(error) = persisted {
+                pump.abort();
+                return Err(error);
+            }
+        }
+
+        let indexer = Arc::new(Mutex::new(initial));
+        let ready = Arc::new(Notify::new());
+        ready.notify_waiters();
+        let run_indexer = indexer.clone();
+        let run_source: Arc<dyn ChainEventSource> = source;
+        let run_filter = config.filter;
+        let run_ready = ready.clone();
+        let loop_source = run_source.clone();
+        let loop_filter = run_filter.clone();
+        let loop_store = checkpoint_store.clone();
+        let stop = tokio::spawn(async move {
+            source_reducer_loop(
+                run_indexer,
+                loop_source,
+                loop_filter,
+                &mut updates_rx,
+                run_ready,
+                handoff_block,
+                loop_store,
+            )
+            .await;
+        });
+        Ok(Self {
+            indexer,
+            source: run_source,
+            filter: run_filter,
+            checkpoint_store,
+            ready,
+            stop: Some(stop),
+            pump: Some(pump),
+        })
+    }
+
+    pub async fn await_ready(&self, minimum: Commitment) -> Result<(), IndexerError> {
+        loop {
+            let notified = self.ready.notified();
+            let health = self.health().await;
+            if health.ready && health.commitment >= minimum {
+                return Ok(());
+            }
+            notified.await;
+        }
+    }
+
+    pub async fn state_snapshot(&self) -> Result<Arc<QuoteState>, IndexerError> {
+        self.indexer.lock().await.snapshot()
+    }
+
+    pub async fn quote_with_policy(
+        &self,
+        request: &QuoteRequest,
+        execution_block_number: U256,
+        policy: FreshnessPolicy,
+    ) -> Result<ClientQuote, IndexerError> {
+        self.indexer
+            .lock()
+            .await
+            .quote_with_policy(request, execution_block_number, policy)
+    }
+
+    pub async fn quote_exact_in(
+        &self,
+        mut request: QuoteRequest,
+        execution_block_number: U256,
+    ) -> Result<ClientQuote, IndexerError> {
+        request.mode = lunarbase_math::QuoteMode::ExactIn;
+        self.quote_with_policy(&request, execution_block_number, FreshnessPolicy::default())
+            .await
+    }
+
+    pub async fn quote_exact_out(
+        &self,
+        mut request: QuoteRequest,
+        execution_block_number: U256,
+    ) -> Result<ClientQuote, IndexerError> {
+        request.mode = lunarbase_math::QuoteMode::ExactOut;
+        self.quote_with_policy(&request, execution_block_number, FreshnessPolicy::default())
+            .await
+    }
+
+    pub async fn health(&self) -> IndexerHealth {
+        self.indexer.lock().await.health()
+    }
+
+    pub async fn checkpoint(&self) -> Option<Checkpoint> {
+        self.indexer.lock().await.checkpoint()
+    }
+
+    pub async fn resync(&self) -> Result<(), IndexerError> {
+        let mut indexer = self.indexer.lock().await;
+        indexer.reducer.mark_not_ready();
+        let result = indexer
+            .recover_from_source(self.source.as_ref(), self.filter.clone())
+            .await;
+        drop(indexer);
+        if result.is_ok() {
+            if let Err(error) =
+                persist_checkpoint(&self.indexer, self.checkpoint_store.as_ref(), Vec::new()).await
+            {
+                self.indexer.lock().await.reducer.mark_not_ready();
+                return Err(
+                    SourceError::Unavailable(format!("checkpoint commit failed: {error}")).into(),
+                );
+            }
+            self.ready.notify_waiters();
+        }
+        result
+    }
+
+    pub async fn shutdown(&mut self) {
+        if let Some(handle) = self.stop.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.pump.take() {
+            handle.abort();
+        }
+        self.indexer.lock().await.shutdown();
+        self.ready.notify_waiters();
+    }
+}
+
+async fn source_pump(
+    source: Arc<dyn ChainEventSource>,
+    filter: ContractFilter,
+    sender: mpsc::Sender<ChainUpdate>,
+    reconnect_delay: Duration,
+) {
+    loop {
+        let stream = match source.subscribe(filter.clone()).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                if sender
+                    .send(ChainUpdate::Gap {
+                        cursor: None,
+                        reason: format!("source subscribe failed: {error}"),
+                    })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                sleep(reconnect_delay).await;
+                continue;
+            }
+        };
+        futures_util::pin_mut!(stream);
+        let mut ended_with_gap = false;
+        while let Some(item) = stream.next().await {
+            let update = match item {
+                Ok(update) => update,
+                Err(error) => ChainUpdate::Gap {
+                    cursor: None,
+                    reason: format!("source stream failed: {error}"),
+                },
+            };
+            let terminal = matches!(&update, ChainUpdate::Gap { .. });
+            if sender.send(update).await.is_err() {
+                return;
+            }
+            if terminal {
+                ended_with_gap = true;
+                break;
+            }
+        }
+        if !ended_with_gap
+            && sender
+                .send(ChainUpdate::Gap {
+                    cursor: None,
+                    reason: "source stream closed; canonical recovery required".into(),
+                })
+                .await
+                .is_err()
+        {
+            return;
+        }
+        sleep(reconnect_delay).await;
+    }
+}
+
+async fn source_reducer_loop(
+    indexer: Arc<Mutex<QuoteIndexer>>,
+    source: Arc<dyn ChainEventSource>,
+    filter: ContractFilter,
+    updates: &mut mpsc::Receiver<ChainUpdate>,
+    ready: Arc<Notify>,
+    handoff_block: u64,
+    checkpoint_store: Option<SharedCheckpointStore>,
+) {
+    while let Some(update) = updates.recv().await {
+        let skip = match &update {
+            ChainUpdate::Log(log) => log.cursor.block_number <= handoff_block,
+            ChainUpdate::Head(cursor) => cursor.block_number < handoff_block,
+            _ => false,
+        };
+        if skip {
+            continue;
+        }
+        let persisted_update = update.clone();
+        let apply_result = {
+            let mut indexer = indexer.lock().await;
+            indexer.apply_core_update(update)
+        };
+        if apply_result.is_ok() {
+            let persisted =
+                persist_checkpoint(&indexer, checkpoint_store.as_ref(), vec![persisted_update])
+                    .await;
+            if persisted.is_ok() {
+                ready.notify_waiters();
+            } else {
+                indexer.lock().await.reducer.mark_not_ready();
+            }
+            continue;
+        }
+
+        let recovered = {
+            let mut indexer = indexer.lock().await;
+            indexer
+                .recover_from_source(source.as_ref(), filter.clone())
+                .await
+                .is_ok()
+        };
+        if recovered {
+            if persist_checkpoint(&indexer, checkpoint_store.as_ref(), Vec::new())
+                .await
+                .is_ok()
+            {
+                ready.notify_waiters();
+            } else {
+                indexer.lock().await.reducer.mark_not_ready();
+            }
+        } else {
+            indexer.lock().await.reducer.mark_not_ready();
+        }
+    }
+    indexer.lock().await.reducer.mark_not_ready();
+    ready.notify_waiters();
+}
+
+async fn persist_checkpoint(
+    indexer: &Arc<Mutex<QuoteIndexer>>,
+    store: Option<&SharedCheckpointStore>,
+    updates: Vec<ChainUpdate>,
+) -> Result<(), String> {
+    let Some(store) = store else {
+        return Ok(());
+    };
+    let checkpoint = indexer
+        .lock()
+        .await
+        .checkpoint()
+        .ok_or("cannot persist checkpoint without a cursor")?;
+    store.lock().await.commit(checkpoint, updates)
 }
 
 fn update_order(update: &ChainUpdate) -> (u64, u32, u32, u8) {

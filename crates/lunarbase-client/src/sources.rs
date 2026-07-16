@@ -60,6 +60,16 @@ impl<B: NormalizedBackend + 'static> ChainEventSource for NetworkSource<B> {
     }
 }
 
+/// Construct the network-independent source facade from deployment config.
+/// The backend itself remains specialized (Flashblocks, Monad sidecar, or
+/// Nitro), while the reducer only receives the common `ChainEventSource`.
+pub fn make_network_source<B: NormalizedBackend + 'static>(
+    network: Network,
+    backend: Arc<B>,
+) -> NetworkSource<B> {
+    NetworkSource::new(network, backend)
+}
+
 /// Tracks the Base Flashblocks provisional block boundary. A payload change
 /// starts a new block; there is deliberately no fixed final flashblock index.
 #[derive(Clone, Debug, Default)]
@@ -432,6 +442,28 @@ impl ProvisionalOverlay {
             ));
         }
         Ok(())
+    }
+
+    /// Verify a sealed block and discard the provisional overlay only after
+    /// the canonical event sequence matches byte-for-byte at the model level.
+    /// The returned cursor is the last committed event, or the overlay base
+    /// cursor when the canonical block contained no quote event.
+    pub fn commit_canonical(
+        &mut self,
+        canonical: &[(ChainCursor, QuoteEvent)],
+    ) -> Result<Option<ChainCursor>, SourceError> {
+        self.verify_canonical(canonical)?;
+        let cursor = canonical
+            .last()
+            .map(|(cursor, _)| cursor.clone())
+            .or_else(|| self.base_cursor.clone());
+        self.clear();
+        Ok(cursor)
+    }
+
+    /// Discard all provisional transitions after a source gap or reorg.
+    pub fn discard(&mut self) {
+        self.clear();
     }
 
     pub fn clear(&mut self) {

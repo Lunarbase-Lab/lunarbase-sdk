@@ -272,6 +272,15 @@ impl NormalizedBackend for WsRpcBackend {
                         }
                     };
                     if let Some(previous) = last_head.as_ref() {
+                        if head.cursor.block_number
+                            > previous.cursor.block_number.saturating_add(1)
+                        {
+                            yield Ok(ChainUpdate::Gap {
+                                cursor: Some(previous.cursor.clone()),
+                                reason: "RPC WebSocket skipped one or more block heads; canonical recovery required".into(),
+                            });
+                            break;
+                        }
                         let discontinuity = head.cursor.block_number <= previous.cursor.block_number
                             || (head.cursor.block_number == previous.cursor.block_number.saturating_add(1)
                                 && parent_hash.is_some()
@@ -342,6 +351,10 @@ fn parse_ws_head(value: &Value, chain_id: u64) -> Result<(WsHead, Option<[u8; 32
     let block_number = parse_hex_u64_value(object.get("number"), "head.number")?;
     let block_hash = parse_optional_hash_value(object.get("hash"), "head.hash")?;
     let parent_hash = parse_optional_hash_value(object.get("parentHash"), "head.parentHash")?;
+    let evm_parent_block = object
+        .get("l1BlockNumber")
+        .map(|value| parse_hex_u64_value(Some(value), "head.l1BlockNumber"))
+        .transpose()?;
     Ok((
         WsHead {
             cursor: ChainCursor {
@@ -350,7 +363,7 @@ fn parse_ws_head(value: &Value, chain_id: u64) -> Result<(WsHead, Option<[u8; 32
                 block_hash,
                 transaction_index: None,
                 log_index: None,
-                source_sequence: None,
+                source_sequence: evm_parent_block,
                 source_sub_index: None,
                 commitment: Commitment::Realtime,
             },

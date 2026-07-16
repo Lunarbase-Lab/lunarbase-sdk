@@ -50,14 +50,24 @@ export class ArbitrumNitroNormalizer {
 }
 
 export class ProvisionalOverlay {
+  private baseCursor?: ChainCursor;
   private values: Array<readonly [ChainCursor, import("./model.js").QuoteEvent]> = [];
-  begin(_baseCursor: ChainCursor): void { this.values = []; }
+  begin(baseCursor: ChainCursor): void { this.baseCursor = baseCursor; this.values = []; }
   push(cursor: ChainCursor, event: import("./model.js").QuoteEvent): void { this.values.push([cursor, event]); }
   updates(): readonly (readonly [ChainCursor, import("./model.js").QuoteEvent])[] { return this.values; }
   verifyCanonical(canonical: readonly (readonly [ChainCursor, import("./model.js").QuoteEvent])[]): void { const stable = (value: unknown) => JSON.stringify(value, (_key, item) => typeof item === "bigint" ? `${item}n` : item); if (stable(this.values) !== stable(canonical)) throw new Error("Flashblocks provisional overlay diverged from canonical logs"); }
-  clear(): void { this.values = []; }
+  commitCanonical(canonical: readonly (readonly [ChainCursor, import("./model.js").QuoteEvent])[]): ChainCursor | undefined { this.verifyCanonical(canonical); const cursor = canonical.length > 0 ? canonical[canonical.length - 1]?.[0] : this.baseCursor; this.clear(); return cursor; }
+  discard(): void { this.clear(); }
+  clear(): void { this.baseCursor = undefined; this.values = []; }
 }
 
 export class BaseFlashblocksSource extends NetworkSource { constructor(backend: NormalizedBackend) { super(NetworkValue.Base, backend); } }
 export class MonadExecutionEventsSource extends NetworkSource { constructor(backend: NormalizedBackend) { super(NetworkValue.Monad, backend); } }
 export class ArbitrumNitroSource extends NetworkSource { constructor(backend: NormalizedBackend) { super(NetworkValue.Arbitrum, backend); } }
+
+/** Select the common source facade while preserving the specialized backend. */
+export function makeNetworkSource(network: Network, backend: NormalizedBackend): NetworkSource {
+  if (network === NetworkValue.Base) return new BaseFlashblocksSource(backend);
+  if (network === NetworkValue.Monad) return new MonadExecutionEventsSource(backend);
+  return new ArbitrumNitroSource(backend);
+}

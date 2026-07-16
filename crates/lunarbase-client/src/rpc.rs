@@ -146,7 +146,12 @@ impl RpcHttpClient {
             block_hash: parse_optional_hash(result.get("hash"), "block.hash")?,
             transaction_index: None,
             log_index: None,
-            source_sequence: None,
+            // Nitro exposes the EVM-visible parent-chain block in this
+            // Arbitrum extension. Other networks simply omit the field.
+            source_sequence: result
+                .get("l1BlockNumber")
+                .map(|value| parse_hex_u64(Some(value), "block.l1BlockNumber"))
+                .transpose()?,
             source_sub_index: None,
             commitment,
         })

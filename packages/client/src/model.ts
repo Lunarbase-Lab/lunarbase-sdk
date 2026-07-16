@@ -43,6 +43,6 @@ export interface ClientQuote { outcome: QuoteOutcome; cursor: ChainCursor; commi
 export interface FreshnessPolicy { minimumCommitment: Commitment; maxAgeBlocks?: bigint; }
 export interface IndexerHealth { ready: boolean; commitment: Commitment; cursor?: ChainCursor; contractCodeHash: string; mathCompatibilityVersion: string; }
 export interface CheckpointStore { load(): Checkpoint | undefined; commit(checkpoint: Checkpoint, updates: readonly ChainUpdate[]): void; updates(): readonly ChainUpdate[]; }
-export type RedisAtomicCommand = { kind: "set"; key: string; value: Uint8Array } | { kind: "hset"; key: string; fields: Readonly<Record<string, string>> } | { kind: "xadd"; key: string; value: Uint8Array } | { kind: "xtrim"; key: string; maxLen: number };
+export type RedisAtomicCommand = { kind: "set"; key: string; value: Uint8Array } | { kind: "hset"; key: string; fields: Readonly<Record<string, string>> } | { kind: "xadd"; key: string; value: Uint8Array } | { kind: "xaddIfNew"; key: string; dedupKey: string; dedupTtlSeconds: bigint; value: Uint8Array } | { kind: "xtrim"; key: string; maxLen: number };
 
 export type { Address, LaneState, QuoteContext, QuoteOutcome, QuoteRequest, QuoteState, Word };
