@@ -1,3 +1,9 @@
+//! Snapshot acquisition and the realtime-to-snapshot handoff boundary.
+//!
+//! Bootstrap owns the bounded queue used while a block-tagged state snapshot is
+//! being fetched. It does not apply updates; ordering and reduction are kept in
+//! the `state` context.
+
 use crate::{ChainCursor, ChainUpdate, DeploymentConfig, SourceError};
 use async_trait::async_trait;
 use lunarbase_math::{Address, QuoteState};
@@ -12,7 +18,12 @@ pub struct BootstrapSnapshot {
 }
 
 #[async_trait]
+/// Supplies a block-tagged, code-hash-checked quote snapshot.
 pub trait SnapshotProvider: Send + Sync {
+    /// Reads all state needed for quoting at one coherent block tag.
+    ///
+    /// Implementations should discover or validate lanes from history and
+    /// fetch configured router data at the same tag as the returned cursor.
     async fn snapshot(
         &self,
         config: &DeploymentConfig,
@@ -32,6 +43,8 @@ pub struct BufferedUpdateQueue {
 }
 
 impl BufferedUpdateQueue {
+    /// Creates a bounded queue. Capacity zero is rejected because overflow
+    /// detection is part of the correctness contract.
     pub fn new(capacity: usize) -> Result<Self, SourceError> {
         if capacity == 0 {
             return Err(SourceError::Unavailable(
@@ -45,6 +58,10 @@ impl BufferedUpdateQueue {
         })
     }
 
+    /// Appends one update or poisons the queue on overflow.
+    ///
+    /// Once poisoned, callers must discard the handoff and resnapshot; no
+    /// update is silently evicted.
     pub fn push(&mut self, update: ChainUpdate) -> Result<(), SourceError> {
         if self.poisoned || self.updates.len() >= self.capacity {
             self.poisoned = true;
@@ -56,10 +73,16 @@ impl BufferedUpdateQueue {
         Ok(())
     }
 
+    /// Reports whether a previous overflow made this handoff unusable.
     pub fn is_poisoned(&self) -> bool {
         self.poisoned
     }
 
+    /// Removes all buffered updates in insertion order.
+    ///
+    /// # Errors
+    ///
+    /// Returns a gap if the queue was poisoned.
     pub fn drain(&mut self) -> Result<Vec<ChainUpdate>, SourceError> {
         if self.poisoned {
             return Err(SourceError::Gap(

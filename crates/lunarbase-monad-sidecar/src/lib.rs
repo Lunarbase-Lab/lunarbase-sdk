@@ -23,6 +23,7 @@ pub struct SidecarConfig {
 }
 
 impl SidecarConfig {
+    /// Returns the network identity carried by this sidecar configuration.
     pub fn network(&self) -> Network {
         Network::Monad
     }
@@ -62,6 +63,7 @@ pub fn normalize_txn_log(
     }))
 }
 
+/// Converts parser/ring discontinuity into an explicit recovery marker.
 pub fn normalize_gap(reason: impl Into<String>) -> ChainUpdate {
     ChainUpdate::Gap {
         cursor: None,

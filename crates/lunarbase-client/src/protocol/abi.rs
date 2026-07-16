@@ -1,3 +1,5 @@
+//! ABI topic constants and strict Core event decoding.
+
 use crate::{ContractLog, LogDecodeError, QuoteEvent};
 use lunarbase_math::{Address, U256};
 pub const TOPIC_LANE_ADDED: U256 = U256::from_limbs([
@@ -61,6 +63,7 @@ const TOPIC_WITHDRAWAL_EXECUTED: U256 = U256::from_limbs([
     0x5073d783c0221e6f,
 ]);
 
+/// Returns the `LaneAdded` and `LaneRemoved` topic0 values used for discovery.
 pub fn lane_discovery_topics() -> [U256; 2] {
     [TOPIC_LANE_ADDED, TOPIC_LANE_REMOVED]
 }
@@ -112,6 +115,11 @@ fn decode_bool(word: U256) -> Result<bool, LogDecodeError> {
 /// return `Ok(None)` so callers can share one Core log subscription with other
 /// modules. The returned event deliberately drops non-quote metadata such as
 /// partner operator and position ids.
+///
+/// # Errors
+///
+/// Returns a typed error for missing topic zero, wrong indexed-topic count,
+/// malformed ABI data, non-padded addresses, or invalid booleans.
 pub fn decode_core_event(log: &ContractLog) -> Result<Option<QuoteEvent>, LogDecodeError> {
     let topic0 = *log.topics.first().ok_or(LogDecodeError::MissingTopic0)?;
     let topics = &log.topics;

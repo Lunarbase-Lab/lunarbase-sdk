@@ -5,11 +5,11 @@
 //! index zero and `diff.block_hash` for the payload boundary.  It does not
 //! read unstable `metadata` fields.
 
-use crate::ordering::CursorReorderBuffer;
-use crate::rpc::{parse_rpc_log, RpcError, RpcHttpBackend, RpcHttpClient};
+use crate::sources::rpc::{parse_rpc_log, RpcError, RpcHttpBackend, RpcHttpClient};
 use crate::sources::{
     BaseFlashblocksNormalizer, FlashblockHeader, FlashblockLog, NormalizedBackend, SourceStream,
 };
+use crate::state::ordering::CursorReorderBuffer;
 use crate::{
     BackfillRequest, ChainCursor, ChainUpdate, Commitment, ContractFilter, Network, SourceError,
 };
@@ -60,6 +60,8 @@ pub struct BaseFlashblocksBackend {
 }
 
 impl BaseFlashblocksBackend {
+    /// Creates a Base Flashblocks backend with the default frame and reorder
+    /// bounds.
     pub fn new(rpc: RpcHttpClient, ws_url: impl Into<String>, chain_id: u64) -> Self {
         Self::with_config(
             rpc,
@@ -71,6 +73,11 @@ impl BaseFlashblocksBackend {
         )
     }
 
+    /// Creates a Base Flashblocks backend with explicit provider settings.
+    ///
+    /// Flashblocks are provisional transport data. The normalizer exposes
+    /// them as realtime updates, while the embedded HTTP backend remains the
+    /// canonical recovery path.
     pub fn with_config(rpc: RpcHttpClient, config: BaseFlashblocksConfig, chain_id: u64) -> Self {
         Self {
             http: RpcHttpBackend::new(rpc, Network::Base, chain_id, "finalized"),
@@ -78,6 +85,7 @@ impl BaseFlashblocksBackend {
         }
     }
 
+    /// Returns the immutable Flashblocks transport configuration.
     pub fn config(&self) -> &BaseFlashblocksConfig {
         &self.config
     }

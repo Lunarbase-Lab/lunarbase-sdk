@@ -7,9 +7,16 @@ pub use ruint::aliases::U256;
 #[derive(
     Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize,
 )]
+/// A canonical 20-byte EVM address.
 pub struct Address(pub [u8; 20]);
 impl Address {
     pub const ZERO: Self = Self([0; 20]);
+    /// Parses an optional-`0x` 40-hex-character address.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MathError::InvalidAddress`] for the wrong length or any
+    /// non-hexadecimal byte.
     pub fn from_hex(value: &str) -> Result<Self, MathError> {
         let value = value.strip_prefix("0x").unwrap_or(value);
         if value.len() != 40 {
@@ -22,6 +29,7 @@ impl Address {
         }
         Ok(Self(bytes))
     }
+    /// Formats the address as a lowercase `0x`-prefixed hexadecimal string.
     pub fn to_hex(self) -> String {
         let mut result = String::with_capacity(42);
         result.push_str("0x");
@@ -44,6 +52,7 @@ impl FromStr for Address {
 }
 
 #[derive(Clone, Debug, Eq, thiserror::Error, PartialEq)]
+/// Typed failure at a Solidity-compatible arithmetic or input-width boundary.
 pub enum MathError {
     #[error("division by zero")]
     DivisionByZero,

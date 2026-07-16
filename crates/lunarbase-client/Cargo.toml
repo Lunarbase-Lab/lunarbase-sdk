@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 description = "Network-independent LunarBase quote indexer and source boundary"
 
+[lints]
+workspace = true
+
 [dependencies]
 async-trait.workspace = true
 async-stream.workspace = true

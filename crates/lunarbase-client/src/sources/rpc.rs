@@ -1,4 +1,4 @@
-use crate::abi::{lane_discovery_topics, TOPIC_LANE_ADDED, TOPIC_LANE_REMOVED};
+use crate::protocol::abi::{lane_discovery_topics, TOPIC_LANE_ADDED, TOPIC_LANE_REMOVED};
 use crate::sources::{NormalizedBackend, SourceStream};
 use crate::{
     BackfillRequest, BootstrapSnapshot, ChainCursor, Commitment, ContractLog, DeploymentConfig,
@@ -49,6 +49,8 @@ pub struct RpcHttpClient {
 }
 
 impl RpcHttpClient {
+    /// Creates a JSON-RPC client with a shared HTTP connection pool and
+    /// monotonic request ids.
     pub fn new(endpoint: impl Into<String>) -> Self {
         Self {
             endpoint: Arc::from(endpoint.into()),
@@ -57,10 +59,13 @@ impl RpcHttpClient {
         }
     }
 
+    /// Returns the configured JSON-RPC endpoint.
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
 
+    /// Executes one JSON-RPC request and converts remote/HTTP/shape failures
+    /// into [`RpcError`].
     pub async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let response = self
@@ -99,6 +104,7 @@ impl RpcHttpClient {
             .ok_or_else(|| RpcError::Invalid("missing JSON-RPC result".into()))
     }
 
+    /// Calls `eth_call` at an explicit block tag and returns raw hex bytes.
     pub async fn call_at(
         &self,
         to: Address,
@@ -117,6 +123,7 @@ impl RpcHttpClient {
             .ok_or_else(|| RpcError::Invalid("eth_call result is not a hex string".into()))
     }
 
+    /// Fetches contract runtime bytecode at a block tag for code-hash checks.
     pub async fn get_code(&self, address: Address, block_tag: &str) -> Result<Vec<u8>, RpcError> {
         let result = self
             .call("eth_getCode", json!([address.to_hex(), block_tag]))
@@ -128,6 +135,7 @@ impl RpcHttpClient {
         )
     }
 
+    /// Converts an RPC block header into the normalized snapshot cursor.
     pub async fn block_cursor(
         &self,
         block_tag: &str,
@@ -157,6 +165,7 @@ impl RpcHttpClient {
         })
     }
 
+    /// Fetches and decodes canonical logs for an inclusive block range.
     pub async fn get_logs(
         &self,
         request: &BackfillRequest,
@@ -207,6 +216,7 @@ pub struct RpcHttpBackend {
 }
 
 impl RpcHttpBackend {
+    /// Creates the HTTP-only backend used for canonical snapshots/backfills.
     pub fn new(
         rpc: RpcHttpClient,
         network: Network,
@@ -221,14 +231,17 @@ impl RpcHttpBackend {
         }
     }
 
+    /// Returns the underlying JSON-RPC client.
     pub fn rpc(&self) -> &RpcHttpClient {
         &self.rpc
     }
 
+    /// Returns the network family configured for this backend.
     pub fn network(&self) -> Network {
         self.network
     }
 
+    /// Returns the configured chain id.
     pub fn chain_id(&self) -> u64 {
         self.chain_id
     }
@@ -276,6 +289,7 @@ pub struct RpcSnapshotProvider {
 }
 
 impl RpcSnapshotProvider {
+    /// Creates a block-tagged snapshot provider (`finalized` or `latest`).
     pub fn new(rpc: RpcHttpClient, snapshot_tag: impl Into<String>) -> Self {
         Self {
             rpc,
@@ -283,6 +297,7 @@ impl RpcSnapshotProvider {
         }
     }
 
+    /// Returns the RPC client used for snapshot calls.
     pub fn rpc(&self) -> &RpcHttpClient {
         &self.rpc
     }

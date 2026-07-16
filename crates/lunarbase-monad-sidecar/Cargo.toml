@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 description = "Normalized Monad execution-events sidecar boundary for LunarBase"
 
+[lints]
+workspace = true
+
 [dependencies]
 async-stream.workspace = true
 async-trait.workspace = true

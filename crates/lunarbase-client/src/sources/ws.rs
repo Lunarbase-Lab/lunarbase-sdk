@@ -6,9 +6,9 @@
 //! the network-specific adapters.  A closed socket is deliberately terminal:
 //! callers must recover from the HTTP source before claiming freshness again.
 
-use crate::ordering::CursorReorderBuffer;
-use crate::rpc::{parse_rpc_log, RpcError, RpcHttpBackend, RpcHttpClient};
+use crate::sources::rpc::{parse_rpc_log, RpcError, RpcHttpBackend, RpcHttpClient};
 use crate::sources::{NormalizedBackend, SourceStream};
+use crate::state::ordering::CursorReorderBuffer;
 use crate::{
     BackfillRequest, ChainCursor, ChainUpdate, Commitment, ContractFilter, Network, SourceError,
 };
@@ -39,6 +39,9 @@ impl Default for WsRpcConfig {
 }
 
 impl WsRpcConfig {
+    /// Validates the hard bounds used to protect the WebSocket ingestion
+    /// queue. A zero bound would either make every frame invalid or make the
+    /// reorder buffer unable to accept its first update.
     pub fn validate(&self) -> Result<(), SourceError> {
         if self.max_frame_bytes == 0 || self.reorder_capacity == 0 {
             return Err(SourceError::Unavailable(
@@ -61,6 +64,8 @@ pub struct WsRpcBackend {
 }
 
 impl WsRpcBackend {
+    /// Creates a standard Ethereum WebSocket backend with conservative
+    /// defaults for frame size and out-of-order buffering.
     pub fn new(
         rpc: RpcHttpClient,
         ws_endpoint: impl Into<String>,
@@ -78,6 +83,11 @@ impl WsRpcBackend {
         )
     }
 
+    /// Creates a WebSocket backend with explicit resource limits.
+    ///
+    /// The HTTP client remains the source of block-tagged snapshots and
+    /// canonical backfills; `ws_endpoint` is used only for realtime logs and
+    /// head notifications.
     pub fn with_config(
         rpc: RpcHttpClient,
         ws_endpoint: impl Into<String>,
@@ -93,10 +103,12 @@ impl WsRpcBackend {
         }
     }
 
+    /// Returns the configured WebSocket endpoint.
     pub fn endpoint(&self) -> &str {
         &self.ws_endpoint
     }
 
+    /// Returns the transport limits used by this backend.
     pub fn config(&self) -> &WsRpcConfig {
         &self.config
     }

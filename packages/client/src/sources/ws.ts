@@ -1,17 +1,22 @@
-import type { BackfillRequest, ChainCursor, ChainUpdate, Commitment, ContractFilter, ContractLog, Network } from "./model.js";
-import { Commitment as CommitmentValue } from "./model.js";
-import { CursorReorderBuffer } from "./ordering.js";
+import type { BackfillRequest, ChainCursor, ChainUpdate, ContractFilter, ContractLog, Network } from "../model.js";
+import { Commitment as CommitmentValue } from "../model.js";
+import { CursorReorderBuffer } from "../state/ordering.js";
 import { JsonRpcHttpClient, parseHash, parseHexU64, parseRpcLog, RpcError } from "./rpc.js";
-import type { NormalizedBackend } from "./sources.js";
+import type { NormalizedBackend } from "./core.js";
 import { RpcHttpBackend } from "./rpc.js";
 
+/** Resource bounds for generic Ethereum WebSocket ingestion. */
 export interface WsRpcConfig {
   readonly maxFrameBytes: number;
   readonly reorderCapacity: number;
   readonly queueCapacity: number;
 }
 
-export const DEFAULT_WS_RPC_CONFIG: WsRpcConfig = Object.freeze({ maxFrameBytes: 256 * 1024, reorderCapacity: 4096, queueCapacity: 4096 });
+export const DEFAULT_WS_RPC_CONFIG: WsRpcConfig = Object.freeze({
+  maxFrameBytes: 256 * 1024,
+  reorderCapacity: 4096,
+  queueCapacity: 4096,
+});
 
 export interface WebSocketLike {
   readonly readyState?: number;
@@ -22,6 +27,7 @@ export interface WebSocketLike {
 }
 
 export type SocketEvent = { data?: unknown; error?: unknown; reason?: string };
+/** WebSocket factory abstraction used for browser, Node, and test transports. */
 export type WebSocketFactory = (url: string) => WebSocketLike;
 
 /**
@@ -34,6 +40,7 @@ export class WsRpcBackend implements NormalizedBackend {
   private readonly factory: WebSocketFactory;
   readonly config: WsRpcConfig;
 
+  /** Creates a WebSocket backend with bounded frame, queue, and reorder memory. */
   constructor(
     readonly rpc: JsonRpcHttpClient,
     readonly wsEndpoint: string,
@@ -48,14 +55,17 @@ export class WsRpcBackend implements NormalizedBackend {
     this.http = new RpcHttpBackend(rpc, network, chainId, snapshotTag);
   }
 
+  /** Delegates the authoritative snapshot cursor to HTTP. */
   snapshotCursor(network: Network): Promise<ChainCursor> {
     return this.http.snapshotCursor(network);
   }
 
+  /** Delegates canonical log backfill to HTTP. */
   backfill(request: BackfillRequest): Promise<readonly ContractLog[]> {
     return this.http.backfill(request);
   }
 
+  /** Opens logs and new-head subscriptions and emits normalized updates/gaps. */
   subscribe(network: Network, filter: ContractFilter, signal?: AbortSignal): AsyncIterable<ChainUpdate> {
     if (network !== this.network) throw new RpcError("INVALID", "RPC WebSocket backend network mismatch");
     const config = this.config;
@@ -63,7 +73,12 @@ export class WsRpcBackend implements NormalizedBackend {
     return this.readSocket(socket, filter, config, signal);
   }
 
-  private async *readSocket(socket: WebSocketLike, filter: ContractFilter, config: WsRpcConfig, signal?: AbortSignal): AsyncIterable<ChainUpdate> {
+  private async *readSocket(
+    socket: WebSocketLike,
+    filter: ContractFilter,
+    config: WsRpcConfig,
+    signal?: AbortSignal,
+  ): AsyncIterable<ChainUpdate> {
     const queue = new BoundedFrameQueue(config.queueCapacity);
     const onOpen = () => queue.open();
     const onMessage = (event: SocketEvent) => {
@@ -76,8 +91,9 @@ export class WsRpcBackend implements NormalizedBackend {
         queue.push(frame);
       }
     };
-    const onError = (event: SocketEvent) => queue.fail(event.error instanceof Error ? event.error : new Error("RPC WebSocket error"));
-    const onClose = (event: SocketEvent) => event.reason ? queue.fail(new Error(event.reason)) : queue.close();
+    const onError = (event: SocketEvent) =>
+      queue.fail(event.error instanceof Error ? event.error : new Error("RPC WebSocket error"));
+    const onClose = (event: SocketEvent) => (event.reason ? queue.fail(new Error(event.reason)) : queue.close());
     socket.addEventListener("open", onOpen);
     socket.addEventListener("message", onMessage);
     socket.addEventListener("error", onError);
@@ -109,7 +125,10 @@ export class WsRpcBackend implements NormalizedBackend {
         try {
           frame = await queue.next(signal);
         } catch (error) {
-          yield gap(`RPC WebSocket failed; canonical recovery required: ${error instanceof Error ? error.message : String(error)}`, lastHead);
+          yield gap(
+            `RPC WebSocket failed; canonical recovery required: ${error instanceof Error ? error.message : String(error)}`,
+            lastHead,
+          );
           return;
         }
         if (frame === undefined) {
@@ -120,7 +139,10 @@ export class WsRpcBackend implements NormalizedBackend {
         try {
           value = JSON.parse(frame) as Record<string, unknown>;
         } catch (error) {
-          yield gap(`invalid RPC WebSocket JSON; canonical recovery required: ${error instanceof Error ? error.message : String(error)}`, lastHead);
+          yield gap(
+            `invalid RPC WebSocket JSON; canonical recovery required: ${error instanceof Error ? error.message : String(error)}`,
+            lastHead,
+          );
           return;
         }
         if (value.error) {
@@ -145,7 +167,10 @@ export class WsRpcBackend implements NormalizedBackend {
           try {
             log = parseRpcLog(params.result, this.chainId, CommitmentValue.Realtime);
           } catch (error) {
-            yield gap(`invalid RPC log notification: ${error instanceof Error ? error.message : String(error)}`, lastHead);
+            yield gap(
+              `invalid RPC log notification: ${error instanceof Error ? error.message : String(error)}`,
+              lastHead,
+            );
             return;
           }
           try {
@@ -163,7 +188,10 @@ export class WsRpcBackend implements NormalizedBackend {
           try {
             parsed = parseHead(params.result, this.chainId);
           } catch (error) {
-            yield gap(`invalid RPC head notification: ${error instanceof Error ? error.message : String(error)}`, lastHead);
+            yield gap(
+              `invalid RPC head notification: ${error instanceof Error ? error.message : String(error)}`,
+              lastHead,
+            );
             return;
           }
           if (lastHead) {
@@ -171,8 +199,12 @@ export class WsRpcBackend implements NormalizedBackend {
               yield gap("RPC WebSocket skipped one or more block heads; canonical recovery required", lastHead);
               return;
             }
-            const discontinuity = parsed.cursor.blockNumber <= lastHead.blockNumber
-              || (parsed.cursor.blockNumber === lastHead.blockNumber + 1n && parsed.parentHash !== undefined && lastHead.blockHash !== undefined && parsed.parentHash !== lastHead.blockHash);
+            const discontinuity =
+              parsed.cursor.blockNumber <= lastHead.blockNumber ||
+              (parsed.cursor.blockNumber === lastHead.blockNumber + 1n &&
+                parsed.parentHash !== undefined &&
+                lastHead.blockHash !== undefined &&
+                parsed.parentHash !== lastHead.blockHash);
             if (discontinuity) {
               yield { kind: "Reorg", oldHead: lastHead, newHead: parsed.cursor };
               reorder = new CursorReorderBuffer(config.reorderCapacity);
@@ -196,13 +228,15 @@ export class WsRpcBackend implements NormalizedBackend {
 }
 
 function validateConfig(config: WsRpcConfig): WsRpcConfig {
-  for (const [name, value] of Object.entries(config)) if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`WS ${name} must be a positive safe integer`);
+  for (const [name, value] of Object.entries(config))
+    if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`WS ${name} must be a positive safe integer`);
   return Object.freeze(config);
 }
 
 function subscriptionRequest(id: number, filter: ContractFilter): string {
   const options: Record<string, unknown> = { address: filter.address };
-  if (filter.topics.length > 0) options.topics = filter.topics.map((topic) => `0x${topic.toString(16).padStart(64, "0")}`);
+  if (filter.topics.length > 0)
+    options.topics = filter.topics.map((topic) => `0x${topic.toString(16).padStart(64, "0")}`);
   return JSON.stringify({ jsonrpc: "2.0", id, method: "eth_subscribe", params: ["logs", options] });
 }
 
@@ -210,8 +244,23 @@ function parseHead(value: unknown, chainId: bigint): { cursor: ChainCursor; pare
   if (!value || typeof value !== "object") throw new RpcError("INVALID", "newHeads result is not an object");
   const object = value as Record<string, unknown>;
   const blockHash = object.hash === null || object.hash === undefined ? undefined : parseHash(object.hash, "head.hash");
-  const parentHash = object.parentHash === null || object.parentHash === undefined ? undefined : parseHash(object.parentHash, "head.parentHash");
-  return { cursor: { chainId, blockNumber: parseHexU64(object.number, "head.number"), blockHash, sourceSequence: object.l1BlockNumber === undefined || object.l1BlockNumber === null ? undefined : parseHexU64(object.l1BlockNumber, "head.l1BlockNumber"), commitment: CommitmentValue.Realtime }, parentHash };
+  const parentHash =
+    object.parentHash === null || object.parentHash === undefined
+      ? undefined
+      : parseHash(object.parentHash, "head.parentHash");
+  return {
+    cursor: {
+      chainId,
+      blockNumber: parseHexU64(object.number, "head.number"),
+      blockHash,
+      sourceSequence:
+        object.l1BlockNumber === undefined || object.l1BlockNumber === null
+          ? undefined
+          : parseHexU64(object.l1BlockNumber, "head.l1BlockNumber"),
+      commitment: CommitmentValue.Realtime,
+    },
+    parentHash,
+  };
 }
 
 function gap(reason: string, cursor?: ChainCursor): ChainUpdate {
@@ -221,10 +270,12 @@ function gap(reason: string, cursor?: ChainCursor): ChainUpdate {
 function decodeFrame(data: unknown): string | undefined {
   if (typeof data === "string") return data;
   if (data instanceof ArrayBuffer) return new TextDecoder().decode(data);
-  if (ArrayBuffer.isView(data)) return new TextDecoder().decode(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+  if (ArrayBuffer.isView(data))
+    return new TextDecoder().decode(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
   return undefined;
 }
 
+/** Creates the platform WebSocket or throws an actionable injection error. */
 export function defaultWebSocketFactory(url: string): WebSocketLike {
   const constructor = (globalThis as typeof globalThis & { WebSocket?: new (url: string) => WebSocketLike }).WebSocket;
   if (!constructor) throw new RpcError("INVALID", "global WebSocket is unavailable; inject a WebSocketFactory");
@@ -238,13 +289,16 @@ export class BoundedFrameQueue {
   private ended = false;
   private failure?: Error;
 
+  /** Creates a bounded frame queue for one socket reader. */
   constructor(private readonly capacity: number) {}
 
+  /** Marks the socket open and releases open waiters. */
   open(): void {
     this.opened = true;
     this.resolveWaiters();
   }
 
+  /** Enqueues one frame or fails closed on overflow. */
   push(value: string): void {
     if (this.ended) return;
     if (this.values.length >= this.capacity) {
@@ -255,6 +309,7 @@ export class BoundedFrameQueue {
     this.resolveWaiters();
   }
 
+  /** Terminates the queue with a transport error. */
   fail(error: Error): void {
     if (this.ended) return;
     this.failure = error;
@@ -262,18 +317,21 @@ export class BoundedFrameQueue {
     this.resolveWaiters();
   }
 
+  /** Terminates the queue normally. */
   close(): void {
     if (this.ended) return;
     this.ended = true;
     this.resolveWaiters();
   }
 
+  /** Waits for socket open or propagates close/failure. */
   async waitUntilOpen(signal?: AbortSignal): Promise<void> {
     if (this.opened) return;
     await this.wait(signal);
     if (!this.opened) throw this.failure ?? new Error("RPC WebSocket closed before open");
   }
 
+  /** Reads the next frame, waiting until data or terminal state exists. */
   async next(signal?: AbortSignal): Promise<string | undefined> {
     if (this.failure) throw this.failure;
     const value = this.values.shift();
@@ -285,9 +343,16 @@ export class BoundedFrameQueue {
   private wait(signal?: AbortSignal): Promise<string | undefined> {
     if (signal?.aborted) return Promise.resolve(undefined);
     return new Promise((resolve, reject) => {
-      const onAbort = () => { signal?.removeEventListener("abort", onAbort); resolve(undefined); };
+      const onAbort = () => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve(undefined);
+      };
       signal?.addEventListener("abort", onAbort, { once: true });
-      this.waiters.push((value) => { signal?.removeEventListener("abort", onAbort); if (this.failure) reject(this.failure); else resolve(value); });
+      this.waiters.push((value) => {
+        signal?.removeEventListener("abort", onAbort);
+        if (this.failure) reject(this.failure);
+        else resolve(value);
+      });
     });
   }
 

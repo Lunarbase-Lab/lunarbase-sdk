@@ -1,3 +1,5 @@
+//! Versioned binary encoding for checkpoints and normalized updates.
+
 use crate::{ChainCursor, ChainUpdate, Checkpoint, Commitment, ContractLog};
 use lunarbase_math::{Address, QuoteState, U256};
 
@@ -268,6 +270,14 @@ impl<'a> BinaryReader<'a> {
 
 /// Encode a checkpoint with fixed-width U256/address fields. This format is
 /// shared by the Redis store and can be implemented by non-Rust clients.
+///
+/// The `LBQ1` header, explicit option flags, fixed-width integers, and sorted
+/// state maps make the result stable across Rust and TypeScript processes.
+///
+/// # Errors
+///
+/// Returns an error if a string/collection length or fixed-width field cannot
+/// be represented by the schema.
 pub fn encode_checkpoint(checkpoint: &Checkpoint) -> Result<Vec<u8>, String> {
     let mut encoder = BinaryEncoder::new();
     encoder.u16(checkpoint.schema_version);
@@ -278,6 +288,10 @@ pub fn encode_checkpoint(checkpoint: &Checkpoint) -> Result<Vec<u8>, String> {
     Ok(encoder.bytes)
 }
 
+/// Decodes and validates one `LBQ1` checkpoint payload.
+///
+/// Trailing bytes, invalid enum tags, malformed UTF-8, and truncated fields
+/// are rejected so a partially written payload cannot become ready state.
 pub fn decode_checkpoint(bytes: &[u8]) -> Result<Checkpoint, String> {
     let mut reader = BinaryReader::new(bytes)?;
     let schema_version = reader.u16()?;
@@ -300,6 +314,10 @@ pub fn decode_checkpoint(bytes: &[u8]) -> Result<Checkpoint, String> {
     })
 }
 
+/// Encodes one normalized update without JSON numbers or floating point.
+///
+/// U256 values are big-endian 32-byte fields, addresses are 20-byte fields,
+/// and all optional cursor components carry explicit presence flags.
 pub fn encode_update(update: &ChainUpdate) -> Vec<u8> {
     let mut encoder = BinaryEncoder { bytes: Vec::new() };
     match update {
@@ -338,6 +356,7 @@ pub fn encode_update(update: &ChainUpdate) -> Vec<u8> {
     encoder.bytes
 }
 
+/// Decodes one normalized update and rejects malformed/trailing payload data.
 pub fn decode_update(bytes: &[u8]) -> Result<ChainUpdate, String> {
     let mut reader = BinaryReader::raw(bytes);
     let update = match reader.u8()? {

@@ -1,25 +1,132 @@
-import { encodeLaneSlot0, quote, solidityExactInAmount, solidityExactOutAmountForRequest, type LaneState, type QuoteRequest, type QuoteState } from "./index.js";
+import {
+  encodeLaneSlot0,
+  quote,
+  solidityExactInAmount,
+  solidityExactOutAmountForRequest,
+  type LaneState,
+  type QuoteRequest,
+  type QuoteState,
+} from "./index.js";
 
 declare const process: { argv: string[]; stdout: { write(value: string): void } };
 declare const Bun: { file(path: string): { text(): Promise<string> } };
 
-type LaneVector = { price: string; askFeeBps: string; bidFeeBps: string; latestUpdateBlock: string; exists: boolean; paused: boolean; blockDelay: string; slippageKBps: string; principal: string };
-type Vector = { cash: string; router: string; assetIn: string; assetOut: string; mode: "ExactIn" | "ExactOut"; amount: string; executionBlockNumber: string; stateVersion: string; blacklistFeeMultiplier: string; whitelisted: boolean; partnerFeeBps: string; laneIn: LaneVector | null; laneOut: LaneVector | null };
+type LaneVector = {
+  price: string;
+  askFeeBps: string;
+  bidFeeBps: string;
+  latestUpdateBlock: string;
+  exists: boolean;
+  paused: boolean;
+  blockDelay: string;
+  slippageKBps: string;
+  principal: string;
+};
+type Vector = {
+  cash: string;
+  router: string;
+  assetIn: string;
+  assetOut: string;
+  mode: "ExactIn" | "ExactOut";
+  amount: string;
+  executionBlockNumber: string;
+  stateVersion: string;
+  blacklistFeeMultiplier: string;
+  whitelisted: boolean;
+  partnerFeeBps: string;
+  laneIn: LaneVector | null;
+  laneOut: LaneVector | null;
+};
 
 const value = (input: string): bigint => BigInt(input);
-const lane = (input: LaneVector): LaneState => ({ slot0: encodeLaneSlot0({ price: value(input.price), askFeeBps: value(input.askFeeBps), bidFeeBps: value(input.bidFeeBps), pricePushThreshold: 0n, thresholdEnabled: false, latestUpdateBlock: value(input.latestUpdateBlock), reservedHighBits: 0n }), exists: input.exists, paused: input.paused, blockDelay: value(input.blockDelay), slippageKBps: value(input.slippageKBps) });
+const lane = (input: LaneVector): LaneState => ({
+  slot0: encodeLaneSlot0({
+    price: value(input.price),
+    askFeeBps: value(input.askFeeBps),
+    bidFeeBps: value(input.bidFeeBps),
+    pricePushThreshold: 0n,
+    thresholdEnabled: false,
+    latestUpdateBlock: value(input.latestUpdateBlock),
+    reservedHighBits: 0n,
+  }),
+  exists: input.exists,
+  paused: input.paused,
+  blockDelay: value(input.blockDelay),
+  slippageKBps: value(input.slippageKBps),
+});
 function build(vector: Vector): { state: QuoteState; request: QuoteRequest; executionBlockNumber: bigint } {
-  const state = { cash: vector.cash, lanes: new Map<string, LaneState>(), totalPrincipalAmount: new Map<string, bigint>(), whitelist: new Map<string, boolean>([[vector.router, vector.whitelisted]]), blacklistFeeMultiplier: value(vector.blacklistFeeMultiplier), partnerFeeBps: new Map<string, bigint>(), stateVersion: value(vector.stateVersion) };
+  const state = {
+    cash: vector.cash,
+    lanes: new Map<string, LaneState>(),
+    totalPrincipalAmount: new Map<string, bigint>(),
+    whitelist: new Map<string, boolean>([[vector.router, vector.whitelisted]]),
+    blacklistFeeMultiplier: value(vector.blacklistFeeMultiplier),
+    partnerFeeBps: new Map<string, bigint>(),
+    stateVersion: value(vector.stateVersion),
+  };
   const feeAsset = vector.mode === "ExactIn" ? vector.assetOut : vector.assetIn;
   state.partnerFeeBps.set(`${vector.router.toLowerCase()}:${feeAsset.toLowerCase()}`, value(vector.partnerFeeBps));
-  for (const [asset, input] of [[vector.assetIn, vector.laneIn], [vector.assetOut, vector.laneOut]] as const) if (input) { state.lanes.set(asset, lane(input)); state.totalPrincipalAmount.set(asset, value(input.principal)); }
-  return { state, request: { router: vector.router, assetIn: vector.assetIn, assetOut: vector.assetOut, amount: value(vector.amount), mode: vector.mode }, executionBlockNumber: value(vector.executionBlockNumber) };
+  for (const [asset, input] of [
+    [vector.assetIn, vector.laneIn],
+    [vector.assetOut, vector.laneOut],
+  ] as const)
+    if (input) {
+      state.lanes.set(asset, lane(input));
+      state.totalPrincipalAmount.set(asset, value(input.principal));
+    }
+  return {
+    state,
+    request: {
+      router: vector.router,
+      assetIn: vector.assetIn,
+      assetOut: vector.assetOut,
+      amount: value(vector.amount),
+      mode: vector.mode,
+    },
+    executionBlockNumber: value(vector.executionBlockNumber),
+  };
 }
-function word(valueToWrite: bigint): Uint8Array { const output = new Uint8Array(32); let valueToShift = valueToWrite; for (let index = 31; index >= 0; index -= 1) { output[index] = Number(valueToShift & 0xffn); valueToShift >>= 8n; } return output; }
-function output(vector: Vector): Uint8Array { const built = build(vector); const outcome = quote(built.request, { cash: built.state.cash, executionBlockNumber: built.executionBlockNumber, stateVersion: built.state.stateVersion }, built.state); const words = outcome.kind === "Available" ? [1n, outcome.result.amountIn, outcome.result.amountOut, BigInt(outcome.result.feeAsset), outcome.result.feeAmount, outcome.result.partnerFee, outcome.result.treasuryFee] : [0n, solidityExactInAmount(outcome), solidityExactOutAmountForRequest(built.request, outcome), 0n, 0n, 0n, 0n]; const bytes = new Uint8Array(words.length * 32); words.forEach((item, index) => bytes.set(word(item), index * 32)); return bytes; }
+function word(valueToWrite: bigint): Uint8Array {
+  const output = new Uint8Array(32);
+  let valueToShift = valueToWrite;
+  for (let index = 31; index >= 0; index -= 1) {
+    output[index] = Number(valueToShift & 0xffn);
+    valueToShift >>= 8n;
+  }
+  return output;
+}
+function output(vector: Vector): Uint8Array {
+  const built = build(vector);
+  const outcome = quote(
+    built.request,
+    {
+      cash: built.state.cash,
+      executionBlockNumber: built.executionBlockNumber,
+      stateVersion: built.state.stateVersion,
+    },
+    built.state,
+  );
+  const words =
+    outcome.kind === "Available"
+      ? [
+          1n,
+          outcome.result.amountIn,
+          outcome.result.amountOut,
+          BigInt(outcome.result.feeAsset),
+          outcome.result.feeAmount,
+          outcome.result.partnerFee,
+          outcome.result.treasuryFee,
+        ]
+      : [0n, solidityExactInAmount(outcome), solidityExactOutAmountForRequest(built.request, outcome), 0n, 0n, 0n, 0n];
+  const bytes = new Uint8Array(words.length * 32);
+  words.forEach((item, index) => bytes.set(word(item), index * 32));
+  return bytes;
+}
 
 const args = process.argv;
 const file = args[args.indexOf("--file") + 1];
 const index = Number(args[args.indexOf("--index") + 1]);
 const fixture = JSON.parse(await Bun.file(file).text()) as { vectors: Vector[] };
-process.stdout.write(`hex:${[...output(fixture.vectors[index])].map((item) => item.toString(16).padStart(2, "0")).join("")}`);
+process.stdout.write(
+  `hex:${[...output(fixture.vectors[index])].map((item) => item.toString(16).padStart(2, "0")).join("")}`,
+);

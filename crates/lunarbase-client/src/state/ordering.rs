@@ -1,3 +1,5 @@
+//! Bounded cursor ordering for realtime source updates.
+
 use crate::{ChainCursor, ChainUpdate, SourceError};
 use std::collections::BTreeMap;
 
@@ -17,6 +19,7 @@ pub struct CursorReorderBuffer {
 }
 
 impl CursorReorderBuffer {
+    /// Creates a bounded deterministic reorder buffer.
     pub fn new(capacity: usize) -> Result<Self, SourceError> {
         if capacity == 0 {
             return Err(SourceError::Unavailable(
@@ -30,14 +33,17 @@ impl CursorReorderBuffer {
         })
     }
 
+    /// Returns the number of updates waiting for a watermark.
     pub fn len(&self) -> usize {
         self.pending.len()
     }
 
+    /// Returns whether no update is currently buffered.
     pub fn is_empty(&self) -> bool {
         self.pending.is_empty()
     }
 
+    /// Returns whether the buffer has entered fail-closed state.
     pub fn is_poisoned(&self) -> bool {
         self.poisoned
     }
@@ -45,6 +51,12 @@ impl CursorReorderBuffer {
     /// Returns `true` when the update was inserted and `false` for an exact
     /// duplicate. A different payload at the same event cursor is a
     /// continuity failure, not something that can be resolved by ordering.
+    /// Inserts an update, deduplicating an identical cursor/payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns a gap for overflow, conflicting payloads at one cursor, or any
+    /// insertion after the buffer has already been poisoned.
     pub fn push(&mut self, update: ChainUpdate) -> Result<bool, SourceError> {
         if self.poisoned {
             return Err(SourceError::Gap(
@@ -74,6 +86,7 @@ impl CursorReorderBuffer {
     /// Drain updates through a watermark. A head without transaction/log
     /// coordinates is treated as the end of its block, which is the safe
     /// boundary for block-level head notifications.
+    /// Releases all updates at or before a block/log watermark in cursor order.
     pub fn drain_through(&mut self, watermark: &ChainCursor) -> Vec<ChainUpdate> {
         let key = watermark_key(watermark);
         let keys: Vec<_> = self.pending.range(..=key).map(|(key, _)| *key).collect();
@@ -82,6 +95,7 @@ impl CursorReorderBuffer {
             .collect()
     }
 
+    /// Releases every buffered update in deterministic key order.
     pub fn drain_all(&mut self) -> Vec<ChainUpdate> {
         std::mem::take(&mut self.pending).into_values().collect()
     }

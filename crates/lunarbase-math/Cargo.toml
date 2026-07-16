@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 description = "Pure U256 LunarBase off-chain quote math"
 
+[lints]
+workspace = true
+
 [dependencies]
 ruint.workspace = true
 serde.workspace = true

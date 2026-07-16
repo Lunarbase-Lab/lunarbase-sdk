@@ -19,21 +19,50 @@ can be checked against the same vectors and wire formats.
 │   │   └── lib.rs                # small public facade
 │   ├── lunarbase-client/src/
 │   │   ├── model.rs              # cursors, updates, deployment and errors
-│   │   ├── sources.rs            # common source boundary and overlays
-│   │   ├── ws.rs                 # bounded JSON-RPC WebSocket source
-│   │   ├── flashblocks.rs        # Base pendingLogs/newFlashblocks adapter
-│   │   ├── nitro.rs              # executed Arbitrum Nitro adapter
 │   │   ├── bootstrap.rs          # snapshot handoff and bounded buffering
-│   │   ├── abi.rs                # pinned Core event decoder
-│   │   ├── reducer.rs             # ordered single-writer state transitions
-│   │   ├── codec.rs               # checkpoint/update binary wire format
-│   │   ├── persistence.rs         # Redis and in-memory stores
-│   │   ├── indexer.rs              # lifecycle, freshness and quote facade
-│   │   └── lib.rs                 # client facade/re-exports
+│   │   ├── persistence.rs        # Redis and in-memory stores
+│   │   ├── indexer.rs            # lifecycle, freshness and quote facade
+│   │   ├── protocol/             # ABI decoder and binary wire codecs
+│   │   │   ├── abi.rs
+│   │   │   ├── codec.rs
+│   │   │   └── mod.rs
+│   │   ├── sources/              # common boundary and network adapters
+│   │   │   ├── mod.rs            # normalized source model and overlays
+│   │   │   ├── rpc.rs            # canonical JSON-RPC snapshot/backfill
+│   │   │   ├── ws.rs             # bounded JSON-RPC WebSocket source
+│   │   │   ├── flashblocks.rs    # Base pendingLogs/newFlashblocks
+│   │   │   └── nitro.rs           # executed Arbitrum Nitro adapter
+│   │   ├── state/                # ordered single-writer state machinery
+│   │   │   ├── ordering.rs
+│   │   │   ├── reducer.rs
+│   │   │   └── mod.rs
+│   │   └── lib.rs                # client facade/re-exports
 │   └── lunarbase-monad-sidecar/  # normalized execution-event WebSocket sidecar
 ├── packages/
 │   ├── math/src/                 # bigint counterpart of lunarbase-math
-│   └── client/src/                # TypeScript counterpart and network adapters
+│   └── client/src/
+│       ├── model.ts              # public domain model and client metadata
+│       ├── bootstrap.ts           # snapshot handoff helpers
+│       ├── persistence.ts         # Redis/in-memory checkpoint stores
+│       ├── indexer.ts             # lifecycle, freshness and quote facade
+│       ├── fixtures.ts            # normalized replay fixture parser
+│       ├── protocol/              # ABI decoder and checkpoint/update codecs
+│       │   ├── abi.ts
+│       │   ├── codec.ts
+│       │   └── index.ts
+│       ├── state/                 # cursor ordering and reducer
+│       │   ├── ordering.ts
+│       │   ├── reducer.ts
+│       │   └── index.ts
+│       ├── sources/               # normalized source and network adapters
+│       │   ├── core.ts            # common source boundary and overlays
+│       │   ├── rpc.ts             # canonical JSON-RPC snapshot/backfill
+│       │   ├── ws.ts              # bounded JSON-RPC WebSocket source
+│       │   ├── flashblocks.ts     # Base Flashblocks adapter
+│       │   ├── monad.ts           # Monad parser sidecar adapter
+│       │   ├── nitro.ts           # executed Arbitrum Nitro adapter
+│       │   └── index.ts
+│       └── index.ts               # package facade/re-exports
 └── SPECIFICATION.md              # protocol and acceptance requirements
 ```
 

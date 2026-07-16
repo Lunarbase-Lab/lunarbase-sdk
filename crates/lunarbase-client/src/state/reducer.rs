@@ -1,3 +1,5 @@
+//! Single-writer quote state reducer.
+
 use crate::{ChainCursor, Checkpoint, QuoteEvent, MATH_COMPATIBILITY_VERSION, SCHEMA_VERSION};
 use lunarbase_math::{QuoteState, U256};
 use thiserror::Error;
@@ -28,6 +30,7 @@ pub struct QuoteReducer {
 }
 
 impl QuoteReducer {
+    /// Creates a not-ready reducer around a block-tagged quote state.
     pub fn new(state: QuoteState) -> Self {
         Self {
             state,
@@ -35,6 +38,7 @@ impl QuoteReducer {
             ready: false,
         }
     }
+    /// Restores a ready reducer from a compatibility-checked checkpoint.
     pub fn from_checkpoint(checkpoint: Checkpoint) -> Self {
         Self {
             state: checkpoint.state,
@@ -42,21 +46,27 @@ impl QuoteReducer {
             ready: true,
         }
     }
+    /// Returns the current immutable state view.
     pub fn state(&self) -> &QuoteState {
         &self.state
     }
+    /// Returns the last accepted cursor, if bootstrap or replay has occurred.
     pub fn cursor(&self) -> Option<&ChainCursor> {
         self.cursor.as_ref()
     }
+    /// Reports whether the state may be served as fresh.
     pub fn is_ready(&self) -> bool {
         self.ready
     }
+    /// Marks the state unavailable until canonical recovery completes.
     pub fn mark_not_ready(&mut self) {
         self.ready = false;
     }
+    /// Publishes the current state as ready after all invariants pass.
     pub fn publish_ready(&mut self) {
         self.ready = true;
     }
+    /// Installs the initial snapshot cursor and marks the reducer ready.
     pub fn bootstrap(&mut self, cursor: ChainCursor) {
         self.cursor = Some(cursor);
         self.ready = true;
@@ -65,6 +75,10 @@ impl QuoteReducer {
     /// Observe a source head without mutating quote state. Heads advance the
     /// durable cursor and can promote commitment for the current block, but a
     /// late realtime head must never downgrade a finalized cursor.
+    /// Advances a block-level cursor without changing quote state.
+    ///
+    /// Same-block commitment upgrades are accepted; older heads are ignored;
+    /// block-hash conflicts and chain-id mismatches fail closed.
     pub fn observe_head(&mut self, head: ChainCursor) -> Result<(), ReducerError> {
         if let Some(current) = &mut self.cursor {
             if current.chain_id != head.chain_id {
@@ -94,6 +108,10 @@ impl QuoteReducer {
         Ok(())
     }
 
+    /// Applies one decoded quote event atomically to state and cursor.
+    ///
+    /// Duplicate cursors are idempotent. Arithmetic or ordering errors roll
+    /// back both state and cursor so callers can trigger canonical recovery.
     pub fn apply(&mut self, cursor: ChainCursor, event: QuoteEvent) -> Result<(), ReducerError> {
         if let Some(previous) = &self.cursor {
             if previous.chain_id != cursor.chain_id {
@@ -213,6 +231,7 @@ impl QuoteReducer {
         Ok(())
     }
 
+    /// Serializes the current state and cursor as a durable checkpoint.
     pub fn checkpoint(&self, code_hash: [u8; 32]) -> Option<Checkpoint> {
         Some(Checkpoint {
             schema_version: SCHEMA_VERSION,

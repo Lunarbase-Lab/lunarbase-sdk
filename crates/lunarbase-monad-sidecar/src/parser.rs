@@ -34,6 +34,7 @@ impl Default for MonadParserConfig {
 }
 
 impl MonadParserConfig {
+    /// Validates parser endpoint, chain id, and frame-memory bounds.
     pub fn validate(&self) -> Result<(), SourceError> {
         if !(self.ws_url.starts_with("ws://") || self.ws_url.starts_with("wss://")) {
             return Err(SourceError::Unavailable(
@@ -51,7 +52,9 @@ impl MonadParserConfig {
 
 #[async_trait]
 pub trait MonadCanonicalBackend: Send + Sync {
+    /// Returns the canonical/finalized cursor used for recovery.
     async fn snapshot_cursor(&self) -> Result<ChainCursor, SourceError>;
+    /// Backfills canonical logs for the requested inclusive range.
     async fn backfill(&self, request: BackfillRequest) -> Result<Vec<ContractLog>, SourceError>;
 }
 
@@ -80,6 +83,7 @@ pub struct MonadRpcCanonicalBackend {
 }
 
 impl MonadRpcCanonicalBackend {
+    /// Creates a finalized Monad JSON-RPC recovery backend.
     pub fn new(endpoint: impl Into<String>, chain_id: u64) -> Self {
         Self {
             backend: RpcHttpBackend::new(
@@ -109,11 +113,13 @@ pub struct MonadParserSource<B> {
 }
 
 impl<B> MonadParserSource<B> {
+    /// Validates and creates a parser source with canonical recovery injected.
     pub fn new(config: MonadParserConfig, canonical: Arc<B>) -> Result<Self, SourceError> {
         config.validate()?;
         Ok(Self { config, canonical })
     }
 
+    /// Returns the immutable parser configuration.
     pub fn config(&self) -> &MonadParserConfig {
         &self.config
     }
@@ -141,6 +147,7 @@ impl<B: MonadCanonicalBackend + 'static> ChainEventSource for MonadParserSource<
     }
 }
 
+/// Connects to the parser subscriptions and normalizes heads, logs, and gaps.
 pub async fn connect_parser_stream(
     config: MonadParserConfig,
     filter: ContractFilter,

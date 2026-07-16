@@ -1,4 +1,10 @@
-use crate::codec::{
+//! Durable checkpoint and bounded update-stream storage.
+//!
+//! Redis is an optional process-boundary persistence layer; the in-memory
+//! implementation provides deterministic tests and embedded deployments. Both
+//! implementations expose the same atomic checkpoint contract.
+
+use crate::protocol::codec::{
     bytes32_hex, decode_checkpoint, decode_fixed_hex32, decode_update, encode_checkpoint,
     encode_update,
 };
@@ -16,8 +22,11 @@ pub type SharedCheckpointStore = std::sync::Arc<tokio::sync::Mutex<Box<dyn Check
 /// that provide a Redis implementation at the process boundary. It commits a
 /// complete checkpoint and ordered update payload atomically.
 pub trait CheckpointStore: Send + Sync {
+    /// Loads the most recent compatibility-checked checkpoint, if present.
     fn load(&self) -> Option<Checkpoint>;
+    /// Atomically publishes a checkpoint and ordered update batch.
     fn commit(&mut self, checkpoint: Checkpoint, updates: Vec<ChainUpdate>) -> Result<(), String>;
+    /// Returns the bounded ordered stream retained for worker catch-up.
     fn updates(&self) -> Vec<ChainUpdate>;
 }
 
@@ -34,6 +43,7 @@ pub struct RedisCheckpointStore {
 type RedisStreamEntries = Vec<(String, Vec<(String, Vec<u8>)>)>;
 
 impl RedisCheckpointStore {
+    /// Opens a Redis-backed store with the default one-day deduplication TTL.
     pub fn connect(
         url: &str,
         namespace: RedisNamespace,
@@ -42,6 +52,11 @@ impl RedisCheckpointStore {
         Self::connect_with_config(url, namespace, max_updates, 86_400)
     }
 
+    /// Opens a Redis store with explicit stream and deduplication bounds.
+    ///
+    /// The connection is managed behind a mutex and transparently retried once
+    /// after a transport failure. The atomic Lua commit is idempotent, so an
+    /// ambiguous disconnect cannot duplicate a stream update.
     pub fn connect_with_config(
         url: &str,
         namespace: RedisNamespace,
@@ -96,12 +111,14 @@ impl RedisCheckpointStore {
         }
     }
 
+    /// Loads and decodes the durable checkpoint without hiding codec errors.
     pub fn load_checked(&self) -> Result<Option<Checkpoint>, String> {
         let bytes: Option<Vec<u8>> =
             self.with_connection(|connection| connection.get(&self.namespace.checkpoint))?;
         bytes.map(|bytes| decode_checkpoint(&bytes)).transpose()
     }
 
+    /// Reads schema, math-version, and runtime-code-hash metadata.
     pub fn load_meta(&self) -> Result<Option<RedisMeta>, String> {
         let values: Vec<Option<String>> = self.with_connection(|connection| {
             redis::cmd("HMGET")
@@ -136,6 +153,7 @@ impl RedisCheckpointStore {
         }))
     }
 
+    /// Checks that Redis metadata matches the running quote compatibility.
     pub fn validate_meta(
         &self,
         expected_runtime_code_hash: [u8; 32],
@@ -149,6 +167,7 @@ impl RedisCheckpointStore {
             && meta.expected_runtime_code_hash == expected_runtime_code_hash)
     }
 
+    /// Performs a connectivity health check with a Redis `PING`.
     pub fn health(&self) -> Result<(), String> {
         let response: String =
             self.with_connection(|connection| redis::cmd("PING").query(connection))?;
@@ -159,6 +178,7 @@ impl RedisCheckpointStore {
         }
     }
 
+    /// Attempts to acquire the single-writer lease using `SET NX EX`.
     pub fn acquire_writer_lease(&self, owner: &str, ttl_seconds: u64) -> redis::RedisResult<bool> {
         self.with_connection(|connection| {
             let result: Option<String> = redis::cmd("SET")
@@ -179,6 +199,7 @@ impl RedisCheckpointStore {
         })
     }
 
+    /// Releases the lease only when it is still owned by `owner`.
     pub fn release_writer_lease(&self, owner: &str) -> redis::RedisResult<()> {
         let script = redis::Script::new(
             "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
@@ -199,6 +220,7 @@ impl RedisCheckpointStore {
         })
     }
 
+    /// Reads all retained stream payloads and decodes them in stream order.
     pub fn updates_checked(&self) -> Result<Vec<ChainUpdate>, String> {
         let entries: RedisStreamEntries = self.with_connection(|connection| {
             redis::cmd("XRANGE")
@@ -281,6 +303,7 @@ pub struct InMemoryRedisStore {
 }
 
 impl InMemoryRedisStore {
+    /// Creates a bounded deterministic store for tests or embedded callers.
     pub fn new(max_updates: usize) -> Self {
         Self {
             max_updates,

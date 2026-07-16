@@ -30,12 +30,14 @@ impl From<ParserProtocolError> for SourceError {
     }
 }
 
+/// Decodes one parser WebSocket frame into a typed normalized message.
 pub fn decode_parser_message(payload: &[u8]) -> Result<ParserMessage, ParserProtocolError> {
     let value: Value = serde_json::from_slice(payload)
         .map_err(|error| ParserProtocolError::Json(error.to_string()))?;
     decode_parser_value(&value)
 }
 
+/// Classifies an already parsed parser JSON value, including explicit gaps.
 pub fn decode_parser_value(value: &Value) -> Result<ParserMessage, ParserProtocolError> {
     if let Some(error) = value.get("error") {
         return Err(ParserProtocolError::RemoteError(error.to_string()));

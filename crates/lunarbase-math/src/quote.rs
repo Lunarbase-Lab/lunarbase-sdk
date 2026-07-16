@@ -270,6 +270,24 @@ fn validate_context(state: &QuoteState, context: &QuoteContext) -> Result<(), Qu
     }
     Ok(())
 }
+/// Calculates a complete quote for a direct lane or a two-leg CASH route.
+///
+/// The function validates the snapshot identity first, then applies the
+/// contract's zero/equal-asset sentinels, lane validity predicate, anchor
+/// conversion, router-adjusted fees, principal-based slippage, spread, and
+/// partner/treasury split. It returns the complete `QuoteResult`, including
+/// the fee asset, while Solidity-compatible scalar wrappers are provided below.
+///
+/// `context.execution_block_number` must be the EVM-visible block number, not
+/// an arbitrary provider height. `context.state_version` prevents a quote from
+/// mixing a request with a different immutable state snapshot.
+///
+/// # Errors
+///
+/// Returns [`QuoteError::CashMismatch`] or
+/// [`QuoteError::StateVersionMismatch`] when the snapshot identity is wrong,
+/// or [`QuoteError::Arithmetic`] when Solidity's checked arithmetic boundary is
+/// exceeded.
 pub fn quote(
     request: &QuoteRequest,
     context: &QuoteContext,
@@ -325,6 +343,10 @@ pub fn quote(
     };
     Ok(quote_route(state, request, input_lane, output_lane)?)
 }
+/// Calculates a quote while forcing `QuoteMode::ExactIn`.
+///
+/// This is a convenience wrapper around [`quote`] and does not change any
+/// rounding or sentinel behavior.
 pub fn quote_exact_in(
     request: &QuoteRequest,
     context: &QuoteContext,
@@ -334,6 +356,10 @@ pub fn quote_exact_in(
     request.mode = QuoteMode::ExactIn;
     quote(&request, context, state)
 }
+/// Calculates a quote while forcing `QuoteMode::ExactOut`.
+///
+/// Exact-out unavailable results retain the public `U256::MAX` sentinel when
+/// converted with [`solidity_exact_out_amount`].
 pub fn quote_exact_out(
     request: &QuoteRequest,
     context: &QuoteContext,
@@ -343,18 +369,29 @@ pub fn quote_exact_out(
     request.mode = QuoteMode::ExactOut;
     quote(&request, context, state)
 }
+/// Converts a rich quote outcome to `Lanes.quoteExactIn`'s public scalar.
+///
+/// Available quotes return `amount_out`; every unavailable reason maps to zero.
 pub fn solidity_exact_in_amount(outcome: &QuoteOutcome) -> U256 {
     match outcome {
         QuoteOutcome::Available(result) => result.amount_out,
         QuoteOutcome::Unavailable(_) => U256::ZERO,
     }
 }
+/// Converts a rich quote outcome to `Lanes.quoteExactOut`'s public scalar.
+///
+/// Available quotes return `amount_in`; unavailable results map to the
+/// contract's `U256::MAX` sentinel.
 pub fn solidity_exact_out_amount(outcome: &QuoteOutcome) -> U256 {
     match outcome {
         QuoteOutcome::Available(result) => result.amount_in,
         QuoteOutcome::Unavailable(_) => U256::MAX,
     }
 }
+/// Applies the special zero-request override to the exact-out sentinel.
+///
+/// Solidity returns zero for a zero requested amount, even though a generic
+/// unavailable exact-out outcome normally maps to `U256::MAX`.
 pub fn solidity_exact_out_amount_for_request(
     request: &QuoteRequest,
     outcome: &QuoteOutcome,

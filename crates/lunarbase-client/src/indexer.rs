@@ -1,3 +1,10 @@
+//! High-level quote indexer lifecycle and asynchronous client facade.
+//!
+//! This context coordinates source subscription, snapshot handoff, reducer
+//! recovery, freshness policy, and optional checkpoint persistence. The math
+//! engine itself remains in `lunarbase-math` and is called only with immutable
+//! state snapshots.
+
 use crate::{
     decode_core_event, BackfillRequest, BootstrapSnapshot, ChainCursor, ChainEventSource,
     ChainUpdate, Checkpoint, ClientQuote, Commitment, ContractFilter, ContractLog,
@@ -16,6 +23,8 @@ use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
+/// Errors returned while bootstrapping, recovering, or quoting from the
+/// stateful client.
 pub enum IndexerError {
     #[error("not ready")]
     NotReady,
@@ -47,6 +56,12 @@ pub struct QuoteIndexer {
 }
 
 impl QuoteIndexer {
+    /// Restores an indexer from a checkpoint after validating schema, math
+    /// compatibility, and the expected runtime bytecode hash.
+    ///
+    /// A mismatch is rejected before any state becomes observable because a
+    /// checkpoint produced by a different contract deployment or math build
+    /// is not safe to use for quotes.
     pub fn from_checkpoint(
         checkpoint: Checkpoint,
         expected_code_hash: [u8; 32],
@@ -66,6 +81,10 @@ impl QuoteIndexer {
         })
     }
 
+    /// Creates an indexer around an in-memory quote state.
+    ///
+    /// The resulting reducer is not ready until `bootstrap` or one of the
+    /// snapshot handoff methods has established a canonical cursor.
     pub fn new(state: QuoteState, expected_code_hash: [u8; 32]) -> Self {
         Self {
             reducer: QuoteReducer::new(state),
@@ -76,12 +95,22 @@ impl QuoteIndexer {
         }
     }
 
+    /// Marks the reducer as bootstrapped at a block-tagged snapshot cursor.
+    ///
+    /// This low-level method is useful when the caller has already loaded the
+    /// state. It does not replay buffered updates; use
+    /// [`Self::bootstrap_normalized`] for the complete handoff protocol.
     pub fn bootstrap(&mut self, snapshot_cursor: ChainCursor) {
         self.last_commitment = snapshot_cursor.commitment;
         self.last_observed_at = SystemTime::now();
         self.reducer.bootstrap(snapshot_cursor);
     }
 
+    /// Fetches a provider snapshot, validates its runtime code hash, and
+    /// installs it together with buffered realtime updates.
+    ///
+    /// The source should be subscribed before calling this method so updates
+    /// produced during the snapshot RPC are available in `buffered`.
     pub async fn bootstrap_from_provider<P: SnapshotProvider>(
         &mut self,
         provider: &P,
@@ -102,8 +131,11 @@ impl QuoteIndexer {
     }
 
     /// Atomically installs a block-tagged snapshot and applies only updates
-    /// strictly after that block. The caller must stop if the handoff buffer
-    /// has overflowed or contains a source gap.
+    /// that are strictly after its block.
+    ///
+    /// Buffered data is ordered before application. Gaps, reorg markers,
+    /// chain mismatches, and unhealthy source markers fail closed and leave
+    /// the reducer not ready.
     pub fn bootstrap_normalized(
         &mut self,
         snapshot: BootstrapSnapshot,
@@ -160,6 +192,11 @@ impl QuoteIndexer {
         Ok(())
     }
 
+    /// Installs a quote state and replays already-decoded events after the
+    /// snapshot block.
+    ///
+    /// This variant is intended for callers that already own the ABI decoding
+    /// step, such as generated bindings or deterministic tests.
     pub fn bootstrap_snapshot(
         &mut self,
         state: QuoteState,
@@ -187,6 +224,11 @@ impl QuoteIndexer {
         Ok(())
     }
 
+    /// Applies one normalized chain update using a caller-supplied event
+    /// decoder.
+    ///
+    /// Non-quote logs are ignored, while removed logs, gaps, reorgs, reducer
+    /// errors, and source health failures make the indexer not ready.
     pub fn apply_update(
         &mut self,
         update: ChainUpdate,
@@ -247,6 +289,7 @@ impl QuoteIndexer {
         self.apply_update(update, &|_| None)
     }
 
+    /// Replaces the current reducer with a compatibility-checked checkpoint.
     pub fn resync(&mut self, checkpoint: Checkpoint) -> Result<(), IndexerError> {
         *self = Self::from_checkpoint(checkpoint, self.expected_code_hash)?;
         Ok(())
@@ -306,6 +349,8 @@ impl QuoteIndexer {
         Ok(())
     }
 
+    /// Clones the current quote state only when the reducer has a proven
+    /// bootstrap/recovery cursor and is marked ready.
     pub fn snapshot(&self) -> Result<Arc<QuoteState>, IndexerError> {
         if !self.reducer.is_ready() {
             return Err(IndexerError::NotReady);
@@ -313,6 +358,11 @@ impl QuoteIndexer {
         Ok(Arc::new(self.reducer.state().clone()))
     }
 
+    /// Computes a quote against the current ready state without applying a
+    /// freshness policy.
+    ///
+    /// `execution_block_number` is passed into the math context and therefore
+    /// participates in block-delay and expiry predicates.
     pub fn quote(
         &self,
         request: &QuoteRequest,
@@ -327,6 +377,11 @@ impl QuoteIndexer {
         Ok(lunarbase_math::quote(request, &context, &state)?)
     }
 
+    /// Computes a quote after enforcing commitment and execution-block age
+    /// requirements.
+    ///
+    /// The returned metadata identifies the exact cursor, code hash, and math
+    /// compatibility version used by the quote.
     pub fn quote_with_policy(
         &self,
         request: &QuoteRequest,
@@ -362,10 +417,12 @@ impl QuoteIndexer {
         })
     }
 
+    /// Returns an immutable snapshot of the ready quote state.
     pub fn state_snapshot(&self) -> Result<Arc<QuoteState>, IndexerError> {
         self.snapshot()
     }
 
+    /// Computes an exact-input quote using the default freshness policy.
     pub fn quote_exact_in(
         &self,
         mut request: QuoteRequest,
@@ -375,6 +432,7 @@ impl QuoteIndexer {
         self.quote_with_policy(&request, execution_block_number, FreshnessPolicy::default())
     }
 
+    /// Computes an exact-output quote using the default freshness policy.
     pub fn quote_exact_out(
         &self,
         mut request: QuoteRequest,
@@ -384,6 +442,7 @@ impl QuoteIndexer {
         self.quote_with_policy(&request, execution_block_number, FreshnessPolicy::default())
     }
 
+    /// Reports readiness, commitment, cursor, and compatibility metadata.
     pub fn health(&self) -> IndexerHealth {
         IndexerHealth {
             ready: self.reducer.is_ready(),
@@ -394,10 +453,13 @@ impl QuoteIndexer {
         }
     }
 
+    /// Marks the reducer not ready and stops serving fresh quotes.
     pub fn shutdown(&mut self) {
         self.reducer.mark_not_ready();
     }
 
+    /// Returns a durable checkpoint for the current reducer cursor, if one is
+    /// available.
     pub fn checkpoint(&self) -> Option<Checkpoint> {
         self.reducer.checkpoint(self.expected_code_hash)
     }
@@ -417,6 +479,8 @@ pub struct ClientConnectConfig {
 }
 
 impl ClientConnectConfig {
+    /// Validates deployment identity, source filtering, and lifecycle bounds
+    /// before any background task is spawned.
     pub fn validate(&self) -> Result<(), IndexerError> {
         self.deployment.validate()?;
         if self.filter.address != self.deployment.core {
@@ -445,6 +509,11 @@ pub struct ConnectedQuoteClient {
 }
 
 impl ConnectedQuoteClient {
+    /// Starts the source pump, obtains a block-tagged snapshot, performs the
+    /// buffered handoff, and launches the single-writer reducer loop.
+    ///
+    /// This convenience constructor keeps checkpoint persistence disabled;
+    /// use [`Self::connect_with_store`] when durable recovery is required.
     pub async fn connect<P, S>(
         provider: &P,
         source: Arc<S>,
@@ -460,6 +529,12 @@ impl ConnectedQuoteClient {
     /// Connect the client and optionally publish every accepted transition to
     /// a shared checkpoint store. Redis is deliberately injected at this
     /// boundary so the pure reducer remains independent of the transport.
+    /// Connects the asynchronous client and optionally persists every accepted
+    /// transition through a shared checkpoint store.
+    ///
+    /// The realtime subscription is established before the snapshot request,
+    /// preventing updates produced during snapshot acquisition from being
+    /// lost at the handoff boundary.
     pub async fn connect_with_store<P, S>(
         provider: &P,
         source: Arc<S>,
@@ -558,6 +633,7 @@ impl ConnectedQuoteClient {
         })
     }
 
+    /// Waits until the reducer is ready at least at `minimum` commitment.
     pub async fn await_ready(&self, minimum: Commitment) -> Result<(), IndexerError> {
         loop {
             let notified = self.ready.notified();
@@ -569,10 +645,12 @@ impl ConnectedQuoteClient {
         }
     }
 
+    /// Returns an immutable snapshot from the background reducer.
     pub async fn state_snapshot(&self) -> Result<Arc<QuoteState>, IndexerError> {
         self.indexer.lock().await.snapshot()
     }
 
+    /// Computes a quote after enforcing the requested freshness policy.
     pub async fn quote_with_policy(
         &self,
         request: &QuoteRequest,
@@ -585,6 +663,7 @@ impl ConnectedQuoteClient {
             .quote_with_policy(request, execution_block_number, policy)
     }
 
+    /// Computes an exact-input quote using the default freshness policy.
     pub async fn quote_exact_in(
         &self,
         mut request: QuoteRequest,
@@ -595,6 +674,7 @@ impl ConnectedQuoteClient {
             .await
     }
 
+    /// Computes an exact-output quote using the default freshness policy.
     pub async fn quote_exact_out(
         &self,
         mut request: QuoteRequest,
@@ -605,14 +685,18 @@ impl ConnectedQuoteClient {
             .await
     }
 
+    /// Returns current readiness and compatibility metadata.
     pub async fn health(&self) -> IndexerHealth {
         self.indexer.lock().await.health()
     }
 
+    /// Returns the latest checkpoint, if the reducer has a cursor.
     pub async fn checkpoint(&self) -> Option<Checkpoint> {
         self.indexer.lock().await.checkpoint()
     }
 
+    /// Performs canonical backfill from the current cursor and republishes a
+    /// checkpoint after successful recovery.
     pub async fn resync(&self) -> Result<(), IndexerError> {
         let mut indexer = self.indexer.lock().await;
         indexer.reducer.mark_not_ready();
@@ -634,6 +718,8 @@ impl ConnectedQuoteClient {
         result
     }
 
+    /// Stops background tasks and marks the client unavailable for fresh
+    /// quotes.
     pub async fn shutdown(&mut self) {
         if let Some(handle) = self.stop.take() {
             handle.abort();

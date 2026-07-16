@@ -12,6 +12,15 @@ version = "0.1.0"
 license = "MIT OR Apache-2.0"
 rust-version = "1.77"
 
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
 [workspace.dependencies]
 lunarbase-math = { path = "crates/lunarbase-math" }
 lunarbase-client = { path = "crates/lunarbase-client" }

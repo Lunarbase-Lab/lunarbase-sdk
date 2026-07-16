@@ -38,12 +38,26 @@ compatible at the math layer, and match Solidity's layout exactly.
 ## Checks
 
 ```sh
-cargo test --workspace
-pnpm install --offline
-pnpm --filter @lunarbase/math build
-pnpm --filter @lunarbase/client build
-node --test packages/math/dist/index.test.js
+make build
+make test
+make verify
 ```
+
+The root `Makefile` is the canonical entry point for the repository:
+`build` compiles every Rust workspace target and both TypeScript packages;
+`test` runs the Rust and TypeScript suites; `lint`, `docs`, `fmt-check`, and
+`verify` provide the corresponding CI checks. The Solidity differential FFI
+suite can be run with `make ffi` when the sibling `lunarbase-contracts`
+checkout is available.
+
+Formatting and lint policy is versioned with the source: TypeScript uses the
+flat ESLint config in `eslint.config.mjs` and Prettier settings in
+`prettier.config.mjs`; Rust uses `rustfmt.toml`, `clippy.toml`, and shared
+workspace lints in `Cargo.toml`. Run `make fmt` to apply formatting,
+`make fmt-check` to validate it, and `make lint` to run ESLint plus Clippy with
+warnings treated as errors. TypeScript tooling is pinned in `package.json` and
+`pnpm-lock.yaml`; `make build` and other Node targets transparently use
+Corepack when a standalone `pnpm` binary is not on `PATH`.
 
 The source adapters intentionally receive a transport/sidecar backend. This
 keeps network I/O out of the pure math library while allowing Base Flashblocks,
