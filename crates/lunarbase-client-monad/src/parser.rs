@@ -1,19 +1,18 @@
 //! Monad parser WebSocket reader and canonical recovery adapter.
 
 use async_stream::stream;
-use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use lunarbase_client_core::{
-    BackfillRequest, ChainCursor, ChainEventSource, ContractFilter, ContractLog, ExecutionEvent,
-    ExecutionEventReader, ExecutionEventStream, MonadExecutionEngine, Network, NormalizedBackend,
-    RpcHttpBackend, RpcHttpClient, SourceError, SourceStream,
+    BackfillRequest, BootstrapSnapshot, ChainCursor, ChainDataSource, Checkpoint, ContractFilter,
+    ContractLog, DeploymentConfig, Network, RpcHttpBackend, RpcHttpClient, RpcSnapshotProvider,
+    SourceError, SourceStream,
 };
 use lunarbase_math::Address;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
+use crate::execution::{ExecutionEvent, ExecutionEventStream, MonadExecutionNormalizer};
 use crate::protocol::{decode_parser_message, ParserMessage};
 
 /// Resource and identity settings for the local Monad parser connection.
@@ -53,120 +52,26 @@ impl MonadParserConfig {
     }
 }
 
-/// Execution-event reader backed by `monad-exec-events-parser`.
-#[derive(Clone)]
-pub struct MonadParserReader {
+/// Portable parser-WebSocket source with finalized RPC recovery.
+pub struct MonadParserSource {
     config: MonadParserConfig,
+    canonical: RpcHttpBackend,
 }
 
-impl MonadParserReader {
-    /// Creates a validated parser execution-event reader.
-    pub fn new(config: MonadParserConfig) -> Result<Self, SourceError> {
+impl MonadParserSource {
+    /// Creates a source from parser and canonical RPC endpoints.
+    pub fn new(
+        config: MonadParserConfig,
+        rpc_endpoint: impl Into<String>,
+    ) -> Result<Self, SourceError> {
         config.validate()?;
-        Ok(Self { config })
-    }
-
-    /// Returns the immutable parser configuration.
-    pub fn config(&self) -> &MonadParserConfig {
-        &self.config
-    }
-}
-
-#[async_trait]
-impl ExecutionEventReader for MonadParserReader {
-    async fn subscribe_execution(
-        &self,
-        filter: ContractFilter,
-    ) -> Result<ExecutionEventStream, SourceError> {
-        connect_parser_stream(self.config.clone(), filter).await
-    }
-}
-
-/// Canonical recovery backend for a colocated Monad execution reader.
-pub struct MonadRpcCanonicalBackend {
-    backend: RpcHttpBackend,
-}
-
-impl MonadRpcCanonicalBackend {
-    /// Creates a finalized Monad JSON-RPC snapshot/backfill backend.
-    pub fn new(endpoint: impl Into<String>, chain_id: u64) -> Self {
-        Self {
-            backend: RpcHttpBackend::new(
-                RpcHttpClient::new(endpoint),
-                Network::Monad,
-                chain_id,
-                "finalized",
-            ),
-        }
-    }
-
-    /// Returns the generic HTTP backend.
-    pub fn inner(&self) -> &RpcHttpBackend {
-        &self.backend
-    }
-}
-
-#[async_trait]
-impl NormalizedBackend for MonadRpcCanonicalBackend {
-    async fn snapshot_cursor(&self, network: Network) -> Result<ChainCursor, SourceError> {
-        self.backend.snapshot_cursor(network).await
-    }
-
-    async fn backfill(&self, request: BackfillRequest) -> Result<Vec<ContractLog>, SourceError> {
-        self.backend.backfill(request).await
-    }
-
-    async fn subscribe(
-        &self,
-        _network: Network,
-        _filter: ContractFilter,
-    ) -> Result<SourceStream, SourceError> {
-        Err(SourceError::Unavailable(
-            "Monad canonical backend has no realtime execution stream".into(),
-        ))
-    }
-}
-
-/// Explicitly unavailable recovery backend for parser-only smoke tests.
-pub struct UnavailableCanonicalBackend;
-
-#[async_trait]
-impl NormalizedBackend for UnavailableCanonicalBackend {
-    async fn snapshot_cursor(&self, _network: Network) -> Result<ChainCursor, SourceError> {
-        Err(SourceError::Unavailable(
-            "Monad canonical RPC backend is not configured".into(),
-        ))
-    }
-
-    async fn backfill(&self, _request: BackfillRequest) -> Result<Vec<ContractLog>, SourceError> {
-        Err(SourceError::Unavailable(
-            "Monad canonical RPC backend is not configured".into(),
-        ))
-    }
-
-    async fn subscribe(
-        &self,
-        _network: Network,
-        _filter: ContractFilter,
-    ) -> Result<SourceStream, SourceError> {
-        Err(SourceError::Unavailable(
-            "Monad canonical RPC backend has no realtime stream".into(),
-        ))
-    }
-}
-
-/// Runtime-facing Monad source using the common execution engine.
-pub struct MonadParserSource<B> {
-    config: MonadParserConfig,
-    engine: MonadExecutionEngine<MonadParserReader, B>,
-}
-
-impl<B> MonadParserSource<B> {
-    /// Creates a parser source with an injected canonical recovery backend.
-    pub fn new(config: MonadParserConfig, canonical: Arc<B>) -> Result<Self, SourceError> {
-        let reader = Arc::new(MonadParserReader::new(config.clone())?);
-        let engine = MonadExecutionEngine::new(reader, canonical, config.chain_id);
-        Ok(Self { config, engine })
+        let canonical = RpcHttpBackend::new(
+            RpcHttpClient::new(rpc_endpoint),
+            Network::Monad,
+            config.chain_id,
+            "finalized",
+        );
+        Ok(Self { config, canonical })
     }
 
     /// Returns the immutable parser configuration.
@@ -174,28 +79,44 @@ impl<B> MonadParserSource<B> {
         &self.config
     }
 
-    /// Returns the common Monad execution engine.
-    pub fn engine(&self) -> &MonadExecutionEngine<MonadParserReader, B> {
-        &self.engine
+    /// Returns the canonical RPC helper.
+    pub fn canonical(&self) -> &RpcHttpBackend {
+        &self.canonical
     }
 }
 
-#[async_trait]
-impl<B: NormalizedBackend + 'static> ChainEventSource for MonadParserSource<B> {
+impl ChainDataSource for MonadParserSource {
     fn network(&self) -> Network {
         Network::Monad
     }
 
-    async fn snapshot_cursor(&self) -> Result<ChainCursor, SourceError> {
-        self.engine.snapshot_cursor().await
+    async fn snapshot(
+        &self,
+        deployment: &DeploymentConfig,
+    ) -> Result<BootstrapSnapshot, SourceError> {
+        RpcSnapshotProvider::new(
+            self.canonical.rpc().clone(),
+            self.canonical.snapshot_tag().to_owned(),
+        )
+        .snapshot(deployment)
+        .await
     }
 
     async fn backfill(&self, request: BackfillRequest) -> Result<Vec<ContractLog>, SourceError> {
-        self.engine.backfill(request).await
+        self.canonical.backfill(request).await
     }
 
     async fn subscribe(&self, filter: ContractFilter) -> Result<SourceStream, SourceError> {
-        self.engine.subscribe(filter).await
+        let events = connect_parser_stream(self.config.clone(), filter).await?;
+        Ok(MonadExecutionNormalizer::new(self.config.chain_id).normalize_stream(events))
+    }
+
+    async fn canonical_head(&self) -> Result<ChainCursor, SourceError> {
+        self.canonical.snapshot_cursor(Network::Monad).await
+    }
+
+    async fn validate_checkpoint(&self, checkpoint: &Checkpoint) -> Result<bool, SourceError> {
+        self.canonical.validate_checkpoint(checkpoint).await
     }
 }
 

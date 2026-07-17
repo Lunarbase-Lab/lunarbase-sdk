@@ -1,4 +1,5 @@
-use lunarbase_client_core::{Commitment, ExecutionHead, ExecutionLog, SourceError};
+use crate::execution::{ExecutionHead, ExecutionLog};
+use lunarbase_client_core::{Commitment, SourceError};
 use lunarbase_math::{Address, U256};
 use serde_json::Value;
 use thiserror::Error;
@@ -218,7 +219,7 @@ fn parse_hex32(value: &str, field: &'static str) -> Result<[u8; 32], ParserProto
 
 fn parse_hex_bytes(value: &str, field: &'static str) -> Result<Vec<u8>, ParserProtocolError> {
     let value = value.strip_prefix("0x").unwrap_or(value);
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return Err(ParserProtocolError::InvalidField {
             field,
             detail: "hex string has odd length".into(),

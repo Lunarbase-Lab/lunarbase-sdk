@@ -1,137 +1,188 @@
-# Project structure
+# LunarBase SDK architecture
 
-The repository has one pure math kernel and one universal runtime per language.
-Network-specific clients are separate publishable crates/packages. Compatibility
-facades preserve the original `lunarbase-client` and `@lunarbase/client`
-imports.
+## System boundary
 
-```text
-.
-├── crates/
-│   ├── lunarbase-math/                 # pure Rust quote math
-│   ├── lunarbase-client-core/          # universal Rust runtime
-│   │   └── src/
-│   │       ├── model.rs                # cursors, updates, config and errors
-│   │       ├── bootstrap.rs            # bounded snapshot handoff
-│   │       ├── indexer.rs              # public lifecycle facade
-│   │       ├── indexer/                # engine, client, tasks and checkpoints
-│   │       ├── persistence.rs          # persistence facade
-│   │       ├── persistence/            # Redis/in-memory stores and fencing
-│   │       ├── source.rs               # common source/backend contracts
-│   │       ├── execution/
-│   │       │   ├── engine.rs           # ExecutionEventReader boundary
-│   │       │   └── monad.rs            # universal Monad execution engine
-│   │       ├── transport/
-│   │       │   ├── rpc.rs              # canonical RPC facade
-│   │       │   ├── rpc/                # client, backend, snapshot and codec
-│   │       │   └── ws.rs               # bounded generic WebSocket source
-│   │       ├── protocol/               # Core ABI and binary codecs
-│   │       └── state/                  # ordering and single-writer reducer
-│   ├── lunarbase-client-base/          # Flashblocks normalizer + transport
-│   ├── lunarbase-client-monad/         # parser reader + canonical RPC adapter
-│   ├── lunarbase-client-arbitrum/      # Nitro normalizer + transport
-│   ├── lunarbase-client/               # compatibility facade
-│   ├── lunarbase-indexer/              # executable composition + HTTP API
-│   │   └── src/
-│   │       ├── runtime.rs              # runtime facade
-│   │       ├── runtime/                # handle, factory, lease and supervisor
-│   │       ├── config.rs               # configuration facade
-│   │       ├── config/                 # types, validation and parsing
-│   │       ├── metrics.rs              # Prometheus counters/histograms
-│   │       ├── alerts.rs               # webhook + panic supervision
-│   │       └── api/                    # health, metrics, quote HTTP API
-│   └── lunarbase-tools/                # E2E, load, Monad live validation
-├── packages/
-│   ├── math/                           # pure TypeScript bigint quote math
-│   ├── client-core/                    # universal TypeScript runtime
-│   │   └── src/
-│   │       ├── model.ts
-│   │       ├── bootstrap.ts
-│   │       ├── indexer.ts              # public lifecycle exports
-│   │       ├── indexer/                # engine and connected client
-│   │       ├── persistence.ts
-│   │       ├── source.ts
-│   │       ├── execution/              # reader contract + Monad engine
-│   │       ├── transport/              # generic RPC/WebSocket
-│   │       ├── protocol/
-│   │       └── state/
-│   ├── client-base/                    # Base client
-│   ├── client-monad/                   # Monad parser client
-│   ├── client-arbitrum/                # Arbitrum client
-│   └── client/                         # compatibility facade
-├── abi/                                # pinned Core ABI
-├── fixtures/                           # cross-language vectors/replays
-├── schemas/                            # stable wire schemas
-├── config/                             # network and production templates
-└── solidity-reference/                 # Foundry differential reference
-```
-
-Source files under `crates/`, `packages/`, and `scripts/` are limited to 500
-lines. `make source-size-check` enforces this boundary in `make verify`, so a
-growing context must be split by responsibility before it becomes difficult
-to review.
-
-## Dependency direction
-
-The dependency graph is intentionally one-way:
+The repository has three layers:
 
 ```text
-math
-  ↑
-client-core
-  ↑
-client-base  client-monad  client-arbitrum
-  ↑              ↑              ↑
-  └──────── client facade ───────┘
-  └────── lunarbase-indexer ─────┘
+pure math
+  └─ no async, RPC, persistence, or network semantics
+
+embeddable clients
+  ├─ common ordered reducer/runtime
+  └─ one package per network source
+
+lunarbase-indexer
+  └─ HTTP + metrics + optional Redis restart checkpoint
 ```
 
-`client-core` owns mutable runtime behavior but no provider-specific payload
-schema. Network packages depend on its public contracts and emit normalized
-`ChainUpdate` values. The compatibility facade only re-exports packages and
-must not contain runtime logic. The executable selects network packages through
-Cargo features; `base` is the default, while Monad and Arbitrum are opt-in.
+The Rust and TypeScript math libraries mirror the pinned Solidity behavior.
+The common client libraries own state transitions but not persistence. The
+indexer is the only ready-to-run service.
 
-The Monad execution engine belongs to `client-core`. It accepts an
-`ExecutionEventReader`, so the parser WebSocket implementation can later be
-replaced by a native hugetlbfs/event-ring reader without changing reducer,
-recovery, persistence, or high-level client APIs.
+## Repository layout
 
-## Runtime lifecycle and observability
+```text
+crates/
+  lunarbase-math/
+  lunarbase-client-core/
+  lunarbase-client-base/
+  lunarbase-client-monad/
+  lunarbase-client-arbitrum/
+  lunarbase-indexer/
+  lunarbase-tools/
 
-`ConnectedQuoteClient` owns a bounded cancellation channel, source/reducer
-task handles, and a bounded broadcast channel of operational events. Startup
-uses an abort-on-drop guard because realtime ingestion begins before the RPC
-snapshot; cancelling bootstrap therefore cannot leak a detached source task.
+packages/
+  math/
+  client-core/
+  client-base/
+  client-monad/
+  client-arbitrum/
 
-The executable consumes runtime events in alert and metrics supervisors. Readiness
-monitoring and optional webhook delivery stay outside `client-core`, keeping
-the publishable runtime independent from HTTP alert vendors. The core only
-emits stable failure codes and remains fail-closed by marking reducer state
-unavailable.
+fixtures/
+  quote-vectors.json
 
-`lunarbase-indexer` places a `RuntimeHandle` between HTTP and the connected
-client. With Redis persistence, an owner-checked expiring lease elects exactly
-one active writer. Standbys keep liveness and metrics online but hold no
-network/reducer client. Lease renewal failure atomically removes the client
-from the HTTP handle before cleanup, so quotes fail closed. Runtime counters
-from retired client instances are accumulated across lease loss/reacquisition.
+config/
+  base.toml
+  monad.toml
+  arbitrum.toml
+  production.base.toml
+  prometheus-alerts.yml
+```
 
-On shutdown, HTTP draining and writer teardown begin together after the active
-client is removed from availability. The runtime cooperatively cancels and
-joins its workers, persists a final checkpoint, releases its owner-checked
-lease, and uses task abort only after the configured deadline. Process panics
-are forwarded through a non-blocking channel to the same alert sink while
-preserving Rust's previous panic hook. Synchronous Redis commits and lease
-operations are isolated on the blocking pool and the underlying socket has
-explicit connect/read/write timeouts.
+There are no all-network facade packages. This prevents a Base-only
+integration from pulling Monad or Arbitrum dependencies.
 
-## Representation rules
+## Data path
 
-`Lane.slot0` remains one raw 256-bit word in hot state. Field access uses masks
-and shifts; `LaneSlot0` is a boundary/debug view only. Storage-width fields
-retain their ABI widths in checkpoints.
+```text
+RPC snapshot ─────────────┐
+                         v
+realtime source → normalize → bounded queue → ordered reducer → hot state
+                                                                  │
+                                                       quote / quoteMany
+                                                                  │
+                                                      cursor-bound result
+```
 
-The binary codec is versioned (`LBQ1`) and is the only persistence wire format.
-Schema or math changes must update the compatibility version, golden vectors,
-and Rust/TypeScript implementations together.
+Subscription begins before the initial snapshot. Updates received while RPC is
+building the snapshot remain in the bounded handoff queue and are replayed in
+cursor order. This closes the snapshot/subscription race.
+
+The source exposes one contract:
+
+- `snapshot(deployment)`
+- `backfill(range)`
+- `subscribe(filter)`
+- `canonical_head()`
+- `validate_checkpoint(checkpoint)`
+
+Normalized updates are only `Head`, `Log`, `Reorg`, and `Gap`.
+`sourceSequence` orders source messages; `executionBlockNumber` independently
+records the EVM-visible block used by quote validity.
+
+## State and quote path
+
+Each lane is one compact object:
+
+```text
+slot0: U256
+totalPrincipalAmount: u128
+slippageK: u32
+blockDelay: u8
+flags: exists | paused
+```
+
+Principal is colocated with `slot0`, avoiding a second map lookup. The runtime
+contains exactly one configured router and one `FeeProfile`. Whitelisted
+routers use multiplier `1`; non-whitelisted deployments track the global
+blacklist multiplier. Partner fee events are retained only for the configured
+router.
+
+Rust stores the reducer behind `std::sync::RwLock`. A quote takes a short shared
+guard and performs no RPC, Redis access, serialization, or state clone. The
+single reducer takes a short write guard. TypeScript relies on single-threaded
+event-loop ordering and does not expose mutable maps.
+
+`quoteMany` is synchronous and limited to 256 requests. It reads the cursor
+once, computes every result from the same state, and returns that one cursor.
+
+## Network sources
+
+Base uses the documented `pendingLogs + newHeads` subscriptions. Base emits
+`newHeads` at Flashblock cadence, so the client avoids decoding the larger
+`newFlashblocks` payload.
+
+Monad has two Rust inputs in the same network package:
+
+- portable parser WebSocket for development and remote deployments;
+- Linux native event-ring reader using official `monad-exec-events` and
+  `monad-event-ring`.
+
+TypeScript consumes the parser/RPC WebSocket and does not bind hugetlbfs.
+
+Arbitrum consumes logs from executed Nitro state and records parent-chain
+execution context separately from the L2 stream height.
+
+Monad and Arbitrum are experimental until their node-based soak gates pass.
+
+## Failure and recovery
+
+The runtime fails closed on:
+
+- stream gap, disconnect, or queue overflow;
+- cursor regression or block-hash discontinuity;
+- reorg or removed log;
+- incompatible Core runtime code hash;
+- malformed quote-critical event;
+- arithmetic/state invariant failure.
+
+Readiness is revoked before recovery starts. The source keeps buffering into a
+bounded queue while a canonical RPC snapshot is built. State is published
+again only after the snapshot and handoff replay both succeed.
+
+Shutdown cancels source/reducer tasks, stores a final checkpoint when Redis is
+configured, closes HTTP gracefully, and waits within the configured deadline.
+Bootstrap is cancellation-safe: SIGTERM cannot leave a detached subscription.
+
+## Horizontal scaling
+
+Every replica independently consumes the source, maintains hot state, and
+serves quotes. There is no leader, lease, fencing token, or standby role.
+Throughput scales behind a normal load balancer.
+
+Replicas may best-effort overwrite the same Redis checkpoint because the value
+is a complete deployment-bound snapshot and startup always validates its
+canonical block hash. Redis is restart acceleration, not inter-replica
+coordination.
+
+## Persistence
+
+The indexer stores one no-TTL key per chain/Core/router/schema:
+
+```text
+lunarbase:v3:{chainId}:{core}:{router}
+```
+
+Only `GET` and atomic `SET` are used. A missing, malformed, incompatible,
+forked, or unusable checkpoint is ignored in favor of a full RPC snapshot.
+Redis outage does not affect a running indexer's readiness.
+
+Embeddable clients expose `checkpoint()` but contain no Redis dependency.
+
+## Verification gates
+
+- Shared deterministic math corpus in Rust and TypeScript.
+- Canonical Solidity/Rust/TypeScript FFI in `lunarbase-contracts`.
+- Quote-path source-call counters.
+- Same-cursor `quoteMany` parity.
+- Reducer replay without `SwapExecuted`.
+- Checkpoint identity/canonicality and Redis-unavailable bootstrap.
+- Two simultaneously ready process replicas.
+- Gap/reorg recovery and SIGTERM bootstrap shutdown.
+- 10–15 lane, 50–100 pair load profile.
+- Base payload fixtures.
+- Separate Monad and Arbitrum live-validation gates.
+
+All Rust and TypeScript source files are limited to 500 lines so modules retain
+a reviewable context boundary.

@@ -1,243 +1,230 @@
-# LunarBase off-chain quoting
+# LunarBase SDK
 
-This repository implements the quote model pinned to contract commit
-`24db47b866e8150a0d91cffd80efe49df85179b5`.
+LunarBase SDK `0.2.0` provides bit-exact off-chain quote math, embeddable
+realtime clients, and a runnable Rust indexer.
 
-The module map and dependency boundaries are documented in
-[`ARCHITECTURE.md`](ARCHITECTURE.md).
+The quote hot path is deliberately small:
 
-The math packages are independent from RPC, Redis, clocks, workers, and
-filesystem state. Runtime responsibilities are split into publishable units:
+```text
+realtime stream → normalize → ordered reducer → in-memory state → quote/quoteMany
+```
 
-- `crates/lunarbase-math` uses `ruint::U256`/`U512` and exposes exact Solidity
-  rounding, slot0 codecs, direct/route quotes, fee adjustment and fee split.
-- `packages/math` is the equivalent `bigint` implementation. No monetary path
-  accepts a JavaScript `number`.
-- `crates/lunarbase-client-core` and `packages/client-core` own the universal
-  runtime, ordered reducer, snapshot handoff, execution-reader boundary,
-  checkpoint namespaces, gap handling, and persistence.
-- `lunarbase-client-base`, `lunarbase-client-monad`, and
-  `lunarbase-client-arbitrum` contain network-specific Rust code. Matching
-  `@lunarbase/client-*` packages provide the TypeScript clients.
-- `crates/lunarbase-client` and `packages/client` are compatibility facades.
-- `crates/lunarbase-indexer` is the runnable Rust process that composes the
-  universal runtime, one selected network adapter, optional Redis persistence,
-  and the quote HTTP API. Its default Cargo feature is `base`.
-- `crates/lunarbase-tools` contains real-process E2E, 10–15 lane / 50–100 pair
-  load, and live Monad parser/RPC/Solidity soak runners.
+RPC is used only for bootstrap and canonical recovery. Redis is optional and
+stores one full restart checkpoint. Neither dependency is touched while a
+quote is calculated.
 
-`LaneState.slot0` is kept as the canonical `ruint::U256`/TypeScript `bigint`
-word. `LaneSlot0` is a decode/encode view used only at boundaries; quote-path
-accessors mask the four fields they need directly. This avoids allocating a
-decoded struct for every lane and avoids converting a 256-bit storage word to
-an array-backed bitfield representation. The checkpoint codec also stores the
-ABI widths directly (`uint8` delay and `uint32` slippage K).
+## Packages
 
-The implementation intentionally does not add a runtime bitfield dependency:
-the relevant crates either target primitive representations up to `u128`, or
-represent wider values as byte arrays. That is useful for ergonomic schemas,
-but it adds a conversion/array boundary around the already-canonical 32-byte
-word. Manual mask/shift accessors are constant-time, inlinable, `no_std`
-compatible at the math layer, and match Solidity's layout exactly.
+Pure math:
 
-## Checks
+- `lunarbase-math` — Rust `U256/U512` quote implementation.
+- `@lunarbase/math` — TypeScript `bigint` implementation.
 
-```sh
+Embeddable clients:
+
+- `lunarbase-client-core` / `@lunarbase/client-core` — common source contract,
+  ordered reducer, in-memory runtime, and generic RPC/WS transport.
+- `lunarbase-client-base` / `@lunarbase/client-base` — Base
+  `pendingLogs + newHeads`.
+- `lunarbase-client-monad` / `@lunarbase/client-monad` — Monad parser WS; Rust
+  additionally supports the native execution-event ring on Linux.
+- `lunarbase-client-arbitrum` / `@lunarbase/client-arbitrum` — executed Nitro
+  logs and EVM execution-block context.
+
+Runnable component:
+
+- `lunarbase-indexer` — Rust HTTP service with optional Redis checkpointing,
+  Prometheus metrics, and graceful shutdown.
+
+There are no aggregate facade packages. Consumers depend only on core plus the
+network adapter they actually use.
+
+## Release status
+
+| Component | Status |
+| --- | --- |
+| Pure Rust/TypeScript math | parity-gated |
+| Common clients | ready for integration testing |
+| Base adapter | release candidate; stable after deployment live smoke |
+| Monad adapter | experimental until native-node soak |
+| Arbitrum adapter | experimental until Nitro-node validation |
+
+The math compatibility baseline is pinned to
+`lunarbase-contracts@24db47b866e8150a0d91cffd80efe49df85179b5:math-v1`.
+Canonical Solidity/Rust/TypeScript differential tests live in
+`lunarbase-contracts`.
+
+## Build and verify
+
+Prerequisites are stable Rust, Node.js 22+, pnpm, and Foundry for FFI tests.
+The Makefile falls back to Corepack when `pnpm` is not installed directly.
+
+```bash
 make build
 make test
 make verify
 ```
 
-The root `Makefile` is the canonical entry point for the repository:
-`build` compiles every Rust workspace target and all TypeScript packages;
-`test` runs the Rust and TypeScript suites; `lint`, `docs`, `fmt-check`, and
-`verify` provide the corresponding CI checks. The Solidity differential FFI
-suite can be run with `make ffi` when the sibling `lunarbase-contracts`
-checkout is available.
+Useful focused commands:
 
-Formatting and lint policy is versioned with the source: TypeScript uses the
-flat ESLint config in `eslint.config.mjs` and Prettier settings in
-`prettier.config.mjs`; Rust uses `rustfmt.toml`, `clippy.toml`, and shared
-workspace lints in `Cargo.toml`. Run `make fmt` to apply formatting,
-`make fmt-check` to validate it, and `make lint` to run ESLint plus Clippy with
-warnings treated as errors. TypeScript tooling is pinned in `package.json` and
-`pnpm-lock.yaml`; `make build` and other Node targets transparently use
-Corepack when a standalone `pnpm` binary is not on `PATH`.
+```bash
+make test-runtime
+make test-process-e2e
+make load
+make ffi
+make monad-live-validate
+```
 
-Network adapters implement common source contracts from `client-core`. A
-source gap, reorg, removed log, code-hash mismatch, or impossible principal
-transition makes the snapshot unavailable until canonical recovery.
+`make source-size-check` enforces the 500-line source-file limit.
 
 ## Run the indexer
 
-Edit the deployment identity and endpoints in `config/base.toml`, then start
-the complete Base indexer and quote API:
+Edit `config/base.toml`, especially `core`, `router`, code hash, and endpoints,
+then run:
 
-```sh
+```bash
 make run
 ```
 
-The same binary can be compiled for another network without pulling unused
-adapters into the build:
+Equivalent explicit command:
 
-```sh
-make run NETWORK=monad
-make run NETWORK=arbitrum
+```bash
+cargo run -p lunarbase-indexer \
+  --no-default-features --features base \
+  -- --config config/base.toml
 ```
 
-The service exposes `GET /health/live`, `GET /health/ready`, `GET /metrics`,
-and `POST /v1/quote` on the configured bind address. Monetary values and block
-numbers are JSON strings so callers never cross a JavaScript-number boundary.
+Base is the default feature. Experimental adapters can be built with
+`NETWORK=monad` or `NETWORK=arbitrum`. A native Monad deployment beside the
+node uses the Linux x86_64-only `monad-native` feature. Build its production
+image with `make docker-build-monad-native`; the explicit platform also makes
+the command work from an Apple Silicon development machine.
 
-```sh
-curl -s http://127.0.0.1:8080/v1/quote \
-  -H 'content-type: application/json' \
-  -d '{
-    "router":"0x0000000000000000000000000000000000000001",
-    "assetIn":"0x0000000000000000000000000000000000000002",
-    "assetOut":"0x0000000000000000000000000000000000000003",
-    "amount":"1000000000000000000",
-    "mode":"exactIn",
-    "executionBlockNumber":"123456",
-    "minimumCommitment":"realtime",
-    "maxAgeBlocks":2
-  }'
+Docker Compose starts the Base indexer and optional Redis acceleration:
+
+```bash
+make docker-up
 ```
 
-`config/monad.toml` points at the local execution-events parser path used by
-the Monad adapter. Redis is disabled in the templates; enable it to persist
-checkpoints and the bounded recovery stream.
+Every process independently indexes and serves quotes. Run multiple replicas
+behind a load balancer without a writer lease or leader election.
 
-## Horizontal replicas
+## HTTP API
 
-When Redis is enabled, writer leasing is enabled by default. Every process
-starts its HTTP server immediately, but only the owner of the deployment's
-Redis lease creates an indexing client and serves quotes. Other replicas stay
-live as standbys and return `503` from readiness/quote endpoints. Use a unique
-`LUNARBASE_WRITER_ID` for each replica.
+`POST /v1/quote`:
 
-Acquire uses `SET NX PX`; renew and release are owner-checked Lua operations.
-Renewal errors and lost ownership fail closed: the client is removed from HTTP
-state before source/reducer cleanup. `SIGTERM` writes a final checkpoint and
-releases the lease; if Redis is unavailable, TTL remains the fencing fallback.
-
-Prometheus metrics include process role/readiness, block/lag/commitment,
-source reconnect/gap/recovery counters, quote latency/errors, Redis
-checkpoint latency/failures, queue utilization, lease transitions, alert
-delivery failures, and shutdown failures.
-
-## Graceful shutdown and alerts
-
-`lunarbase-indexer` handles both `SIGTERM` and `Ctrl-C` during startup,
-readiness waiting, and normal HTTP serving. Shutdown proceeds in this order:
-
-1. Stop accepting new HTTP traffic and drain active requests.
-2. Mark the quote reducer unavailable.
-3. Cooperatively cancel source subscription, stream reads, reconnect waits,
-   recovery, and reducer work.
-4. Join the source and reducer tasks within `[shutdown].timeout_seconds`.
-5. Persist one final checkpoint with the same bounded deadline.
-6. Abort remaining tasks only as an emergency timeout fallback.
-
-Cancelling startup while the RPC snapshot is in progress also aborts the
-already-started realtime source pump; it cannot remain detached.
-Synchronous Redis commits run on Tokio's blocking pool instead of occupying an
-async runtime worker. Redis connect/read/write operations use
-`[redis].io_timeout_milliseconds`; configuration validation ensures two
-attempts fit within the process shutdown timeout.
-
-Operational failures are always written as structured tracing records with
-`alert=true`, a stable `code`, severity, network, chain id, and Core address.
-The supervisor reports:
-
-- source subscription/stream failures and unexpected stream closure;
-- reducer transition and canonical recovery failures;
-- Redis/final-checkpoint failures;
-- unexpected background-task termination or panic;
-- a reducer remaining not-ready beyond the configured threshold;
-- process panics and shutdown deadline overruns;
-- recovery after a prolonged not-ready period.
-
-Set the webhook through the environment rather than committing a secret:
-
-```sh
-LUNARBASE_ALERT_WEBHOOK_URL=https://alerts.example/internal/lunarbase \
-make run
+```json
+{
+  "assetIn": "0x0000000000000000000000000000000000000001",
+  "assetOut": "0x0000000000000000000000000000000000000002",
+  "amount": "1000000000000000000",
+  "mode": "exactIn"
+}
 ```
 
-The webhook receives generic JSON containing `service`, `severity`, `code`,
-`message`, deployment identity, timestamp, and a human-readable `text` field.
-Repeated alerts are deduplicated by code according to
-`[alerts].repeat_interval_seconds`. Failed webhook delivery is logged and
-becomes immediately eligible for retry.
+The configured router, execution block, commitment, and freshness policy are
+runtime-owned. A successful response contains the exact cursor and execution
+block used:
 
-Setting `[alerts].enabled = false` disables readiness polling and webhook
-delivery. Runtime failures and panics are still emitted to structured logs.
-
-## Monad parser smoke test
-
-The Monad client includes a real WebSocket reader for the local
-`monad-exec-events-parser` protocol. It subscribes to `logs` plus the parser's
-`all` stream, maps `proposed/finalized/verified` to
-`Realtime/Canonical/Finalized`, and converts `subscriptionGap`, expired ring,
-and stalled-reader signals into a mandatory normalized `Gap`.
-
-```sh
-LUNARBASE_CORE=0x... \
-LUNARBASE_MONAD_PARSER_WS=ws://127.0.0.1:8080/ws/subscriptions \
-cargo run -p lunarbase-client-monad --example monad-parser-smoke
+```json
+{
+  "cursor": {
+    "chainId": 8453,
+    "blockNumber": 123,
+    "executionBlockNumber": 123,
+    "blockHash": "0x...",
+    "commitment": "realtime",
+    "sourceSequence": null
+  },
+  "executionBlockNumber": 123,
+  "result": {
+    "status": "available",
+    "amountIn": "1000000000000000000",
+    "amountOut": "998000000000000000",
+    "feeAsset": "0x...",
+    "feeAmount": "2000000000000000",
+    "partnerFee": "0",
+    "treasuryFee": "2000000000000000"
+  }
+}
 ```
 
-The parser's `seqno` is global across all execution events. Filtered `logs`
-therefore have sparse seqnos; the adapter only rejects regressions and
-duplicates, while complete raw-ring readers may use strict contiguous gap
-detection.
+`POST /v1/quotes` accepts either an array or `{ "requests": [...] }`, with a
+maximum of 256 requests. Every result in the response is computed while
+holding one shared state snapshot and therefore has one cursor.
 
-The parser reader feeds the universal Rust `MonadExecutionEngine`. A future
-native shared-memory reader only needs to implement `ExecutionEventReader`.
-TypeScript exposes the same boundary through `MonadExecutionEventsSource` and
-`MonadSidecarBackend`.
+Operational endpoints:
 
-For Base, use `BaseFlashblocksBackend` with the documented `pendingLogs` and
-`newFlashblocks` subscriptions. For Arbitrum, use `ArbitrumNitroBackend` on
-executed Nitro state; it fails closed when a realtime head omits the
-EVM-visible parent block context.
+- `GET /healthz` — process liveness.
+- `GET /readyz` — quote readiness and cursor.
+- `GET /metrics` — Prometheus exposition.
 
-The high-level clients start realtime ingestion before the block-tagged
-snapshot, apply a bounded handoff, persist checkpoints after accepted updates,
-and resnapshot/backfill after gaps, reorgs, removed logs, or code-hash
-mismatches. Redis itself is an external service; the library manages keys,
-leases, atomic checkpoint/stream writes, deduplication, health, and shutdown,
-but does not spawn a Redis server.
+A gap, reorg, removed log, queue overflow, invalid code hash, or failed state
+transition makes quote endpoints return `503` until canonical recovery
+completes.
 
-## Operational validation and delivery
+## Embedding
 
-Build and run the full local RPC/WebSocket/Redis/process/failover scenario:
+TypeScript Base:
 
-```sh
-make test-process-e2e
+```ts
+import { connectBase } from "@lunarbase/client-base";
+
+const client = await connectBase(config, optionalCheckpoint);
+const quote = client.quote(request);
+const batch = client.quoteMany(requests);
+await client.shutdown();
 ```
 
-Run the default target topology benchmark:
+Rust clients expose matching high-level network constructors such as
+`lunarbase_client_base::connect_base`. The lower-level core constructor accepts
+a custom `ChainDataSource`:
 
-```sh
-make load LANES=15 PAIRS=100 REQUESTS=20000 CONCURRENCY=128
+```rust
+let client = ConnectedQuoteClient::connect(config, source, checkpoint).await?;
+let quote = client.quote(&request)?;
+let batch = client.quote_many(&requests)?;
+client.shutdown().await;
 ```
 
-`lunarbase-monad-validate` subscribes directly to the parser's `all` stream,
-audits global sequence and proposed/finalized/verified transitions, samples
-RPC/indexer lag and readiness, and compares configured service quote fields
-with Solidity `eth_call` words as exact `uint256` values. `make
-monad-live-validate` runs it for one hour by default; use `SOAK_SECONDS=86400`
-for a day.
+Client-core does not depend on Redis. Applications may persist the explicit
+versioned checkpoint returned by `checkpoint()` using their own storage.
 
-The production-shaped container topology is:
+## Redis fallback
 
-```sh
-docker compose up --build -d
+Redis belongs only to `lunarbase-indexer`. It uses one key:
+
+```text
+lunarbase:v3:{chainId}:{core}:{router}
 ```
 
-Replace every placeholder in `config/production.base.toml` first. CI validates
-all Base/Monad/Arbitrum feature builds and runs the real-process E2E harness.
-Tagged releases build per-network binaries; registry publication is a manual,
-secret-gated workflow. See [`PRODUCTION_RUNBOOK.md`](PRODUCTION_RUNBOOK.md).
+The value is a versioned JSON DTO containing the complete quote state and has
+no TTL. Writes are atomic full-value `SET`s. There are no Streams, leases,
+dedup keys, fencing tokens, or standby roles.
+
+At startup the checkpoint is accepted only when schema/math version, code
+hash, deployment identity, router profile, and canonical block hash match.
+Failure or unavailability falls back to an RPC snapshot. Redis errors never
+revoke readiness of an already running process.
+
+## Observability and alerts
+
+Structured logs are emitted through `tracing`. `/metrics` includes readiness,
+head/execution block, lag, commitment, queue utilization, reconnect/gap/recovery
+counters, quote count/errors/latency, and checkpoint success/failure.
+
+Alert delivery is intentionally external. Example Prometheus rules are in
+`config/prometheus-alerts.yml`; route them through your existing Alertmanager.
+
+## Performance invariants
+
+- Rust hot state uses a short synchronous `RwLock`; quotes take a shared guard
+  and do not clone state.
+- TypeScript computes synchronously in one event-loop turn and does not expose
+  mutable state maps.
+- `Lane.slot0` remains one `U256`; mask/shift accessors avoid an extra bitfield
+  dependency.
+- Boundary views use native widths (`u128/u64/u32/u8/bool`) and convert to
+  `U256` only at packing or arithmetic boundaries.
+- Queues and reorder buffers are bounded. Overflow fails closed and triggers a
+  complete canonical recovery.

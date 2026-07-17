@@ -6,14 +6,14 @@
 //! the network-specific adapters.  A closed socket is deliberately terminal:
 //! callers must recover from the HTTP source before claiming freshness again.
 
-use crate::source::{NormalizedBackend, SourceStream};
+use crate::source::{ChainDataSource, SourceStream};
 use crate::state::ordering::CursorReorderBuffer;
 use crate::transport::rpc::{parse_rpc_log, RpcError, RpcHttpBackend, RpcHttpClient};
 use crate::{
-    BackfillRequest, ChainCursor, ChainUpdate, Commitment, ContractFilter, Network, SourceError,
+    BackfillRequest, BootstrapSnapshot, ChainCursor, ChainUpdate, Checkpoint, Commitment,
+    ContractFilter, DeploymentConfig, Network, RpcSnapshotProvider, SourceError,
 };
 use async_stream::stream;
-use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use lunarbase_math::U256;
 use serde_json::{json, Value};
@@ -27,6 +27,9 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 pub struct WsRpcConfig {
     pub max_frame_bytes: usize,
     pub reorder_capacity: usize,
+    pub logs_subscription: String,
+    /// Accept multiple monotonically sequenced heads at one block height.
+    pub progressive_heads: bool,
 }
 
 impl Default for WsRpcConfig {
@@ -34,6 +37,8 @@ impl Default for WsRpcConfig {
         Self {
             max_frame_bytes: 256 * 1024,
             reorder_capacity: 4096,
+            logs_subscription: "logs".into(),
+            progressive_heads: false,
         }
     }
 }
@@ -43,7 +48,10 @@ impl WsRpcConfig {
     /// queue. A zero bound would either make every frame invalid or make the
     /// reorder buffer unable to accept its first update.
     pub fn validate(&self) -> Result<(), SourceError> {
-        if self.max_frame_bytes == 0 || self.reorder_capacity == 0 {
+        if self.max_frame_bytes == 0
+            || self.reorder_capacity == 0
+            || !matches!(self.logs_subscription.as_str(), "logs" | "pendingLogs")
+        {
             return Err(SourceError::Unavailable(
                 "WS frame and reorder bounds must be non-zero".into(),
             ));
@@ -114,10 +122,18 @@ impl WsRpcBackend {
     }
 }
 
-#[async_trait]
-impl NormalizedBackend for WsRpcBackend {
-    async fn snapshot_cursor(&self, network: Network) -> Result<ChainCursor, SourceError> {
-        self.http.snapshot_cursor(network).await
+impl ChainDataSource for WsRpcBackend {
+    fn network(&self) -> Network {
+        self.http.network()
+    }
+
+    async fn snapshot(
+        &self,
+        deployment: &DeploymentConfig,
+    ) -> Result<BootstrapSnapshot, SourceError> {
+        RpcSnapshotProvider::new(self.http.rpc().clone(), self.http.snapshot_tag().to_owned())
+            .snapshot(deployment)
+            .await
     }
 
     async fn backfill(
@@ -127,14 +143,7 @@ impl NormalizedBackend for WsRpcBackend {
         self.http.backfill(request).await
     }
 
-    async fn subscribe(
-        &self,
-        network: Network,
-        filter: ContractFilter,
-    ) -> Result<SourceStream, SourceError> {
-        if network != self.http.network() {
-            return Err(SourceError::NetworkMismatch);
-        }
+    async fn subscribe(&self, filter: ContractFilter) -> Result<SourceStream, SourceError> {
         self.config.validate()?;
         let (socket, _) = connect_async(self.ws_endpoint.as_ref())
             .await
@@ -143,7 +152,11 @@ impl NormalizedBackend for WsRpcBackend {
             })?;
         let (mut writer, mut reader) = socket.split();
         writer
-            .send(Message::Text(subscription_request(1, &filter)))
+            .send(Message::Text(subscription_request(
+                1,
+                &filter,
+                &self.config.logs_subscription,
+            )))
             .await
             .map_err(|error| {
                 SourceError::Unavailable(format!("RPC logs subscription failed: {error}"))
@@ -176,6 +189,7 @@ impl NormalizedBackend for WsRpcBackend {
                 }
             };
             let mut last_head: Option<WsHead> = None;
+            let mut source_sequence = 0_u64;
 
             while let Some(message) = reader.next().await {
                 let message = match message {
@@ -253,13 +267,15 @@ impl NormalizedBackend for WsRpcBackend {
                 };
 
                 if logs_subscription.as_deref() == Some(subscription) {
-                    let log = match parse_rpc_log(result, chain_id, Commitment::Realtime) {
+                    let mut log = match parse_rpc_log(result, chain_id, Commitment::Realtime) {
                         Ok(log) => log,
                         Err(error) => {
                             yield Err(SourceError::Unavailable(format!("invalid RPC log notification: {error}")));
                             break;
                         }
                     };
+                    source_sequence = source_sequence.saturating_add(1);
+                    log.cursor.source_sequence = Some(source_sequence);
                     let update = ChainUpdate::Log(log);
                     match reorder.push(update) {
                         Ok(_) => {}
@@ -276,13 +292,15 @@ impl NormalizedBackend for WsRpcBackend {
                     continue;
                 }
                 if heads_subscription.as_deref() == Some(subscription) {
-                    let (head, parent_hash) = match parse_ws_head(result, chain_id) {
+                    let mut head = match parse_ws_head(result, chain_id) {
                         Ok(head) => head,
                         Err(error) => {
                             yield Err(SourceError::Unavailable(format!("invalid RPC head notification: {error}")));
                             break;
                         }
                     };
+                    source_sequence = source_sequence.saturating_add(1);
+                    head.cursor.source_sequence = Some(source_sequence);
                     if let Some(previous) = last_head.as_ref() {
                         if head.cursor.block_number
                             > previous.cursor.block_number.saturating_add(1)
@@ -293,12 +311,7 @@ impl NormalizedBackend for WsRpcBackend {
                             });
                             break;
                         }
-                        let discontinuity = head.cursor.block_number <= previous.cursor.block_number
-                            || (head.cursor.block_number == previous.cursor.block_number.saturating_add(1)
-                                && parent_hash.is_some()
-                                && previous.cursor.block_hash.is_some()
-                                && parent_hash != previous.cursor.block_hash);
-                        if discontinuity {
+                        if head_discontinuity(previous, &head, config.progressive_heads) {
                             yield Ok(ChainUpdate::Reorg {
                                 old_head: previous.cursor.clone(),
                                 new_head: head.cursor.clone(),
@@ -325,14 +338,38 @@ impl NormalizedBackend for WsRpcBackend {
         };
         Ok(Box::pin(stream))
     }
+
+    async fn canonical_head(&self) -> Result<ChainCursor, SourceError> {
+        self.http.snapshot_cursor(self.http.network()).await
+    }
+
+    async fn validate_checkpoint(&self, checkpoint: &Checkpoint) -> Result<bool, SourceError> {
+        self.http.validate_checkpoint(checkpoint).await
+    }
 }
 
 #[derive(Clone, Debug)]
 struct WsHead {
     cursor: ChainCursor,
+    parent_hash: Option<[u8; 32]>,
 }
 
-fn subscription_request(id: u64, filter: &ContractFilter) -> String {
+fn head_discontinuity(previous: &WsHead, next: &WsHead, progressive: bool) -> bool {
+    let same_height = next.cursor.block_number == previous.cursor.block_number;
+    let same_height_discontinuity = same_height
+        && (!progressive
+            || (next.parent_hash.is_some()
+                && previous.parent_hash.is_some()
+                && next.parent_hash != previous.parent_hash));
+    next.cursor.block_number < previous.cursor.block_number
+        || same_height_discontinuity
+        || (next.cursor.block_number == previous.cursor.block_number.saturating_add(1)
+            && next.parent_hash.is_some()
+            && previous.cursor.block_hash.is_some()
+            && next.parent_hash != previous.cursor.block_hash)
+}
+
+fn subscription_request(id: u64, filter: &ContractFilter, kind: &str) -> String {
     let mut options = serde_json::Map::new();
     options.insert("address".into(), Value::String(filter.address.to_hex()));
     if !filter.topics.is_empty() {
@@ -351,12 +388,12 @@ fn subscription_request(id: u64, filter: &ContractFilter) -> String {
         "jsonrpc": "2.0",
         "id": id,
         "method": "eth_subscribe",
-        "params": ["logs", Value::Object(options)],
+        "params": [kind, Value::Object(options)],
     })
     .to_string()
 }
 
-fn parse_ws_head(value: &Value, chain_id: u64) -> Result<(WsHead, Option<[u8; 32]>), RpcError> {
+fn parse_ws_head(value: &Value, chain_id: u64) -> Result<WsHead, RpcError> {
     let object = value
         .as_object()
         .ok_or_else(|| RpcError::Invalid("newHeads result is not an object".into()))?;
@@ -367,21 +404,20 @@ fn parse_ws_head(value: &Value, chain_id: u64) -> Result<(WsHead, Option<[u8; 32
         .get("l1BlockNumber")
         .map(|value| parse_hex_u64_value(Some(value), "head.l1BlockNumber"))
         .transpose()?;
-    Ok((
-        WsHead {
-            cursor: ChainCursor {
-                chain_id,
-                block_number,
-                block_hash,
-                transaction_index: None,
-                log_index: None,
-                source_sequence: evm_parent_block,
-                source_sub_index: None,
-                commitment: Commitment::Realtime,
-            },
+    Ok(WsHead {
+        cursor: ChainCursor {
+            chain_id,
+            block_number,
+            execution_block_number: evm_parent_block.unwrap_or(block_number),
+            block_hash,
+            transaction_index: None,
+            log_index: None,
+            source_sequence: None,
+            source_sub_index: None,
+            commitment: Commitment::Realtime,
         },
         parent_hash,
-    ))
+    })
 }
 
 async fn websocket_payload<S>(
@@ -459,42 +495,5 @@ fn word_hex(value: U256) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use lunarbase_math::Address;
-
-    #[test]
-    fn builds_standard_logs_subscription() {
-        let address = Address::from_hex("0x0000000000000000000000000000000000000001").unwrap();
-        let request = subscription_request(
-            1,
-            &ContractFilter {
-                address,
-                topics: vec![U256::ONE],
-            },
-        );
-        let value: Value = serde_json::from_str(&request).unwrap();
-        assert_eq!(value["method"], "eth_subscribe");
-        assert_eq!(value["params"][0], "logs");
-        assert_eq!(value["params"][1]["address"], address.to_hex());
-        assert_eq!(value["params"][1]["topics"][0], format!("0x{:064x}", 1));
-    }
-
-    #[test]
-    fn parses_heads_and_preserves_parent_hash() {
-        let hash = "0x1111111111111111111111111111111111111111111111111111111111111111";
-        let parent = "0x2222222222222222222222222222222222222222222222222222222222222222";
-        let value = json!({"number":"0x2a","hash":hash,"parentHash":parent});
-        let (head, parent_hash) = parse_ws_head(&value, 42161).unwrap();
-        assert_eq!(head.cursor.block_number, 42);
-        assert_eq!(head.cursor.block_hash, Some([0x11; 32]));
-        assert_eq!(parent_hash, Some([0x22; 32]));
-        assert_eq!(head.cursor.commitment, Commitment::Realtime);
-    }
-
-    #[test]
-    fn rejects_invalid_head_hash_width() {
-        let value = json!({"number":"0x2a","hash":"0x01"});
-        assert!(parse_ws_head(&value, 42161).is_err());
-    }
-}
+#[path = "ws_tests.rs"]
+mod tests;

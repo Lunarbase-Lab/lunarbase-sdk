@@ -1,4 +1,10 @@
-async fn compare_vector(
+use super::{
+    helpers::parse_u256_hex,
+    types::{MonadArguments, SolidityCall, ValidationVector},
+    *,
+};
+
+pub(super) async fn compare_vector(
     http: &reqwest::Client,
     arguments: &MonadArguments,
     vector: &ValidationVector,
@@ -19,7 +25,7 @@ async fn compare_vector(
         return false;
     };
     let Some(quote_amount) = quote
-        .pointer(&format!("/outcome/{}", solidity.quote_field))
+        .pointer(&format!("/result/{}", solidity.quote_field))
         .and_then(Value::as_str)
         .and_then(|value| U256::from_str(value).ok())
     else {
@@ -49,4 +55,3 @@ async fn compare_vector(
         .and_then(parse_u256_hex)
         .is_some_and(|solidity_amount| solidity_amount == quote_amount)
 }
-

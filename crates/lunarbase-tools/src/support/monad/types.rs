@@ -1,3 +1,5 @@
+use super::{helpers::latest, *};
+
 /// Live validation endpoints and soak bounds.
 #[derive(Clone, Debug, Parser)]
 #[command(name = "lunarbase-monad-validate")]
@@ -38,53 +40,52 @@ pub enum MonadError {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ValidationVector {
-    quote: Value,
+pub(super) struct ValidationVector {
+    pub(super) quote: Value,
     #[serde(default)]
-    solidity: Option<SolidityCall>,
+    pub(super) solidity: Option<SolidityCall>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SolidityCall {
-    to: String,
-    data: String,
+pub(super) struct SolidityCall {
+    pub(super) to: String,
+    pub(super) data: String,
     #[serde(default = "latest")]
-    block_tag: String,
+    pub(super) block_tag: String,
     /// `amountIn` or `amountOut` in the indexer quote outcome.
-    quote_field: String,
+    pub(super) quote_field: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ParserReport {
-    messages: u64,
-    heads: u64,
-    health_messages: u64,
-    alerts: u64,
-    explicit_gaps: u64,
-    sequence_regressions: u64,
-    commitment_regressions: u64,
-    last_sequence: Option<u64>,
-    last_block: Option<u64>,
+pub(super) struct ParserReport {
+    pub(super) messages: u64,
+    pub(super) heads: u64,
+    pub(super) health_messages: u64,
+    pub(super) alerts: u64,
+    pub(super) explicit_gaps: u64,
+    pub(super) sequence_regressions: u64,
+    pub(super) commitment_regressions: u64,
+    pub(super) last_sequence: Option<u64>,
+    pub(super) last_block: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct MonadReport {
-    duration_seconds: f64,
-    samples: u64,
-    parser: ParserReport,
-    parser_ready_failures: u64,
-    indexer_readiness_failures: u64,
-    rpc_failures: u64,
-    maximum_indexer_lag_blocks: u64,
-    quote_comparisons: u64,
-    quote_mismatches: u64,
-    reconnects_delta: f64,
-    gaps_delta: f64,
-    recoveries_delta: f64,
-    recovery_failures_delta: f64,
-    status: &'static str,
+pub(super) struct MonadReport {
+    pub(super) duration_seconds: f64,
+    pub(super) samples: u64,
+    pub(super) parser: ParserReport,
+    pub(super) parser_ready_failures: u64,
+    pub(super) indexer_readiness_failures: u64,
+    pub(super) rpc_failures: u64,
+    pub(super) maximum_indexer_lag_blocks: u64,
+    pub(super) quote_comparisons: u64,
+    pub(super) quote_mismatches: u64,
+    pub(super) reconnects_delta: f64,
+    pub(super) gaps_delta: f64,
+    pub(super) recoveries_delta: f64,
+    pub(super) recovery_failures_delta: f64,
+    pub(super) status: &'static str,
 }
-

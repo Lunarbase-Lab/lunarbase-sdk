@@ -1,4 +1,10 @@
-async fn serve_websockets(
+use super::{
+    environment::{MockEvent, MockState},
+    helpers::{block_hash, stop_requested},
+    *,
+};
+
+pub(super) async fn serve_websockets(
     listener: TcpListener,
     state: Arc<MockState>,
     stop: &mut watch::Receiver<bool>,
@@ -80,10 +86,9 @@ async fn websocket_connection_inner(
                     "params": {
                         "subscription": "flashblocks",
                         "result": {
-                            "payload_id": format!("0x{block:02x}"),
-                            "index": 0,
-                            "base": {"block_number": format!("0x{block:x}")},
-                            "diff": {"block_hash": block_hash(block)}
+                            "number": format!("0x{block:x}"),
+                            "hash": block_hash(block),
+                            "parentHash": block_hash(block.saturating_sub(1))
                         }
                     }
                 });
@@ -99,4 +104,3 @@ async fn websocket_connection_inner(
     }
     Ok(())
 }
-

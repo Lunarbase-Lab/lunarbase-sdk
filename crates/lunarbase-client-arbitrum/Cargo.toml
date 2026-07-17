@@ -5,14 +5,13 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-description = "Arbitrum Nitro runtime client for LunarBase"
+description = "Experimental Arbitrum Nitro runtime client for LunarBase"
 
 [lints]
 workspace = true
 
 [dependencies]
 async-stream.workspace = true
-async-trait.workspace = true
 futures-util.workspace = true
 lunarbase-client-core.workspace = true
 lunarbase-math.workspace = true

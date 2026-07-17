@@ -1,4 +1,9 @@
-async fn rpc_block_number(http: &reqwest::Client, rpc_url: &str) -> Result<u64, MonadError> {
+use super::*;
+
+pub(super) async fn rpc_block_number(
+    http: &reqwest::Client,
+    rpc_url: &str,
+) -> Result<u64, MonadError> {
     let response: Value = http
         .post(rpc_url)
         .json(&json!({
@@ -19,7 +24,7 @@ async fn rpc_block_number(http: &reqwest::Client, rpc_url: &str) -> Result<u64, 
         .map_err(|error| MonadError::Validation(error.to_string()))
 }
 
-async fn require_success(
+pub(super) async fn require_success(
     client: &reqwest::Client,
     url: &str,
     component: &str,
@@ -33,7 +38,7 @@ async fn require_success(
     }
 }
 
-async fn is_success(client: &reqwest::Client, url: &str) -> bool {
+pub(super) async fn is_success(client: &reqwest::Client, url: &str) -> bool {
     client
         .get(url)
         .send()
@@ -41,7 +46,7 @@ async fn is_success(client: &reqwest::Client, url: &str) -> bool {
         .is_ok_and(|response| response.status().is_success())
 }
 
-async fn metrics(client: &reqwest::Client, indexer_url: &str) -> String {
+pub(super) async fn metrics(client: &reqwest::Client, indexer_url: &str) -> String {
     let url = format!("{}/metrics", indexer_url.trim_end_matches('/'));
     match client.get(url).send().await {
         Ok(response) => response.text().await.unwrap_or_default(),
@@ -49,7 +54,7 @@ async fn metrics(client: &reqwest::Client, indexer_url: &str) -> String {
     }
 }
 
-fn metric_delta(before: &str, after: &str, name: &str) -> f64 {
+pub(super) fn metric_delta(before: &str, after: &str, name: &str) -> f64 {
     metric_value(after, name) - metric_value(before, name)
 }
 
@@ -65,11 +70,11 @@ fn metric_value(metrics: &str, name: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
-fn parse_u64(value: Option<&Value>) -> Option<u64> {
+pub(super) fn parse_u64(value: Option<&Value>) -> Option<u64> {
     value?.as_u64().or_else(|| value?.as_str()?.parse().ok())
 }
 
-fn parse_u256_hex(value: &str) -> Option<U256> {
+pub(super) fn parse_u256_hex(value: &str) -> Option<U256> {
     let value = value.trim_start_matches("0x");
     if value.is_empty() || value.len() > 64 {
         return None;
@@ -82,7 +87,7 @@ fn parse_u256_hex(value: &str) -> Option<U256> {
     Some(U256::from_be_bytes(bytes))
 }
 
-const fn commitment_rank(commitment: &str) -> u8 {
+pub(super) const fn commitment_rank(commitment: &str) -> u8 {
     match commitment.as_bytes() {
         b"proposed" => 0,
         b"finalized" => 1,
@@ -91,11 +96,11 @@ const fn commitment_rank(commitment: &str) -> u8 {
     }
 }
 
-fn latest() -> String {
+pub(super) fn latest() -> String {
     "latest".into()
 }
 
-async fn stop_requested(stop: &mut watch::Receiver<bool>) {
+pub(super) async fn stop_requested(stop: &mut watch::Receiver<bool>) {
     if *stop.borrow() {
         return;
     }

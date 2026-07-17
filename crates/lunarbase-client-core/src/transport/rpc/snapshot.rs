@@ -1,4 +1,19 @@
+use super::client::{
+    SELECTOR_BLACKLIST_FEE_MULTIPLIER, SELECTOR_CASH, SELECTOR_LANE, SELECTOR_PARTNERS,
+    SELECTOR_RESERVES, SELECTOR_WHITELIST,
+};
+use super::codec::{
+    checked_u128, checked_u32, decode_address_word, decode_bool, decode_word, decode_words,
+    hex_encode, keccak256, selector_address, selector_two_addresses,
+};
+use super::RpcHttpClient;
+use crate::protocol::abi::{lane_discovery_topics, TOPIC_LANE_ADDED, TOPIC_LANE_REMOVED};
+use crate::{BackfillRequest, BootstrapSnapshot, Commitment, DeploymentConfig, SourceError};
+use lunarbase_math::{Address, LaneState, QuoteState};
+use std::{collections::BTreeSet, sync::Arc};
+
 #[derive(Clone)]
+/// Produces one coherent, block-tagged quote state from Core view calls.
 pub struct RpcSnapshotProvider {
     rpc: RpcHttpClient,
     snapshot_tag: Arc<str>,
@@ -19,13 +34,11 @@ impl RpcSnapshotProvider {
     }
 }
 
-#[async_trait]
-impl SnapshotProvider for RpcSnapshotProvider {
-    async fn snapshot(
+impl RpcSnapshotProvider {
+    /// Reads a coherent quote snapshot for the configured router profile.
+    pub async fn snapshot(
         &self,
         config: &DeploymentConfig,
-        lane_assets: &[Address],
-        routers: &[Address],
     ) -> Result<BootstrapSnapshot, SourceError> {
         config.validate()?;
         let commitment = if self.snapshot_tag.as_ref() == "finalized" {
@@ -53,7 +66,7 @@ impl SnapshotProvider for RpcSnapshotProvider {
         }
 
         let assets = self
-            .resolve_lane_assets(config, lane_assets, cursor.block_number)
+            .resolve_lane_assets(config, &config.explicit_lane_assets, cursor.block_number)
             .await?;
         let cash = decode_address_word(
             &self
@@ -61,6 +74,23 @@ impl SnapshotProvider for RpcSnapshotProvider {
                 .call_at(config.core, SELECTOR_CASH.into(), &self.snapshot_tag)
                 .await?,
         )?;
+        let whitelist = decode_bool(decode_word(
+            &self
+                .rpc
+                .call_at(
+                    config.core,
+                    selector_address(SELECTOR_WHITELIST, config.router),
+                    &self.snapshot_tag,
+                )
+                .await?,
+            0,
+        )?)?;
+        if whitelist != config.expect_whitelisted {
+            return Err(SourceError::Unavailable(format!(
+                "configured router whitelist status mismatch: expected {}, got {}",
+                config.expect_whitelisted, whitelist
+            )));
+        }
         let blacklist_fee_multiplier = decode_word(
             &self
                 .rpc
@@ -74,9 +104,10 @@ impl SnapshotProvider for RpcSnapshotProvider {
         )?;
         let mut state = QuoteState {
             cash,
-            blacklist_fee_multiplier,
             ..Default::default()
         };
+        state.fee_profile.whitelisted = whitelist;
+        state.fee_profile.blacklist_fee_multiplier = blacklist_fee_multiplier;
 
         for asset in &assets {
             let lane_words = decode_words(
@@ -107,19 +138,20 @@ impl SnapshotProvider for RpcSnapshotProvider {
             let slippage_k_bps = u32::try_from(lane_words[4]).map_err(|_| {
                 SourceError::Unavailable("lane slippageKBps does not fit uint32".into())
             })?;
+            let principal = u128::try_from(checked_u128(reserve_words[4], "totalPrincipalAmount")?)
+                .map_err(|_| {
+                    SourceError::Unavailable("totalPrincipalAmount does not fit uint128".into())
+                })?;
             state.lanes.insert(
                 *asset,
-                LaneState {
-                    slot0: lane_words[0],
-                    exists: decode_bool(lane_words[1])?,
-                    paused: decode_bool(lane_words[2])?,
-                    block_delay,
+                LaneState::new(
+                    lane_words[0],
+                    principal,
                     slippage_k_bps,
-                },
-            );
-            state.total_principal_amount.insert(
-                *asset,
-                checked_u128(reserve_words[4], "totalPrincipalAmount")?,
+                    block_delay,
+                    decode_bool(lane_words[1])?,
+                    decode_bool(lane_words[2])?,
+                ),
             );
         }
 
@@ -127,36 +159,22 @@ impl SnapshotProvider for RpcSnapshotProvider {
         if !partner_assets.contains(&cash) {
             partner_assets.push(cash);
         }
-        for router in routers {
-            let whitelist = decode_bool(decode_word(
+        for asset in &partner_assets {
+            let fee = decode_word(
                 &self
                     .rpc
                     .call_at(
                         config.core,
-                        selector_address(SELECTOR_WHITELIST, *router),
+                        selector_two_addresses(SELECTOR_PARTNERS, config.router, *asset),
                         &self.snapshot_tag,
                     )
                     .await?,
-                0,
-            )?)?;
-            state.whitelist.insert(*router, whitelist);
-            for asset in &partner_assets {
-                let fee = decode_word(
-                    &self
-                        .rpc
-                        .call_at(
-                            config.core,
-                            selector_two_addresses(SELECTOR_PARTNERS, *router, *asset),
-                            &self.snapshot_tag,
-                        )
-                        .await?,
-                    1,
-                )?;
-                state.partner_fee_bps.insert(
-                    (*router, *asset),
-                    U256::from(checked_u32(fee, "partner fee")?),
-                );
-            }
+                1,
+            )?;
+            state
+                .fee_profile
+                .partner_fee_bps
+                .insert(*asset, checked_u32(fee, "partner fee")?);
         }
         Ok(BootstrapSnapshot {
             state,
@@ -219,4 +237,3 @@ impl RpcSnapshotProvider {
         Ok(explicit.to_vec())
     }
 }
-

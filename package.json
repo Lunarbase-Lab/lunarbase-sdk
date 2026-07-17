@@ -1,11 +1,11 @@
 {
   "name": "@lunarbase/math-workspace",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "packageManager": "pnpm@9.15.0",
   "scripts": {
-    "build": "pnpm --filter @lunarbase/math build && pnpm --filter @lunarbase/client-core build && pnpm --filter @lunarbase/client-base build && pnpm --filter @lunarbase/client-monad build && pnpm --filter @lunarbase/client-arbitrum build && pnpm --filter @lunarbase/client build",
-    "test": "node --test packages/math/dist/*.test.js packages/client/dist/tests/*.test.js",
+    "build": "pnpm --filter @lunarbase/math build && pnpm --filter @lunarbase/client-core build && pnpm --filter @lunarbase/client-base build && pnpm --filter @lunarbase/client-monad build && pnpm --filter @lunarbase/client-arbitrum build",
+    "test": "node --test packages/math/dist/*.test.js packages/client-core/dist/*.test.js packages/client-core/dist/**/*.test.js packages/client-base/dist/*.test.js packages/client-monad/dist/*.test.js packages/client-arbitrum/dist/*.test.js",
     "format": "prettier --write \"packages/**/*.ts\"",
     "format:check": "prettier --check \"packages/**/*.ts\"",
     "lint": "eslint packages --max-warnings=0"

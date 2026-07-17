@@ -4,4 +4,3 @@ packages:
   - packages/client-base
   - packages/client-monad
   - packages/client-arbitrum
-  - packages/client

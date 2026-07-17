@@ -1,7 +1,7 @@
 {
   "name": "@lunarbase/client-arbitrum",
-  "version": "0.1.0",
-  "description": "Arbitrum Nitro client for LunarBase",
+  "version": "0.2.0",
+  "description": "Experimental Arbitrum Nitro client for LunarBase",
   "license": "MIT OR Apache-2.0",
   "type": "module",
   "files": ["dist", "!dist/**/*.test.*"],

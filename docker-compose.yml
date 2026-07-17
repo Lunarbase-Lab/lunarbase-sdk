@@ -24,8 +24,6 @@ services:
       - ./config/production.base.toml:/etc/lunarbase/indexer.toml:ro
     environment:
       RUST_LOG: lunarbase_indexer=info
-      LUNARBASE_WRITER_ID: ${HOSTNAME:-compose}-base
-      LUNARBASE_ALERT_WEBHOOK_URL: ${LUNARBASE_ALERT_WEBHOOK_URL:-}
     ports:
       - "8080:8080"
     extra_hosts:

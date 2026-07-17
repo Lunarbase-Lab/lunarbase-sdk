@@ -1,69 +1,88 @@
+/** Portable Monad parser-WebSocket source with canonical RPC recovery. */
 import {
   BoundedFrameQueue,
-  Commitment as CommitmentValue,
+  Commitment,
   defaultWebSocketFactory,
-  JsonRpcHttpClient,
-  MonadExecutionNormalizer,
-  Network as NetworkValue,
+  Network,
   parseHash,
   parseRpcLog,
   RpcError,
   RpcHttpBackend,
+  RpcSnapshotProvider,
   type BackfillRequest,
+  type BootstrapSnapshot,
   type ChainCursor,
+  type ChainDataSource,
   type ChainUpdate,
+  type Checkpoint,
   type ContractFilter,
   type ContractLog,
-  type ExecutionEvent,
-  type ExecutionEventReader,
-  type Network,
-  type NormalizedBackend,
+  type DeploymentConfig,
+  type JsonRpcHttpClient,
   type SocketEvent,
   type WebSocketFactory,
   type WebSocketLike,
 } from "@lunarbase/client-core";
+import { MonadExecutionNormalizer, type ExecutionEvent, type ExecutionEventReader } from "./execution.js";
 
-/** Bounded parser-side WebSocket resource limits. */
-export interface MonadSidecarConfig {
+/** Bounded parser-side WebSocket resources. */
+export interface MonadParserConfig {
   readonly maxFrameBytes: number;
   readonly queueCapacity: number;
 }
-export const DEFAULT_MONAD_SIDECAR_CONFIG: MonadSidecarConfig = Object.freeze({
+
+export const DEFAULT_MONAD_PARSER_CONFIG: MonadParserConfig = Object.freeze({
   maxFrameBytes: 64 * 1024,
   queueCapacity: 4096,
 });
 
-/** Consume the normalized WebSocket protocol exposed by the local Monad parser sidecar. */
-export class MonadSidecarBackend implements NormalizedBackend, ExecutionEventReader {
+/** Complete portable Monad source; TypeScript intentionally has no native ring binding. */
+export class MonadParserSource implements ChainDataSource, ExecutionEventReader {
+  readonly network = Network.Monad;
   private readonly http: RpcHttpBackend;
+  private readonly snapshots: RpcSnapshotProvider;
   private readonly factory: WebSocketFactory;
-  readonly config: MonadSidecarConfig;
-  /** Creates a Monad sidecar backend with HTTP canonical fallback. */
+  readonly config: MonadParserConfig;
+
+  /** Creates a parser source plus canonical RPC bootstrap/recovery backend. */
   constructor(
     readonly rpc: JsonRpcHttpClient,
     readonly wsEndpoint: string,
-    readonly network: Network,
     readonly chainId: bigint,
     readonly snapshotTag = "finalized",
-    config: Partial<MonadSidecarConfig> = {},
+    config: Partial<MonadParserConfig> = {},
     factory: WebSocketFactory = defaultWebSocketFactory,
   ) {
-    this.config = validateConfig({ ...DEFAULT_MONAD_SIDECAR_CONFIG, ...config });
+    this.config = validateConfig({ ...DEFAULT_MONAD_PARSER_CONFIG, ...config });
     this.factory = factory;
-    this.http = new RpcHttpBackend(rpc, network, chainId, snapshotTag);
+    this.http = new RpcHttpBackend(rpc, Network.Monad, chainId, snapshotTag);
+    this.snapshots = new RpcSnapshotProvider(rpc, snapshotTag);
   }
-  /** Delegates the authoritative snapshot cursor to HTTP. */
-  snapshotCursor(network: Network): Promise<ChainCursor> {
-    return this.http.snapshotCursor(network);
+
+  /** Reads one coherent quote state through canonical RPC. */
+  snapshot(deployment: DeploymentConfig): Promise<BootstrapSnapshot> {
+    if (deployment.network !== Network.Monad)
+      return Promise.reject(new RpcError("INVALID", "Monad source network mismatch"));
+    return this.snapshots.snapshot(deployment);
   }
-  /** Delegates canonical backfill to HTTP. */
+
+  /** Reads canonical Core logs for recovery. */
   backfill(request: BackfillRequest): Promise<readonly ContractLog[]> {
     return this.http.backfill(request);
   }
-  /** Consumes normalized parser subscriptions and emits gap markers on failure. */
-  subscribe(network: Network, filter: ContractFilter, signal?: AbortSignal): AsyncIterable<ChainUpdate> {
-    if (network !== NetworkValue.Monad || network !== this.network)
-      throw new RpcError("INVALID", "Monad sidecar backend network mismatch");
+
+  /** Returns the canonical RPC head. */
+  canonicalHead(): Promise<ChainCursor> {
+    return this.http.canonicalHead();
+  }
+
+  /** Validates a checkpoint block hash through canonical RPC. */
+  validateCheckpoint(checkpoint: Checkpoint): Promise<boolean> {
+    return this.http.validateCheckpoint(checkpoint);
+  }
+
+  /** Normalizes parser records into the common update stream. */
+  subscribe(filter: ContractFilter, signal?: AbortSignal): AsyncIterable<ChainUpdate> {
     const events = this.subscribeExecution(filter, signal);
     const chainId = this.chainId;
     return (async function* () {
@@ -76,12 +95,12 @@ export class MonadSidecarBackend implements NormalizedBackend, ExecutionEventRea
     })();
   }
 
-  /** Exposes parser records through the universal execution-reader boundary. */
+  /** Exposes raw portable parser records for live validation tooling. */
   subscribeExecution(filter: ContractFilter, signal?: AbortSignal): AsyncIterable<ExecutionEvent> {
-    return this.readExecutionSocket(this.factory(this.wsEndpoint), filter, signal);
+    return this.readSocket(this.factory(this.wsEndpoint), filter, signal);
   }
 
-  private async *readExecutionSocket(
+  private async *readSocket(
     socket: WebSocketLike,
     filter: ContractFilter,
     signal?: AbortSignal,
@@ -90,13 +109,13 @@ export class MonadSidecarBackend implements NormalizedBackend, ExecutionEventRea
     const onOpen = () => queue.open();
     const onMessage = (event: SocketEvent) => {
       const frame = decodeFrame(event.data);
-      if (frame === undefined) queue.fail(new Error("Monad sidecar delivered a non-text frame"));
+      if (frame === undefined) queue.fail(new Error("Monad parser delivered a non-text frame"));
       else if (new TextEncoder().encode(frame).byteLength > this.config.maxFrameBytes)
-        queue.fail(new Error("Monad sidecar frame exceeded configured bound"));
+        queue.fail(new Error("Monad parser frame exceeded configured bound"));
       else queue.push(frame);
     };
     const onError = (event: SocketEvent) =>
-      queue.fail(event.error instanceof Error ? event.error : new Error("Monad sidecar WebSocket error"));
+      queue.fail(event.error instanceof Error ? event.error : new Error("Monad parser WebSocket error"));
     const onClose = (event: SocketEvent) => (event.reason ? queue.fail(new Error(event.reason)) : queue.close());
     socket.addEventListener("open", onOpen);
     socket.addEventListener("message", onMessage);
@@ -104,37 +123,37 @@ export class MonadSidecarBackend implements NormalizedBackend, ExecutionEventRea
     socket.addEventListener("close", onClose);
     const abort = () => queue.close();
     signal?.addEventListener("abort", abort, { once: true });
+
     try {
       if (socket.readyState === 1) queue.open();
       await queue.waitUntilOpen(signal);
-      socket.send(
-        JSON.stringify({ jsonrpc: "2.0", id: 1, method: "subscribe", params: ["logs", sidecarFilter(filter)] }),
-      );
-      socket.send(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "subscribe", params: ["all"] }));
+      socket.send(subscriptionRequest(1, "logs", sidecarFilter(filter)));
+      socket.send(subscriptionRequest(2, "all"));
       let logsSubscription: string | undefined;
       let allSubscription: string | undefined;
-      const commitments = new Map<bigint, CommitmentValue>();
+      const commitments = new Map<bigint, Commitment>();
+
       while (!signal?.aborted) {
         let frame: string | undefined;
         try {
           frame = await queue.next(signal);
         } catch (error) {
-          yield executionGap(`Monad sidecar failed; canonical recovery required: ${message(error)}`);
+          yield executionGap(`Monad parser failed: ${message(error)}`);
           return;
         }
         if (frame === undefined) {
-          yield executionGap("Monad sidecar closed; canonical recovery required");
+          yield executionGap("Monad parser closed; canonical recovery required");
           return;
         }
         let value: Record<string, unknown>;
         try {
           value = JSON.parse(frame) as Record<string, unknown>;
         } catch (error) {
-          yield executionGap(`invalid Monad sidecar JSON: ${message(error)}`);
+          yield executionGap(`invalid Monad parser JSON: ${message(error)}`);
           return;
         }
         if (value.error) {
-          yield executionGap(`Monad sidecar subscription error: ${JSON.stringify(value.error)}`);
+          yield executionGap(`Monad parser subscription error: ${JSON.stringify(value.error)}`);
           return;
         }
         if (value.result !== undefined && typeof value.result === "string") {
@@ -143,54 +162,42 @@ export class MonadSidecarBackend implements NormalizedBackend, ExecutionEventRea
           continue;
         }
         if (value.method === "subscriptionGap") {
-          const reason = `Monad parser subscription gap; skipped=${parseU64((value.params as Record<string, unknown> | undefined)?.skipped ?? 0, "subscriptionGap.skipped")}`;
-          yield executionGap(reason);
+          const params =
+            value.params && typeof value.params === "object" ? (value.params as Record<string, unknown>) : {};
+          yield executionGap(`Monad parser subscription gap; skipped=${parseU64(params.skipped ?? 0, "gap.skipped")}`);
           return;
         }
         if (value.method !== "subscription" || !value.result || typeof value.result !== "object") continue;
         const result = value.result as Record<string, unknown>;
         const type = result.type;
-        if (type === "alert") {
-          const detail = typeof result.message === "string" ? result.message : "Monad parser alert";
-          if (isRecoveryAlert(detail)) {
+        if (type === "alert" || type === "health") {
+          const detail = typeof result.message === "string" ? result.message : "Monad parser unhealthy";
+          if (result.stalled === true || isRecoveryAlert(detail)) {
             yield executionGap(detail);
             return;
           }
           continue;
         }
-        if (type === "health") {
-          if (result.stalled === true) {
-            yield executionGap("Monad parser reports stalled reader");
-            return;
-          }
-          continue;
-        }
         const subscription =
-          typeof value.params === "object" && value.params !== null
+          value.params && typeof value.params === "object"
             ? (value.params as Record<string, unknown>).subscription
             : undefined;
         if (typeof subscription !== "string") {
-          yield executionGap("Monad sidecar notification is missing subscription id");
+          yield executionGap("Monad parser notification has no subscription id");
           return;
         }
         if (subscription === allSubscription && (type === "newHead" || type === "blockStart")) {
-          let head: ChainCursor;
-          try {
-            head = parseSidecarHead(
-              result,
-              this.chainId,
-              type === "blockStart" ? CommitmentValue.Realtime : parseCommitment(result.commitment),
-            );
-          } catch (error) {
-            yield executionGap(`invalid Monad sidecar head: ${message(error)}`);
-            return;
-          }
+          const head = parseParserHead(
+            result,
+            this.chainId,
+            type === "blockStart" ? Commitment.Realtime : parseCommitment(result.commitment),
+          );
           commitments.set(head.blockNumber, head.commitment);
           while (commitments.size > 64) commitments.delete(commitments.keys().next().value as bigint);
           yield {
             kind: "Head",
             head: {
-              sequence: head.sourceSequence!,
+              sequence: head.sourceSequence ?? 0n,
               blockNumber: head.blockNumber,
               blockHash: head.blockHash,
               commitment: head.commitment,
@@ -199,23 +206,17 @@ export class MonadSidecarBackend implements NormalizedBackend, ExecutionEventRea
           continue;
         }
         if (subscription === logsSubscription && type === "log" && result.kind === "event") {
-          let log: ContractLog;
-          try {
-            log = parseSidecarLog(result, this.chainId, commitments);
-          } catch (error) {
-            yield executionGap(`invalid Monad sidecar log: ${message(error)}`);
-            return;
-          }
+          const log = parseParserLog(result, this.chainId, commitments);
           if (log.address.toLowerCase() !== filter.address.toLowerCase()) continue;
           yield {
             kind: "Log",
             log: {
-              sequence: log.cursor.sourceSequence!,
-              sourceSubIndex: log.cursor.sourceSubIndex!,
+              sequence: log.cursor.sourceSequence ?? 0n,
+              sourceSubIndex: log.cursor.sourceSubIndex ?? 0n,
               blockNumber: log.cursor.blockNumber,
               blockHash: log.cursor.blockHash,
-              transactionIndex: log.cursor.transactionIndex!,
-              logIndex: log.cursor.logIndex!,
+              transactionIndex: log.cursor.transactionIndex ?? 0n,
+              logIndex: log.cursor.logIndex ?? 0n,
               address: log.address,
               topics: log.topics,
               data: log.data,
@@ -224,6 +225,8 @@ export class MonadSidecarBackend implements NormalizedBackend, ExecutionEventRea
           };
         }
       }
+    } catch (error) {
+      yield executionGap(`invalid Monad parser payload: ${message(error)}`);
     } finally {
       signal?.removeEventListener("abort", abort);
       socket.removeEventListener?.("open", onOpen);
@@ -235,45 +238,54 @@ export class MonadSidecarBackend implements NormalizedBackend, ExecutionEventRea
   }
 }
 
-function validateConfig(config: MonadSidecarConfig): MonadSidecarConfig {
+function validateConfig(config: MonadParserConfig): MonadParserConfig {
   for (const [name, value] of Object.entries(config))
-    if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`Monad sidecar ${name} must be positive`);
+    if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`Monad parser ${name} must be positive`);
   return Object.freeze(config);
 }
+
+function subscriptionRequest(id: number, kind: "logs" | "all", filter?: Record<string, unknown>): string {
+  return JSON.stringify({
+    jsonrpc: "2.0",
+    id,
+    method: "subscribe",
+    params: filter ? [kind, filter] : [kind],
+  });
+}
+
 function sidecarFilter(filter: ContractFilter): Record<string, unknown> {
   const options: Record<string, unknown> = { address: filter.address };
   if (filter.topics.length > 0)
     options.topics = filter.topics.map((topic) => `0x${topic.toString(16).padStart(64, "0")}`);
   return options;
 }
-function parseSidecarHead(value: Record<string, unknown>, chainId: bigint, commitment: CommitmentValue): ChainCursor {
-  const header = value.header;
-  const blockTag = header && typeof header === "object" ? (header as Record<string, unknown>).blockTag : undefined;
-  const blockHash =
-    blockTag && typeof blockTag === "object" && (blockTag as Record<string, unknown>).id !== undefined
-      ? parseHash((blockTag as Record<string, unknown>).id, "head.header.blockTag.id")
-      : undefined;
+
+function parseParserHead(value: Record<string, unknown>, chainId: bigint, commitment: Commitment): ChainCursor {
+  const blockNumber = parseU64(value.blockNumber, "head.blockNumber");
   return {
     chainId,
-    blockNumber: parseU64(value.blockNumber, "head.blockNumber"),
-    blockHash,
+    blockNumber,
+    executionBlockNumber: blockNumber,
+    blockHash:
+      value.blockHash === undefined || value.blockHash === null
+        ? undefined
+        : parseHash(value.blockHash, "head.blockHash"),
     sourceSequence: parseU64(value.seqno, "head.seqno"),
     commitment,
   };
 }
-function parseSidecarLog(
+
+function parseParserLog(
   value: Record<string, unknown>,
   chainId: bigint,
-  commitments: ReadonlyMap<bigint, CommitmentValue>,
+  commitments: ReadonlyMap<bigint, Commitment>,
 ): ContractLog {
   const blockNumber = parseU64(value.blockNumber, "log.blockNumber");
   const transactionIndex = parseU64(value.transactionIndex, "log.transactionIndex");
   const logIndex = parseU64(value.logIndex, "log.logIndex");
-  if (transactionIndex > 0xffff_ffffn || logIndex > 0xffff_ffffn)
-    throw new RpcError("INVALID", "Monad log position exceeds uint32");
   const blockHash =
     value.blockHash === undefined || value.blockHash === null ? undefined : parseHash(value.blockHash, "log.blockHash");
-  const rpcLog = parseRpcLog(
+  const log = parseRpcLog(
     {
       address: value.address,
       topics: value.topics,
@@ -285,33 +297,33 @@ function parseSidecarLog(
       removed: value.removed === true,
     },
     chainId,
-    commitments.get(blockNumber) ?? CommitmentValue.Realtime,
+    commitments.get(blockNumber) ?? Commitment.Realtime,
   );
-  rpcLog.cursor.sourceSequence = parseU64(value.seqno, "log.seqno");
-  rpcLog.cursor.sourceSubIndex = logIndex;
-  return rpcLog;
+  log.cursor.sourceSequence = parseU64(value.seqno, "log.seqno");
+  log.cursor.sourceSubIndex = logIndex;
+  return log;
 }
-function parseCommitment(value: unknown): CommitmentValue {
-  if (value === "proposed") return CommitmentValue.Realtime;
-  if (value === "finalized") return CommitmentValue.Canonical;
-  if (value === "verified") return CommitmentValue.Finalized;
-  throw new RpcError("INVALID", "Monad sidecar commitment is invalid");
+
+function parseCommitment(value: unknown): Commitment {
+  if (value === "proposed") return Commitment.Realtime;
+  if (value === "finalized") return Commitment.Canonical;
+  if (value === "verified") return Commitment.Finalized;
+  throw new RpcError("INVALID", "Monad parser commitment is invalid");
 }
+
 function parseU64(value: unknown, field: string): bigint {
-  if (typeof value === "number") {
-    if (!Number.isSafeInteger(value) || value < 0) throw new RpcError("INVALID", `${field} is not a safe uint64`);
-    return BigInt(value);
-  }
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return BigInt(value);
   if (typeof value === "string" && /^(0|[1-9][0-9]*)$/.test(value)) {
     const result = BigInt(value);
-    if (result > (1n << 64n) - 1n) throw new RpcError("INVALID", `${field} exceeds uint64`);
-    return result;
+    if (result <= (1n << 64n) - 1n) return result;
   }
   throw new RpcError("INVALID", `${field} is not a decimal uint64`);
 }
+
 function hexU64(value: bigint): string {
   return `0x${value.toString(16)}`;
 }
+
 function decodeFrame(data: unknown): string | undefined {
   if (typeof data === "string") return data;
   if (data instanceof ArrayBuffer) return new TextDecoder().decode(data);
@@ -319,12 +331,15 @@ function decodeFrame(data: unknown): string | undefined {
     return new TextDecoder().decode(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
   return undefined;
 }
+
 function executionGap(reason: string): ExecutionEvent {
   return { kind: "Gap", reason };
 }
+
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
 function isRecoveryAlert(value: string): boolean {
   const lower = value.toLowerCase();
   return ["gap", "expired", "stalled", "ring"].some((needle) => lower.includes(needle));

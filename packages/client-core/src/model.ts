@@ -1,36 +1,45 @@
-/** Stable runtime model shared by every TypeScript network client. */
-import type { Address, LaneState, QuoteContext, QuoteOutcome, QuoteRequest, QuoteState, Word } from "@lunarbase/math";
+/** Provider-independent model shared by every TypeScript network client. */
+import type { Address, LaneState, QuoteOutcome, QuoteRequest, QuoteState, Word } from "@lunarbase/math";
 
-/** Binary checkpoint schema shared by Rust, TypeScript, Redis, and fixtures. */
-export const SCHEMA_VERSION = 2n;
-/** Math implementation identity embedded in checkpoints and quote metadata. */
+/** Current JSON checkpoint schema. */
+export const SCHEMA_VERSION = 3;
+/** Solidity revision whose arithmetic behavior this SDK implements. */
 export const MATH_COMPATIBILITY_VERSION = "lunarbase-contracts@24db47b866e8150a0d91cffd80efe49df85179b5:math-v1";
 
-/** Supported chain families and their source semantics. */
+/** Supported source families. */
 export enum Network {
   Base = "Base",
   Monad = "Monad",
   Arbitrum = "Arbitrum",
 }
-/** Returns the default execution chain id for a supported network. */
+
+/** Returns the default mainnet chain id for one source family. */
 export function defaultChainId(network: Network): bigint {
   return network === Network.Base ? 8453n : network === Network.Monad ? 143n : 42161n;
 }
-/** Commitment level of a normalized update. */
+
+/** Confidence attached to a normalized source cursor. */
 export enum Commitment {
   Realtime = "Realtime",
   Canonical = "Canonical",
   Finalized = "Finalized",
 }
-/** Maps commitment levels to their monotonic ordering. */
-export function commitmentRank(value: Commitment): bigint {
-  return value === Commitment.Realtime ? 0n : value === Commitment.Canonical ? 1n : 2n;
+
+/** Returns the monotonic rank of a commitment. */
+export function commitmentRank(value: Commitment): number {
+  return value === Commitment.Realtime ? 0 : value === Commitment.Canonical ? 1 : 2;
 }
 
-/** Provider-independent position of a block, transaction, or log. */
+/**
+ * Provider ordering position and EVM-visible execution block.
+ *
+ * `sourceSequence` orders stream messages only. It never substitutes network
+ * block semantics.
+ */
 export interface ChainCursor {
   chainId: bigint;
   blockNumber: bigint;
+  executionBlockNumber: bigint;
   blockHash?: string;
   transactionIndex?: bigint;
   logIndex?: bigint;
@@ -38,7 +47,8 @@ export interface ChainCursor {
   sourceSubIndex?: bigint;
   commitment: Commitment;
 }
-/** Normalized contract log with its source cursor. */
+
+/** Provider-neutral Core log. */
 export interface ContractLog {
   address: Address;
   topics: readonly Word[];
@@ -46,84 +56,72 @@ export interface ContractLog {
   removed: boolean;
   cursor: ChainCursor;
 }
-/** Address/topic filter used for canonical backfill and realtime subscriptions. */
+
+/** Core address and accepted event signatures. */
 export interface ContractFilter {
   address: Address;
   topics: readonly Word[];
 }
-/** Inclusive canonical block range requested from a source. */
+
+/** Inclusive canonical recovery range. */
 export interface BackfillRequest {
   fromBlock: bigint;
   toBlock: bigint;
   filter: ContractFilter;
 }
-/** Complete normalized update vocabulary consumed by the reducer. */
+
+/** Complete update vocabulary accepted by the ordered reducer. */
 export type ChainUpdate =
   | { kind: "Head"; cursor: ChainCursor }
   | { kind: "Log"; log: ContractLog }
   | { kind: "Reorg"; oldHead: ChainCursor; newHead: ChainCursor }
-  | { kind: "Gap"; cursor?: ChainCursor; reason: string }
-  | { kind: "SourceHealth"; healthy: boolean; detail: string };
-/** Source contract implemented by HTTP, WebSocket, Flashblocks, and sidecar adapters. */
-export interface ChainEventSource {
-  readonly network: Network;
-  snapshotCursor(): Promise<ChainCursor>;
-  backfill(request: BackfillRequest): Promise<readonly ContractLog[]>;
-  subscribe(filter: ContractFilter, signal?: AbortSignal): AsyncIterable<ChainUpdate>;
-}
+  | { kind: "Gap"; cursor?: ChainCursor; reason: string };
 
-/** Redis bounds and checkpoint cadence for a connected client. */
-export interface RedisConfig {
-  url: string;
-  streamMaxLen: number;
-  dedupTtlSeconds: bigint;
-  checkpointIntervalUpdates: number;
-}
-/** Returns safe default Redis limits for local or test deployments. */
-export const defaultRedisConfig = (): RedisConfig => ({
-  url: "redis://127.0.0.1/",
-  streamMaxLen: 10_000,
-  dedupTtlSeconds: 86_400n,
-  checkpointIntervalUpdates: 100,
-});
-/** Deployment identity and source configuration required for bootstrap. */
+/** Identity and endpoints for one Core/router deployment. */
 export interface DeploymentConfig {
   network: Network;
   chainId: bigint;
   core: Address;
+  router: Address;
+  expectWhitelisted: boolean;
   deploymentBlock: bigint;
   expectedRuntimeCodeHash: string;
   contractCompatibilityVersion: string;
   httpRpcUrl: string;
   realtimeSource: string;
-  redis: RedisConfig;
   explicitLaneAssets: readonly Address[];
-  eagerRouters: readonly Address[];
 }
-/** Fully materialized state and cursor read at one block tag. */
+
+/** Complete block-tagged state returned by a data source. */
 export interface BootstrapSnapshot {
   state: QuoteState;
   cursor: ChainCursor;
   runtimeCodeHash: string;
 }
-/** Provider boundary used to obtain a block-tagged bootstrap snapshot. */
-export interface SnapshotProvider {
-  snapshot(
-    config: DeploymentConfig,
-    laneAssets: readonly Address[],
-    routers: readonly Address[],
-  ): Promise<BootstrapSnapshot>;
-}
-/** Durable state record with compatibility and deployment identity. */
+
+/** Versioned restart state bound to one deployment and configured router. */
 export interface Checkpoint {
-  schemaVersion: bigint;
+  schemaVersion: number;
   mathCompatibilityVersion: string;
   expectedRuntimeCodeHash: string;
+  chainId: bigint;
+  core: Address;
+  router: Address;
   cursor: ChainCursor;
   state: QuoteState;
 }
 
-/** Decoded state-changing Core event applied by the reducer. */
+/** One source owns bootstrap, recovery, realtime, and checkpoint validation. */
+export interface ChainDataSource {
+  readonly network: Network;
+  snapshot(deployment: DeploymentConfig): Promise<BootstrapSnapshot>;
+  backfill(request: BackfillRequest): Promise<readonly ContractLog[]>;
+  subscribe(filter: ContractFilter, signal?: AbortSignal): AsyncIterable<ChainUpdate>;
+  canonicalHead(): Promise<ChainCursor>;
+  validateCheckpoint(checkpoint: Checkpoint): Promise<boolean>;
+}
+
+/** Decoded quote-critical Core event. `SwapExecuted` is intentionally absent. */
 export type QuoteEvent =
   | { kind: "LaneAdded"; asset: Address }
   | { kind: "LaneRemoved"; asset: Address }
@@ -134,10 +132,9 @@ export type QuoteEvent =
   | { kind: "WhitelistSet"; router: Address; whitelisted: boolean }
   | { kind: "BlacklistFeeMultiplierSet"; multiplier: bigint }
   | { kind: "DepositExecuted"; asset: Address; principal: bigint }
-  | { kind: "WithdrawalExecuted"; asset: Address; principal: bigint }
-  | { kind: "SwapExecuted" };
+  | { kind: "WithdrawalExecuted"; asset: Address; principal: bigint };
 
-/** Strict ABI validation failure while decoding a normalized log. */
+/** Strict ABI validation error. */
 export class LogDecodeError extends Error {
   constructor(
     readonly code:
@@ -148,7 +145,8 @@ export class LogDecodeError extends Error {
     this.name = "LogDecodeError";
   }
 }
-/** State-transition validation failure in the quote reducer. */
+
+/** Ordered state-transition error. */
 export class ReducerError extends Error {
   constructor(
     readonly code:
@@ -165,55 +163,42 @@ export class ReducerError extends Error {
     this.name = "ReducerError";
   }
 }
-/** Lifecycle, freshness, source, or compatibility failure from the indexer. */
+
+/** Runtime lifecycle or source-continuity error. */
 export class IndexerError extends Error {
   constructor(
-    readonly code:
-      "NOT_READY" | "GAP" | "CODE_HASH_MISMATCH" | "FRESHNESS_UNAVAILABLE" | "NO_CURSOR" | "REDUCER" | "SOURCE",
+    readonly code: "NOT_READY" | "GAP" | "CODE_HASH_MISMATCH" | "NO_CURSOR" | "REDUCER" | "SOURCE",
     message: string,
   ) {
     super(message);
     this.name = "IndexerError";
   }
 }
-/** Converts a normalized log into a state-changing event, or ignores it. */
+
+/** Log decoder injected at the protocol boundary. */
 export type LogDecoder = (log: ContractLog) => QuoteEvent | undefined;
-/** Quote result enriched with cursor, commitment, freshness, and compatibility metadata. */
+
+/** One quote bound to the exact cursor used for calculation. */
 export interface ClientQuote {
   outcome: QuoteOutcome;
   cursor: ChainCursor;
-  commitment: Commitment;
-  observedAt: bigint;
-  ageMilliseconds: bigint;
-  stale: boolean;
-  contractCodeHash: string;
-  mathCompatibilityVersion: string;
+  executionBlockNumber: bigint;
 }
-/** Minimum commitment and maximum execution-block age accepted by a quote call. */
-export interface FreshnessPolicy {
-  minimumCommitment: Commitment;
-  maxAgeBlocks?: bigint;
+
+/** Batch results calculated synchronously from one state cursor. */
+export interface ClientBatchQuote {
+  cursor: ChainCursor;
+  executionBlockNumber: bigint;
+  results: readonly QuoteOutcome[];
 }
-/** Observable health state of the background indexer. */
+
+/** Observable runtime state. */
 export interface IndexerHealth {
   ready: boolean;
-  commitment: Commitment;
   cursor?: ChainCursor;
+  commitment: Commitment;
   contractCodeHash: string;
   mathCompatibilityVersion: string;
 }
-/** Atomic persistence boundary used by the indexer lifecycle. */
-export interface CheckpointStore {
-  load(): Checkpoint | undefined;
-  commit(checkpoint: Checkpoint, updates: readonly ChainUpdate[]): void;
-  updates(): readonly ChainUpdate[];
-}
-/** Provider-neutral Redis command representation for persistence adapters. */
-export type RedisAtomicCommand =
-  | { kind: "set"; key: string; value: Uint8Array }
-  | { kind: "hset"; key: string; fields: Readonly<Record<string, string>> }
-  | { kind: "xadd"; key: string; value: Uint8Array }
-  | { kind: "xaddIfNew"; key: string; dedupKey: string; dedupTtlSeconds: bigint; value: Uint8Array }
-  | { kind: "xtrim"; key: string; maxLen: number };
 
-export type { Address, LaneState, QuoteContext, QuoteOutcome, QuoteRequest, QuoteState, Word };
+export type { Address, LaneState, QuoteOutcome, QuoteRequest, QuoteState, Word };

@@ -12,7 +12,6 @@ workspace = true
 
 [dependencies]
 async-stream.workspace = true
-async-trait.workspace = true
 futures-util.workspace = true
 lunarbase-client-core.workspace = true
 lunarbase-math.workspace = true

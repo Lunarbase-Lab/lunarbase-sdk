@@ -12,9 +12,14 @@ const EVENT_TOPICS = {
   PartnerFeeSet: 0x785135eb22f3bdb08e949e200b6e47291b10a11aa8d27879046da64dff565b85n,
   WhitelistSet: 0x0aa5ec5ffdc7f6f9c4d0dded489d7450297155cb2f71cb771e02427f7dff4f51n,
   BlacklistFeeMultiplierSet: 0xa15057886e6ebcdf47294bcb091d686031124d1041cafe00740e93667bacd186n,
-  DepositExecuted: 0x4ecbd5689892dbccc5be91dee4aaf2338df84bda2a5d044e52a8456903010acan,
-  WithdrawalExecuted: 0x5073d783c0221e6f2ebd38ec88a7223230f1e6366edb7ef4fd7ed276fa025aeen,
+  DepositExecuted: 0x9fb4891ffe3e11f428f3f10fa362b7938a364beebc215a2ec1db56a8d05ba20fn,
+  WithdrawalExecuted: 0x722ca578dc087cbf283dc08891a94ba45b7119723568feda14da8f4c9c35d251n,
 } as const;
+
+/** Returns all Core topic0 values which can change quote-critical state. */
+export function quoteCriticalTopics(): readonly Word[] {
+  return Object.values(EVENT_TOPICS);
+}
 function bytes(data: string): Uint8Array {
   if (!/^0x(?:[0-9a-f]{2})*$/i.test(data))
     throw new LogDecodeError("INVALID_DATA_LENGTH", "event data is not even-length hex");
@@ -106,7 +111,7 @@ export function decodeCoreEvent(log: ContractLog): QuoteEvent | undefined {
   }
   if (topic0 === EVENT_TOPICS.WithdrawalExecuted) {
     topics(input, 4);
-    data(payload, 2);
+    data(payload, 4);
     return { kind: "WithdrawalExecuted", asset: address(input[3]), principal: word(payload, 0) };
   }
   return undefined;

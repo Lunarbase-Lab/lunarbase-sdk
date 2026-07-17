@@ -1,3 +1,11 @@
+use super::{
+    assertions::wait_for_redis,
+    helpers::{free_port, stop_requested},
+    rpc_mock::rpc,
+    websocket_mock::serve_websockets,
+    *,
+};
+
 /// CLI settings for the process-level validation.
 #[derive(Clone, Debug, Parser)]
 #[command(name = "lunarbase-e2e")]
@@ -26,22 +34,21 @@ pub enum E2eError {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum MockEvent {
+pub(super) enum MockEvent {
     Header(u64),
     Gap(u64),
 }
 
-struct MockState {
-    block: AtomicU64,
-    recovery_delay_milliseconds: AtomicU64,
-    webhook_deliveries: AtomicUsize,
-    websocket_connections: AtomicUsize,
-    events: broadcast::Sender<MockEvent>,
-    slot0: U256,
+pub(super) struct MockState {
+    pub(super) block: AtomicU64,
+    pub(super) recovery_delay_milliseconds: AtomicU64,
+    pub(super) websocket_connections: AtomicUsize,
+    pub(super) events: broadcast::Sender<MockEvent>,
+    pub(super) slot0: U256,
 }
 
-struct MockChain {
-    state: Arc<MockState>,
+pub(super) struct MockChain {
+    pub(super) state: Arc<MockState>,
     rpc_address: SocketAddr,
     websocket_address: SocketAddr,
     stop: watch::Sender<bool>,
@@ -49,17 +56,16 @@ struct MockChain {
 }
 
 impl MockChain {
-    async fn start() -> Result<Self, E2eError> {
+    pub(super) async fn start() -> Result<Self, E2eError> {
         let (events, _) = broadcast::channel(32);
         let state = Arc::new(MockState {
             block: AtomicU64::new(100),
             recovery_delay_milliseconds: AtomicU64::new(0),
-            webhook_deliveries: AtomicUsize::new(0),
             websocket_connections: AtomicUsize::new(0),
             events,
             slot0: encode_lane_slot0(&LaneSlot0 {
-                price: WAD * U256::from(2),
-                ask_fee_bps: U256::from(10_000),
+                price: u128::try_from(WAD * U256::from(2)).expect("test price fits uint128"),
+                ask_fee_bps: 10_000,
                 ..Default::default()
             })
             .map_err(|error| E2eError::Scenario(error.to_string()))?,
@@ -73,11 +79,7 @@ impl MockChain {
         let rpc_state = state.clone();
         let mut rpc_stop = stop.subscribe();
         let rpc_task = tokio::spawn(async move {
-            let app = Router::new()
-                .route("/", post(rpc))
-                .route("/webhook", post(webhook))
-                .route("/health", get(|| async { "ok" }))
-                .with_state(rpc_state);
+            let app = Router::new().route("/", post(rpc)).with_state(rpc_state);
             let _ = axum::serve(rpc_listener, app)
                 .with_graceful_shutdown(async move {
                     stop_requested(&mut rpc_stop).await;
@@ -100,19 +102,15 @@ impl MockChain {
         })
     }
 
-    fn rpc_url(&self) -> String {
+    pub(super) fn rpc_url(&self) -> String {
         format!("http://{}", self.rpc_address)
     }
 
-    fn websocket_url(&self) -> String {
+    pub(super) fn websocket_url(&self) -> String {
         format!("ws://{}", self.websocket_address)
     }
 
-    fn webhook_url(&self) -> String {
-        format!("http://{}/webhook", self.rpc_address)
-    }
-
-    fn publish(&self, event: MockEvent) {
+    pub(super) fn publish(&self, event: MockEvent) {
         match event {
             MockEvent::Header(block) | MockEvent::Gap(block) => {
                 self.state.block.store(block, Ordering::Relaxed);
@@ -121,7 +119,7 @@ impl MockChain {
         let _ = self.state.events.send(event);
     }
 
-    async fn stop(mut self) {
+    pub(super) async fn stop(mut self) {
         let _ = self.stop.send(true);
         for task in self.tasks.drain(..) {
             let _ = task.await;
@@ -138,13 +136,13 @@ impl Drop for MockChain {
     }
 }
 
-struct RedisProcess {
-    url: String,
+pub(super) struct RedisProcess {
+    pub(super) url: String,
     child: Option<Child>,
 }
 
 impl RedisProcess {
-    async fn start(configured: Option<String>) -> Result<Self, E2eError> {
+    pub(super) async fn start(configured: Option<String>) -> Result<Self, E2eError> {
         if let Some(url) = configured {
             wait_for_redis(&url).await?;
             return Ok(Self { url, child: None });
@@ -179,7 +177,7 @@ impl RedisProcess {
         })
     }
 
-    async fn stop(mut self) {
+    pub(super) async fn stop(mut self) {
         if let Some(child) = &mut self.child {
             let _ = child.start_kill();
             let _ = child.wait().await;
@@ -187,12 +185,12 @@ impl RedisProcess {
     }
 }
 
-struct Workspace {
+pub(super) struct Workspace {
     path: PathBuf,
 }
 
 impl Workspace {
-    fn create() -> Result<Self, E2eError> {
+    pub(super) fn create() -> Result<Self, E2eError> {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -203,7 +201,7 @@ impl Workspace {
         Ok(Self { path })
     }
 
-    fn config(&self, name: &str) -> PathBuf {
+    pub(super) fn config(&self, name: &str) -> PathBuf {
         self.path.join(format!("{name}.toml"))
     }
 }
@@ -213,4 +211,3 @@ impl Drop for Workspace {
         let _ = std::fs::remove_dir_all(&self.path);
     }
 }
-

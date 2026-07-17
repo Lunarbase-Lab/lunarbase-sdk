@@ -1,23 +1,26 @@
-//! Arbitrum Nitro client.
-//!
-//! This crate consumes executed Nitro state and preserves the EVM-visible
-//! parent-chain block context needed by delayed quote predicates.
+//! Experimental Arbitrum Nitro client.
 
-mod normalizer;
 mod transport;
 
-pub use normalizer::*;
-pub use transport::*;
+pub use transport::ArbitrumNitroSource;
 
-use lunarbase_client_core::{Network, NetworkSource, NormalizedBackend};
+use lunarbase_client_core::{
+    Checkpoint, ClientConnectConfig, ConnectedQuoteClient, IndexerError, RpcHttpClient,
+};
 use std::sync::Arc;
 
-/// Runtime-facing Arbitrum source backed by an executed Nitro transport.
-pub type ArbitrumNitroSource<B> = NetworkSource<B>;
-
-/// Wraps a Nitro backend with the common runtime source interface.
-pub fn make_arbitrum_source<B: NormalizedBackend + 'static>(
-    backend: Arc<B>,
-) -> ArbitrumNitroSource<B> {
-    NetworkSource::new(Network::Arbitrum, backend)
+/// Connects a ready-to-use Arbitrum client.
+///
+/// The package remains experimental until execution `block.number` semantics
+/// are validated against a live Nitro node.
+pub async fn connect_arbitrum(
+    config: ClientConnectConfig,
+    checkpoint: Option<Checkpoint>,
+) -> Result<ConnectedQuoteClient, IndexerError> {
+    let source = Arc::new(ArbitrumNitroSource::new(
+        RpcHttpClient::new(config.deployment.http_rpc_url.clone()),
+        config.deployment.realtime_source.clone(),
+        config.deployment.chain_id,
+    ));
+    ConnectedQuoteClient::connect(config, source, checkpoint).await
 }

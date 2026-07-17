@@ -1,60 +1,206 @@
-//! TOML configuration and validation.
+//! Minimal production configuration for one Core/router deployment.
 
-use lunarbase_client_core::{DeploymentConfig, Network, RedisConfig, MATH_COMPATIBILITY_VERSION};
+use clap::Parser;
+use lunarbase_client_core::{
+    quote_critical_topics, ClientConnectConfig, ContractFilter, DeploymentConfig, Network,
+    MATH_COMPATIBILITY_VERSION,
+};
 use lunarbase_math::Address;
 use serde::Deserialize;
-use std::fs;
-use std::net::SocketAddr;
-use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
 use thiserror::Error;
 
-include!("config/types.rs");
-include!("config/validation.rs");
-include!("config/parsing.rs");
+#[derive(Debug, Parser)]
+#[command(name = "lunarbase-indexer")]
+/// Command-line options for the runnable indexer.
+pub struct Cli {
+    /// TOML deployment configuration.
+    #[arg(long, default_value = "config/base.toml")]
+    pub config: PathBuf,
+}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+/// Human-editable service configuration.
+pub struct RawConfig {
+    pub network: String,
+    pub chain_id: u64,
+    pub core: String,
+    pub router: String,
+    #[serde(default = "default_true")]
+    pub expect_whitelisted: bool,
+    pub deployment_block: u64,
+    pub expected_runtime_code_hash: String,
+    #[serde(default = "default_compatibility")]
+    pub contract_compatibility_version: String,
+    pub http_rpc_url: String,
+    pub realtime_url: String,
+    #[serde(default)]
+    pub explicit_lane_assets: Vec<String>,
+    #[serde(default = "default_bind")]
+    pub bind: String,
+    #[serde(default = "default_queue_bound")]
+    pub queue_bound: usize,
+    #[serde(default = "default_reconnect_milliseconds")]
+    pub reconnect_delay_milliseconds: u64,
+    #[serde(default)]
+    pub redis_url: Option<String>,
+    #[serde(default = "default_checkpoint_seconds")]
+    pub checkpoint_interval_seconds: u64,
+    #[serde(default = "default_shutdown_seconds")]
+    pub shutdown_timeout_seconds: u64,
+}
 
-    #[test]
-    fn base_is_valid_without_explicit_chain_id() {
-        let config: IndexerConfig = toml::from_str(
-            r#"
-network = "base"
-core = "0x0000000000000000000000000000000000000001"
-deployment_block = 1
-expected_runtime_code_hash = "0x0000000000000000000000000000000000000000000000000000000000000001"
-http_rpc_url = "http://127.0.0.1:8545"
-realtime_url = "ws://127.0.0.1:8546"
-"#,
-        )
-        .unwrap();
-        let config = config.validate().unwrap();
-        assert_eq!(config.deployment.chain_id, 8453);
-        assert_eq!(config.deployment.network, Network::Base);
+#[derive(Clone, Debug)]
+/// Validated runtime configuration.
+pub struct Config {
+    pub client: ClientConnectConfig,
+    pub bind: SocketAddr,
+    pub redis_url: Option<String>,
+    pub checkpoint_interval: Duration,
+    pub shutdown_timeout: Duration,
+}
+
+#[derive(Debug, Error)]
+/// Configuration loading or validation failure.
+pub enum ConfigError {
+    #[error("read config: {0}")]
+    Read(#[from] std::io::Error),
+    #[error("parse config: {0}")]
+    Toml(#[from] toml::de::Error),
+    #[error("invalid {field}: {detail}")]
+    Invalid { field: &'static str, detail: String },
+}
+
+impl Config {
+    /// Loads and validates one TOML file.
+    pub fn load(path: &PathBuf) -> Result<Self, ConfigError> {
+        let raw: RawConfig = toml::from_str(&std::fs::read_to_string(path)?)?;
+        raw.validate()
     }
+}
 
-    #[test]
-    fn checked_in_network_templates_are_valid() {
-        let templates = [
-            (include_str!("../../../config/base.toml"), Network::Base),
-            (include_str!("../../../config/monad.toml"), Network::Monad),
-            (
-                include_str!("../../../config/arbitrum.toml"),
-                Network::Arbitrum,
-            ),
-            (
-                include_str!("../../../config/production.base.toml"),
-                Network::Base,
-            ),
-        ];
-        for (source, expected_network) in templates {
-            let config: IndexerConfig = toml::from_str(source).unwrap();
-            assert_eq!(
-                config.validate().unwrap().deployment.network,
-                expected_network
-            );
+impl RawConfig {
+    fn validate(self) -> Result<Config, ConfigError> {
+        let network = match self.network.to_ascii_lowercase().as_str() {
+            "base" => Network::Base,
+            "monad" => Network::Monad,
+            "arbitrum" => Network::Arbitrum,
+            _ => return invalid("network", "expected base, monad, or arbitrum"),
+        };
+        let core = parse_address(&self.core, "core")?;
+        let router = parse_address(&self.router, "router")?;
+        let explicit_lane_assets = self
+            .explicit_lane_assets
+            .iter()
+            .map(|value| parse_address(value, "explicit_lane_assets"))
+            .collect::<Result<Vec<_>, _>>()?;
+        let expected_runtime_code_hash = parse_hash(
+            &self.expected_runtime_code_hash,
+            "expected_runtime_code_hash",
+        )?;
+        let bind = self
+            .bind
+            .parse::<SocketAddr>()
+            .map_err(|error| ConfigError::Invalid {
+                field: "bind",
+                detail: error.to_string(),
+            })?;
+        if self.queue_bound == 0
+            || self.reconnect_delay_milliseconds == 0
+            || self.checkpoint_interval_seconds == 0
+            || self.shutdown_timeout_seconds == 0
+        {
+            return invalid("runtime", "all queue and timing bounds must be non-zero");
         }
+        if self.redis_url.as_deref().is_some_and(str::is_empty) {
+            return invalid("redis_url", "empty URL is not valid");
+        }
+        let deployment = DeploymentConfig {
+            network,
+            chain_id: self.chain_id,
+            core,
+            router,
+            expect_whitelisted: self.expect_whitelisted,
+            deployment_block: self.deployment_block,
+            expected_runtime_code_hash,
+            contract_compatibility_version: self.contract_compatibility_version,
+            http_rpc_url: self.http_rpc_url,
+            realtime_source: self.realtime_url,
+            explicit_lane_assets,
+        };
+        let client = ClientConnectConfig {
+            filter: ContractFilter {
+                address: core,
+                topics: quote_critical_topics().to_vec(),
+            },
+            deployment,
+            buffer_capacity: self.queue_bound,
+            reconnect_delay: Duration::from_millis(self.reconnect_delay_milliseconds),
+        };
+        client.validate().map_err(|error| ConfigError::Invalid {
+            field: "deployment",
+            detail: error.to_string(),
+        })?;
+        Ok(Config {
+            client,
+            bind,
+            redis_url: self.redis_url,
+            checkpoint_interval: Duration::from_secs(self.checkpoint_interval_seconds),
+            shutdown_timeout: Duration::from_secs(self.shutdown_timeout_seconds),
+        })
     }
+}
+
+fn parse_address(value: &str, field: &'static str) -> Result<Address, ConfigError> {
+    Address::from_str(value).map_err(|error| ConfigError::Invalid {
+        field,
+        detail: error.to_string(),
+    })
+}
+
+fn parse_hash(value: &str, field: &'static str) -> Result<[u8; 32], ConfigError> {
+    let value = value.strip_prefix("0x").unwrap_or(value);
+    if value.len() != 64 {
+        return invalid(field, "expected 32-byte hex");
+    }
+    let mut output = [0u8; 32];
+    for (index, byte) in output.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).map_err(|_| {
+            ConfigError::Invalid {
+                field,
+                detail: "invalid hex".into(),
+            }
+        })?;
+    }
+    Ok(output)
+}
+
+fn invalid<T>(field: &'static str, detail: &str) -> Result<T, ConfigError> {
+    Err(ConfigError::Invalid {
+        field,
+        detail: detail.into(),
+    })
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_compatibility() -> String {
+    MATH_COMPATIBILITY_VERSION.into()
+}
+fn default_bind() -> String {
+    "127.0.0.1:8080".into()
+}
+fn default_queue_bound() -> usize {
+    4096
+}
+fn default_reconnect_milliseconds() -> u64 {
+    1_000
+}
+fn default_checkpoint_seconds() -> u64 {
+    30
+}
+fn default_shutdown_seconds() -> u64 {
+    15
 }

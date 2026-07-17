@@ -1,4 +1,11 @@
+use super::RpcHttpClient;
+use crate::{
+    BackfillRequest, ChainCursor, Checkpoint, Commitment, ContractLog, Network, SourceError,
+};
+use std::sync::Arc;
+
 #[derive(Clone)]
+/// Canonical HTTP backend used by all realtime network adapters.
 pub struct RpcHttpBackend {
     rpc: RpcHttpClient,
     network: Network,
@@ -36,11 +43,16 @@ impl RpcHttpBackend {
     pub fn chain_id(&self) -> u64 {
         self.chain_id
     }
+
+    /// Returns the block tag used for coherent snapshots.
+    pub fn snapshot_tag(&self) -> &str {
+        &self.snapshot_tag
+    }
 }
 
-#[async_trait]
-impl NormalizedBackend for RpcHttpBackend {
-    async fn snapshot_cursor(&self, network: Network) -> Result<ChainCursor, SourceError> {
+impl RpcHttpBackend {
+    /// Returns the configured canonical snapshot cursor.
+    pub async fn snapshot_cursor(&self, network: Network) -> Result<ChainCursor, SourceError> {
         if network != self.network {
             return Err(SourceError::NetworkMismatch);
         }
@@ -55,21 +67,26 @@ impl NormalizedBackend for RpcHttpBackend {
             .map_err(Into::into)
     }
 
-    async fn backfill(&self, request: BackfillRequest) -> Result<Vec<ContractLog>, SourceError> {
+    /// Reads canonical logs for recovery.
+    pub async fn backfill(
+        &self,
+        request: BackfillRequest,
+    ) -> Result<Vec<ContractLog>, SourceError> {
         self.rpc
             .get_logs(&request, self.chain_id, Commitment::Canonical)
             .await
             .map_err(Into::into)
     }
 
-    async fn subscribe(
-        &self,
-        _network: Network,
-        _filter: crate::ContractFilter,
-    ) -> Result<SourceStream, SourceError> {
-        Err(SourceError::Unavailable(
-            "HTTP RPC backend has no realtime subscription; use a network source or WebSocket backend".into(),
-        ))
+    /// Verifies a checkpoint block hash against canonical RPC.
+    pub async fn validate_checkpoint(&self, checkpoint: &Checkpoint) -> Result<bool, SourceError> {
+        let tag = format!("0x{:x}", checkpoint.cursor.block_number);
+        let canonical = self
+            .rpc
+            .block_cursor(&tag, self.chain_id, Commitment::Canonical)
+            .await?;
+        Ok(canonical.block_hash.is_some()
+            && checkpoint.cursor.block_hash.is_some()
+            && canonical.block_hash == checkpoint.cursor.block_hash)
     }
 }
-

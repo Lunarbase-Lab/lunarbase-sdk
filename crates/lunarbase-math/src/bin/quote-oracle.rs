@@ -1,7 +1,6 @@
 use lunarbase_math::{
     encode_lane_slot0, quote, solidity_exact_in_amount, solidity_exact_out_amount_for_request,
-    Address, LaneSlot0, LaneState, QuoteContext, QuoteMode, QuoteOutcome, QuoteRequest, QuoteState,
-    U256,
+    Address, LaneSlot0, LaneState, QuoteMode, QuoteOutcome, QuoteRequest, QuoteState, U256,
 };
 use serde::Deserialize;
 use std::fs;
@@ -18,13 +17,11 @@ struct FixtureFile {
 #[serde(rename_all = "camelCase")]
 struct Vector {
     cash: String,
-    router: String,
     asset_in: String,
     asset_out: String,
     mode: QuoteMode,
     amount: String,
     execution_block_number: String,
-    state_version: String,
     blacklist_fee_multiplier: String,
     whitelisted: bool,
     partner_fee_bps: String,
@@ -60,68 +57,64 @@ fn address_word(value: Address) -> U256 {
     U256::from_be_bytes::<32>(bytes)
 }
 
-fn build_state(vector: &Vector) -> (QuoteState, QuoteRequest, QuoteContext) {
+fn build_state(vector: &Vector) -> (QuoteState, QuoteRequest, u64) {
     let cash = address(&vector.cash);
-    let router = address(&vector.router);
     let asset_in = address(&vector.asset_in);
     let asset_out = address(&vector.asset_out);
     let mut state = QuoteState {
         cash,
-        blacklist_fee_multiplier: u256(&vector.blacklist_fee_multiplier),
-        state_version: u256(&vector.state_version).try_into().unwrap(),
         ..Default::default()
     };
-    state.whitelist.insert(router, vector.whitelisted);
+    state.fee_profile.whitelisted = vector.whitelisted;
+    state.fee_profile.blacklist_fee_multiplier = u256(&vector.blacklist_fee_multiplier);
     let fee_asset = if vector.mode == QuoteMode::ExactIn {
         asset_out
     } else {
         asset_in
     };
     state
+        .fee_profile
         .partner_fee_bps
-        .insert((router, fee_asset), u256(&vector.partner_fee_bps));
+        .insert(fee_asset, vector.partner_fee_bps.parse().unwrap());
     for (asset, lane) in [(asset_in, &vector.lane_in), (asset_out, &vector.lane_out)] {
         let Some(lane) = lane else { continue };
         let slot0 = encode_lane_slot0(&LaneSlot0 {
-            price: u256(&lane.price),
-            ask_fee_bps: u256(&lane.ask_fee_bps),
-            bid_fee_bps: u256(&lane.bid_fee_bps),
-            latest_update_block: u256(&lane.latest_update_block),
+            price: lane.price.parse().unwrap(),
+            ask_fee_bps: lane.ask_fee_bps.parse().unwrap(),
+            bid_fee_bps: lane.bid_fee_bps.parse().unwrap(),
+            latest_update_block: lane.latest_update_block.parse().unwrap(),
             ..Default::default()
         })
         .expect("fixture lane fits slot0");
         state.lanes.insert(
             asset,
-            LaneState {
+            LaneState::new(
                 slot0,
-                exists: lane.exists,
-                paused: lane.paused,
-                block_delay: lane.block_delay.parse().unwrap(),
-                slippage_k_bps: lane.slippage_k_bps.parse().unwrap(),
-            },
+                lane.principal.parse().unwrap(),
+                lane.slippage_k_bps.parse().unwrap(),
+                lane.block_delay.parse().unwrap(),
+                lane.exists,
+                lane.paused,
+            ),
         );
-        state
-            .total_principal_amount
-            .insert(asset, u256(&lane.principal));
     }
     let request = QuoteRequest {
-        router,
         asset_in,
         asset_out,
         amount: u256(&vector.amount),
         mode: vector.mode,
     };
-    let context = QuoteContext {
-        cash,
-        execution_block_number: u256(&vector.execution_block_number),
-        state_version: state.state_version,
-    };
-    (state, request, context)
+    (
+        state,
+        request,
+        vector.execution_block_number.parse().unwrap(),
+    )
 }
 
 fn output_words(vector: &Vector) -> [U256; 7] {
-    let (state, request, context) = build_state(vector);
-    let outcome = quote(&request, &context, &state).expect("oracle arithmetic must not fail");
+    let (state, request, execution_block_number) = build_state(vector);
+    let outcome =
+        quote(&request, execution_block_number, &state).expect("oracle arithmetic must not fail");
     match outcome {
         QuoteOutcome::Available(result) => [
             U256::ONE,

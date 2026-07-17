@@ -5,8 +5,8 @@
   "oneOf": [
     { "$ref": "#/$defs/head" },
     { "$ref": "#/$defs/log" },
-    { "$ref": "#/$defs/gap" },
-    { "$ref": "#/$defs/health" }
+    { "$ref": "#/$defs/reorg" },
+    { "$ref": "#/$defs/gap" }
   ],
   "$defs": {
     "u64": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
@@ -14,10 +14,11 @@
     "hex32": { "type": "string", "pattern": "^0x[0-9a-fA-F]{64}$" },
     "cursor": {
       "type": "object",
-      "required": ["chainId", "blockNumber", "commitment"],
+      "required": ["chainId", "blockNumber", "executionBlockNumber", "commitment"],
       "properties": {
         "chainId": { "$ref": "#/$defs/u64" },
         "blockNumber": { "$ref": "#/$defs/u64" },
+        "executionBlockNumber": { "$ref": "#/$defs/u64" },
         "blockHash": { "anyOf": [{ "$ref": "#/$defs/hex32" }, { "type": "null" }] },
         "transactionIndex": { "anyOf": [{ "$ref": "#/$defs/u64" }, { "type": "null" }] },
         "logIndex": { "anyOf": [{ "$ref": "#/$defs/u64" }, { "type": "null" }] },
@@ -41,7 +42,16 @@
       },
       "additionalProperties": false
     },
-    "gap": { "type": "object", "required": ["kind", "reason"], "properties": { "kind": { "const": "Gap" }, "cursor": { "anyOf": [{ "$ref": "#/$defs/cursor" }, { "type": "null" }] }, "reason": { "type": "string", "minLength": 1 } }, "additionalProperties": false },
-    "health": { "type": "object", "required": ["kind", "healthy", "detail"], "properties": { "kind": { "const": "SourceHealth" }, "healthy": { "type": "boolean" }, "detail": { "type": "string" } }, "additionalProperties": false }
+    "reorg": {
+      "type": "object",
+      "required": ["kind", "oldHead", "newHead"],
+      "properties": {
+        "kind": { "const": "Reorg" },
+        "oldHead": { "$ref": "#/$defs/cursor" },
+        "newHead": { "$ref": "#/$defs/cursor" }
+      },
+      "additionalProperties": false
+    },
+    "gap": { "type": "object", "required": ["kind", "reason"], "properties": { "kind": { "const": "Gap" }, "cursor": { "anyOf": [{ "$ref": "#/$defs/cursor" }, { "type": "null" }] }, "reason": { "type": "string", "minLength": 1 } }, "additionalProperties": false }
   }
 }

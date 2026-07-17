@@ -7,13 +7,17 @@ on:
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    env:
+      CC: gcc-14
+      CXX: g++-14
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y clang cmake gcc-14 g++-14 libhugetlbfs-dev
       - run: cargo fmt --all -- --check
       - run: cargo check --workspace --all-targets
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -21,16 +25,21 @@ jobs:
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
   network-features:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        network: [base, monad, arbitrum]
+        network: [base, monad, monad-native, arbitrum]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - if: matrix.network == 'monad-native'
+        run: sudo apt-get update && sudo apt-get install -y clang cmake gcc-14 g++-14 libhugetlbfs-dev
       - run: cargo check -p lunarbase-indexer --no-default-features --features "${{ matrix.network }}" --all-targets
+        env:
+          CC: ${{ matrix.network == 'monad-native' && 'gcc-14' || 'cc' }}
+          CXX: ${{ matrix.network == 'monad-native' && 'g++-14' || 'c++' }}
 
   typescript:
     runs-on: ubuntu-latest

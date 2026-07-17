@@ -10,6 +10,7 @@ export interface LaneSlot0 {
   latestUpdateBlock: bigint;
   reservedHighBits: bigint;
 }
+
 /** Zero-valued lane slot used when constructing an empty state. */
 export const EMPTY_SLOT0: LaneSlot0 = Object.freeze({
   price: 0n,
@@ -21,59 +22,76 @@ export const EMPTY_SLOT0: LaneSlot0 = Object.freeze({
   reservedHighBits: 0n,
 });
 
+/** Bit values used by the compact lane lifecycle field. */
+export const LaneFlags = Object.freeze({
+  Exists: 1,
+  Paused: 2,
+});
+
 /** Compact lane state consumed by the quote engine. */
 export interface LaneState {
   slot0: Word;
-  exists: boolean;
-  paused: boolean;
-  blockDelay: bigint;
-  slippageKBps: bigint;
+  totalPrincipalAmount: bigint;
+  slippageKBps: number;
+  blockDelay: number;
+  flags: number;
 }
+
+/** Returns whether a compact lane is active. */
+export const laneExists = (lane: LaneState): boolean => (lane.flags & LaneFlags.Exists) !== 0;
+
+/** Returns whether a compact lane is paused. */
+export const lanePaused = (lane: LaneState): boolean => (lane.flags & LaneFlags.Paused) !== 0;
+
+/** Builds a compact lane while validating native-number fields. */
+export function createLaneState(
+  slot0: Word,
+  totalPrincipalAmount: bigint,
+  slippageKBps: number,
+  blockDelay: number,
+  exists: boolean,
+  paused: boolean,
+): LaneState {
+  if (!Number.isSafeInteger(slippageKBps) || slippageKBps < 0 || slippageKBps > 0xffff_ffff)
+    throw new RangeError("slippageKBps does not fit uint32");
+  if (!Number.isSafeInteger(blockDelay) || blockDelay < 0 || blockDelay > 0xff)
+    throw new RangeError("blockDelay does not fit uint8");
+  if (totalPrincipalAmount < 0n || totalPrincipalAmount >= 1n << 128n)
+    throw new RangeError("totalPrincipalAmount does not fit uint128");
+  return {
+    slot0,
+    totalPrincipalAmount,
+    slippageKBps,
+    blockDelay,
+    flags: (exists ? LaneFlags.Exists : 0) | (paused ? LaneFlags.Paused : 0),
+  };
+}
+
+/** Effective fees for the single router configured by this client instance. */
+export interface FeeProfile {
+  whitelisted: boolean;
+  blacklistFeeMultiplier: bigint;
+  partnerFeeBps: ReadonlyMap<Address, number>;
+}
+
 /** Immutable quote state snapshot shared by math and client layers. */
 export interface QuoteState {
   cash: Address;
   lanes: ReadonlyMap<Address, LaneState>;
-  totalPrincipalAmount: ReadonlyMap<Address, bigint>;
-  whitelist: ReadonlyMap<Address, boolean>;
-  blacklistFeeMultiplier: bigint;
-  partnerFeeBps: ReadonlyMap<string, bigint>;
-  stateVersion: bigint;
-}
-/** Read-only accessor surface for integrations that should not mutate maps. */
-export interface QuoteStateView {
-  lane(asset: Address): LaneState | undefined;
-  totalPrincipalAmount(asset: Address): bigint;
-  isWhitelisted(router: Address): boolean;
-  blacklistFeeMultiplier(): bigint;
-  partnerFeeBps(router: Address, asset: Address): bigint;
-}
-/** Creates a normalized accessor view over a quote state snapshot. */
-export function quoteStateView(state: QuoteState): QuoteStateView {
-  return {
-    lane: (asset) => state.lanes.get(asset),
-    totalPrincipalAmount: (asset) => state.totalPrincipalAmount.get(asset) ?? 0n,
-    isWhitelisted: (router) => state.whitelist.get(router) ?? false,
-    blacklistFeeMultiplier: () => state.blacklistFeeMultiplier,
-    partnerFeeBps: (router, asset) => state.partnerFeeBps.get(`${router.toLowerCase()}:${asset.toLowerCase()}`) ?? 0n,
-  };
+  feeProfile: FeeProfile;
 }
 
-/** Runtime context used to validate the state snapshot and block predicates. */
-export interface QuoteContext {
-  cash: Address;
-  executionBlockNumber: bigint;
-  stateVersion: bigint;
-}
 /** Selects whether the caller fixes input or output amount. */
 export type QuoteMode = "ExactIn" | "ExactOut";
-/** User quote request before route resolution and fee calculation. */
+
+/** Pure quote request; router and freshness policy belong to the runtime. */
 export interface QuoteRequest {
-  router: Address;
   assetIn: Address;
   assetOut: Address;
   amount: bigint;
   mode: QuoteMode;
 }
+
 /** Successful quote amounts and fee attribution. */
 export interface QuoteResult {
   amountIn: bigint;
@@ -83,6 +101,7 @@ export interface QuoteResult {
   partnerFee: bigint;
   treasuryFee: bigint;
 }
+
 /** Structured reasons why a quote cannot be produced. */
 export type UnavailableReason =
   | { kind: "ZeroAmount" }
@@ -94,6 +113,7 @@ export type UnavailableReason =
   | { kind: "ZeroPrincipal"; asset: Address }
   | { kind: "ZeroAnchor" }
   | { kind: "SpreadConsumesAnchor" };
+
 /** Discriminated union returned by all quote entry points. */
 export type QuoteOutcome =
   { kind: "Available"; result: QuoteResult } | { kind: "Unavailable"; reason: UnavailableReason };

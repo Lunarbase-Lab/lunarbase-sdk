@@ -1,21 +1,42 @@
-import type { BackfillRequest, ChainCursor, ChainUpdate, ContractFilter, ContractLog, Network } from "../model.js";
+import type {
+  BackfillRequest,
+  BootstrapSnapshot,
+  ChainCursor,
+  ChainDataSource,
+  ChainUpdate,
+  Checkpoint,
+  ContractFilter,
+  ContractLog,
+  DeploymentConfig,
+  Network,
+} from "../model.js";
 import { Commitment as CommitmentValue } from "../model.js";
 import { CursorReorderBuffer } from "../state/ordering.js";
-import { JsonRpcHttpClient, parseHash, parseHexU64, parseRpcLog, RpcError } from "./rpc.js";
-import type { NormalizedBackend } from "../source.js";
-import { RpcHttpBackend } from "./rpc.js";
+import {
+  JsonRpcHttpClient,
+  parseHash,
+  parseHexU64,
+  parseRpcLog,
+  RpcError,
+  RpcHttpBackend,
+  RpcSnapshotProvider,
+} from "./rpc.js";
 
 /** Resource bounds for generic Ethereum WebSocket ingestion. */
 export interface WsRpcConfig {
   readonly maxFrameBytes: number;
   readonly reorderCapacity: number;
   readonly queueCapacity: number;
+  readonly logsSubscription: "logs" | "pendingLogs";
+  readonly progressiveHeads: boolean;
 }
 
 export const DEFAULT_WS_RPC_CONFIG: WsRpcConfig = Object.freeze({
   maxFrameBytes: 256 * 1024,
   reorderCapacity: 4096,
   queueCapacity: 4096,
+  logsSubscription: "logs",
+  progressiveHeads: false,
 });
 
 export interface WebSocketLike {
@@ -35,8 +56,9 @@ export type WebSocketFactory = (url: string) => WebSocketLike;
  * for block-tagged bootstrap and canonical backfill; a socket gap is emitted
  * instead of being silently hidden by reconnecting from an unknown cursor.
  */
-export class WsRpcBackend implements NormalizedBackend {
+export class WsRpcBackend implements ChainDataSource {
   private readonly http: RpcHttpBackend;
+  private readonly snapshots: RpcSnapshotProvider;
   private readonly factory: WebSocketFactory;
   readonly config: WsRpcConfig;
 
@@ -53,11 +75,14 @@ export class WsRpcBackend implements NormalizedBackend {
     this.config = validateConfig({ ...DEFAULT_WS_RPC_CONFIG, ...config });
     this.factory = factory;
     this.http = new RpcHttpBackend(rpc, network, chainId, snapshotTag);
+    this.snapshots = new RpcSnapshotProvider(rpc, snapshotTag);
   }
 
-  /** Delegates the authoritative snapshot cursor to HTTP. */
-  snapshotCursor(network: Network): Promise<ChainCursor> {
-    return this.http.snapshotCursor(network);
+  /** Reads one coherent quote state through block-tagged HTTP calls. */
+  snapshot(deployment: DeploymentConfig): Promise<BootstrapSnapshot> {
+    if (deployment.network !== this.network)
+      return Promise.reject(new RpcError("INVALID", "RPC source network mismatch"));
+    return this.snapshots.snapshot(deployment);
   }
 
   /** Delegates canonical log backfill to HTTP. */
@@ -66,11 +91,20 @@ export class WsRpcBackend implements NormalizedBackend {
   }
 
   /** Opens logs and new-head subscriptions and emits normalized updates/gaps. */
-  subscribe(network: Network, filter: ContractFilter, signal?: AbortSignal): AsyncIterable<ChainUpdate> {
-    if (network !== this.network) throw new RpcError("INVALID", "RPC WebSocket backend network mismatch");
+  subscribe(filter: ContractFilter, signal?: AbortSignal): AsyncIterable<ChainUpdate> {
     const config = this.config;
     const socket = this.factory(this.wsEndpoint);
     return this.readSocket(socket, filter, config, signal);
+  }
+
+  /** Returns the canonical HTTP recovery head. */
+  canonicalHead(): Promise<ChainCursor> {
+    return this.http.canonicalHead();
+  }
+
+  /** Verifies a checkpoint block hash through canonical HTTP RPC. */
+  validateCheckpoint(checkpoint: Checkpoint): Promise<boolean> {
+    return this.http.validateCheckpoint(checkpoint);
   }
 
   private async *readSocket(
@@ -112,12 +146,14 @@ export class WsRpcBackend implements NormalizedBackend {
     try {
       if (socket.readyState === 1) queue.open();
       await queue.waitUntilOpen(signal);
-      socket.send(subscriptionRequest(1, filter));
+      socket.send(subscriptionRequest(1, filter, config.logsSubscription));
       socket.send(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "eth_subscribe", params: ["newHeads"] }));
 
       let logsSubscription: string | undefined;
       let headsSubscription: string | undefined;
       let lastHead: ChainCursor | undefined;
+      let lastParentHash: string | undefined;
+      let sourceSequence = 0n;
       let reorder = new CursorReorderBuffer(config.reorderCapacity);
 
       while (!signal?.aborted) {
@@ -173,6 +209,8 @@ export class WsRpcBackend implements NormalizedBackend {
             );
             return;
           }
+          sourceSequence += 1n;
+          log = { ...log, cursor: { ...log.cursor, sourceSequence } };
           try {
             reorder.push({ kind: "Log", log });
           } catch (error) {
@@ -194,13 +232,23 @@ export class WsRpcBackend implements NormalizedBackend {
             );
             return;
           }
+          sourceSequence += 1n;
+          parsed.cursor = { ...parsed.cursor, sourceSequence };
           if (lastHead) {
             if (parsed.cursor.blockNumber > lastHead.blockNumber + 1n) {
               yield gap("RPC WebSocket skipped one or more block heads; canonical recovery required", lastHead);
               return;
             }
+            const sameHeight = parsed.cursor.blockNumber === lastHead.blockNumber;
+            const sameHeightDiscontinuity =
+              sameHeight &&
+              (!config.progressiveHeads ||
+                (parsed.parentHash !== undefined &&
+                  lastParentHash !== undefined &&
+                  parsed.parentHash !== lastParentHash));
             const discontinuity =
-              parsed.cursor.blockNumber <= lastHead.blockNumber ||
+              parsed.cursor.blockNumber < lastHead.blockNumber ||
+              sameHeightDiscontinuity ||
               (parsed.cursor.blockNumber === lastHead.blockNumber + 1n &&
                 parsed.parentHash !== undefined &&
                 lastHead.blockHash !== undefined &&
@@ -211,6 +259,7 @@ export class WsRpcBackend implements NormalizedBackend {
             }
           }
           lastHead = parsed.cursor;
+          lastParentHash = parsed.parentHash;
           try {
             reorder.push({ kind: "Head", cursor: parsed.cursor });
           } catch (error) {
@@ -228,16 +277,20 @@ export class WsRpcBackend implements NormalizedBackend {
 }
 
 function validateConfig(config: WsRpcConfig): WsRpcConfig {
-  for (const [name, value] of Object.entries(config))
+  for (const [name, value] of Object.entries({
+    maxFrameBytes: config.maxFrameBytes,
+    reorderCapacity: config.reorderCapacity,
+    queueCapacity: config.queueCapacity,
+  }))
     if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`WS ${name} must be a positive safe integer`);
   return Object.freeze(config);
 }
 
-function subscriptionRequest(id: number, filter: ContractFilter): string {
+function subscriptionRequest(id: number, filter: ContractFilter, kind: "logs" | "pendingLogs"): string {
   const options: Record<string, unknown> = { address: filter.address };
   if (filter.topics.length > 0)
     options.topics = filter.topics.map((topic) => `0x${topic.toString(16).padStart(64, "0")}`);
-  return JSON.stringify({ jsonrpc: "2.0", id, method: "eth_subscribe", params: ["logs", options] });
+  return JSON.stringify({ jsonrpc: "2.0", id, method: "eth_subscribe", params: [kind, options] });
 }
 
 function parseHead(value: unknown, chainId: bigint): { cursor: ChainCursor; parentHash?: string } {
@@ -252,11 +305,11 @@ function parseHead(value: unknown, chainId: bigint): { cursor: ChainCursor; pare
     cursor: {
       chainId,
       blockNumber: parseHexU64(object.number, "head.number"),
-      blockHash,
-      sourceSequence:
+      executionBlockNumber:
         object.l1BlockNumber === undefined || object.l1BlockNumber === null
-          ? undefined
+          ? parseHexU64(object.number, "head.number")
           : parseHexU64(object.l1BlockNumber, "head.l1BlockNumber"),
+      blockHash,
       commitment: CommitmentValue.Realtime,
     },
     parentHash,

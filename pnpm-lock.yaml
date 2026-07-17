@@ -21,24 +21,6 @@ importers:
         specifier: 8.64.0
         version: 8.64.0(eslint@10.7.0)(typescript@6.0.3)
 
-  packages/client:
-    dependencies:
-      '@lunarbase/client-arbitrum':
-        specifier: workspace:*
-        version: link:../client-arbitrum
-      '@lunarbase/client-base':
-        specifier: workspace:*
-        version: link:../client-base
-      '@lunarbase/client-core':
-        specifier: workspace:*
-        version: link:../client-core
-      '@lunarbase/client-monad':
-        specifier: workspace:*
-        version: link:../client-monad
-      '@lunarbase/math':
-        specifier: workspace:*
-        version: link:../math
-
   packages/client-arbitrum:
     dependencies:
       '@lunarbase/client-core':

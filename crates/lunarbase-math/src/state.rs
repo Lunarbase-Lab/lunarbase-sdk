@@ -1,91 +1,141 @@
 use crate::{Address, U256};
-use std::collections::BTreeMap;
+use std::collections::HashMap;
+
+const LANE_EXISTS: u8 = 1;
+const LANE_PAUSED: u8 = 1 << 1;
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+/// Fees for the single router configured by a client or indexer instance.
+///
+/// The router address belongs to deployment identity rather than pure quote
+/// math. Keeping only its effective fee state removes a router lookup from
+/// every quote while retaining the exact Solidity fee split per asset.
+pub struct FeeProfile {
+    pub whitelisted: bool,
+    pub blacklist_fee_multiplier: U256,
+    pub partner_fee_bps: HashMap<Address, u32>,
+}
+
+impl Default for FeeProfile {
+    fn default() -> Self {
+        Self {
+            whitelisted: true,
+            blacklist_fee_multiplier: U256::ONE,
+            partner_fee_bps: HashMap::new(),
+        }
+    }
+}
+
+impl FeeProfile {
+    /// Returns the configured router's partner fee for `asset`.
+    #[inline]
+    pub fn partner_fee_bps(&self, asset: Address) -> U256 {
+        U256::from(self.partner_fee_bps.get(&asset).copied().unwrap_or(0))
+    }
+}
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-/// Immutable state required by the quote engine.
+/// Immutable quote-critical snapshot held by the runtime.
 ///
-/// Maps use deterministic `BTreeMap` ordering so checkpoint bytes are stable
-/// across processes and can be compared with the TypeScript codec.
+/// `HashMap` provides constant-time lane lookup on the hot path. Persistence
+/// sorts a separate checkpoint DTO, so deterministic bytes do not constrain
+/// the in-memory representation.
 pub struct QuoteState {
     pub cash: Address,
-    pub lanes: BTreeMap<Address, LaneState>,
-    pub total_principal_amount: BTreeMap<Address, U256>,
-    pub whitelist: BTreeMap<Address, bool>,
-    pub blacklist_fee_multiplier: U256,
-    pub partner_fee_bps: BTreeMap<(Address, Address), U256>,
-    pub state_version: u64,
-}
-pub trait QuoteStateView {
-    /// Returns the cached lane for an asset, if it exists in the snapshot.
-    fn lane(&self, asset: Address) -> Option<&LaneState>;
-    /// Returns active principal for an asset, defaulting to zero when absent.
-    fn total_principal_amount(&self, asset: Address) -> U256;
-    /// Returns whether a router is whitelisted in this snapshot.
-    fn is_whitelisted(&self, router: Address) -> bool;
-    /// Returns the global blacklist fee multiplier.
-    fn blacklist_fee_multiplier(&self) -> U256;
-    /// Returns a router/asset partner fee, defaulting to zero when absent.
-    fn partner_fee_bps(&self, router: Address, asset: Address) -> U256;
-}
-impl QuoteStateView for QuoteState {
-    fn lane(&self, asset: Address) -> Option<&LaneState> {
-        self.lanes.get(&asset)
-    }
-    fn total_principal_amount(&self, asset: Address) -> U256 {
-        self.total_principal_amount
-            .get(&asset)
-            .copied()
-            .unwrap_or(U256::ZERO)
-    }
-    fn is_whitelisted(&self, router: Address) -> bool {
-        self.whitelist.get(&router).copied().unwrap_or(false)
-    }
-    fn blacklist_fee_multiplier(&self) -> U256 {
-        self.blacklist_fee_multiplier
-    }
-    fn partner_fee_bps(&self, router: Address, asset: Address) -> U256 {
-        self.partner_fee_bps
-            .get(&(router, asset))
-            .copied()
-            .unwrap_or(U256::ZERO)
-    }
+    pub lanes: HashMap<Address, LaneState>,
+    pub fee_profile: FeeProfile,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-/// Quote-critical state for one lane in addition to its packed slot word.
+/// Compact quote-critical state for one lane.
+///
+/// Principal is stored next to `slot0`, eliminating a second map lookup.
+/// Boolean fields share one byte so the native representation remains small.
 pub struct LaneState {
     pub slot0: U256,
-    pub exists: bool,
-    pub paused: bool,
-    pub block_delay: u8,
+    pub total_principal_amount: u128,
     pub slippage_k_bps: u32,
+    pub block_delay: u8,
+    flags: u8,
 }
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-/// Snapshot identity and EVM execution context used to validate a quote.
-pub struct QuoteContext {
-    pub cash: Address,
-    pub execution_block_number: U256,
-    pub state_version: u64,
+
+impl LaneState {
+    /// Builds a lane with explicit lifecycle flags.
+    pub const fn new(
+        slot0: U256,
+        total_principal_amount: u128,
+        slippage_k_bps: u32,
+        block_delay: u8,
+        exists: bool,
+        paused: bool,
+    ) -> Self {
+        let mut flags = 0;
+        if exists {
+            flags |= LANE_EXISTS;
+        }
+        if paused {
+            flags |= LANE_PAUSED;
+        }
+        Self {
+            slot0,
+            total_principal_amount,
+            slippage_k_bps,
+            block_delay,
+            flags,
+        }
+    }
+
+    /// Returns whether the Core currently exposes this lane.
+    #[inline]
+    pub const fn exists(&self) -> bool {
+        self.flags & LANE_EXISTS != 0
+    }
+
+    /// Returns whether quotes through this lane are paused.
+    #[inline]
+    pub const fn paused(&self) -> bool {
+        self.flags & LANE_PAUSED != 0
+    }
+
+    /// Updates the existence bit without touching other compact flags.
+    #[inline]
+    pub fn set_exists(&mut self, exists: bool) {
+        self.flags = if exists {
+            self.flags | LANE_EXISTS
+        } else {
+            self.flags & !LANE_EXISTS
+        };
+    }
+
+    /// Updates the pause bit without touching other compact flags.
+    #[inline]
+    pub fn set_paused(&mut self, paused: bool) {
+        self.flags = if paused {
+            self.flags | LANE_PAUSED
+        } else {
+            self.flags & !LANE_PAUSED
+        };
+    }
 }
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 /// Direction of the public Solidity quote operation.
 pub enum QuoteMode {
     ExactIn,
     ExactOut,
 }
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-/// Caller-supplied quote parameters. `router` is explicit because Solidity
-/// derives it from `msg.sender` and it affects fees.
+/// Pure quote parameters. Router and freshness policy belong to the runtime.
 pub struct QuoteRequest {
-    pub router: Address,
     pub asset_in: Address,
     pub asset_out: Address,
     pub amount: U256,
     pub mode: QuoteMode,
 }
+
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-/// Full off-chain quote result, including fee allocation details hidden by
-/// the Solidity scalar getters.
+/// Full off-chain quote result, including the retained fee allocation details.
 pub struct QuoteResult {
     pub amount_in: U256,
     pub amount_out: U256,
@@ -94,6 +144,7 @@ pub struct QuoteResult {
     pub partner_fee: U256,
     pub treasury_fee: U256,
 }
+
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 /// Deterministic reason why a quote cannot be produced.
 pub enum UnavailableReason {
@@ -107,21 +158,17 @@ pub enum UnavailableReason {
     ZeroAnchor,
     SpreadConsumesAnchor,
 }
+
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 /// Rich quote result preserving availability diagnostics.
 pub enum QuoteOutcome {
     Available(QuoteResult),
     Unavailable(UnavailableReason),
 }
+
 #[derive(Clone, Debug, thiserror::Error, Eq, PartialEq)]
-/// Errors that abort quote evaluation instead of producing an unavailable
-/// sentinel. These correspond to snapshot identity or checked arithmetic
-/// violations.
+/// Solidity-compatible checked arithmetic failure.
 pub enum QuoteError {
     #[error(transparent)]
     Arithmetic(#[from] crate::MathError),
-    #[error("state snapshot cash does not match quote context")]
-    CashMismatch,
-    #[error("state snapshot version does not match quote context")]
-    StateVersionMismatch,
 }

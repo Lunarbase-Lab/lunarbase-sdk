@@ -20,21 +20,9 @@ jobs:
           - runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             network: base
-          - runner: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            network: monad
-          - runner: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            network: arbitrum
           - runner: macos-14
             target: aarch64-apple-darwin
             network: base
-          - runner: macos-14
-            target: aarch64-apple-darwin
-            network: monad
-          - runner: macos-14
-            target: aarch64-apple-darwin
-            network: arbitrum
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -79,10 +67,10 @@ jobs:
           publish_crate lunarbase-math
           publish_crate lunarbase-client-core
           publish_crate lunarbase-client-base
-          publish_crate lunarbase-client-monad
-          publish_crate lunarbase-client-arbitrum
-          publish_crate lunarbase-client
       - name: Publish npm packages
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: pnpm -r --filter "./packages/**" publish --access public --no-git-checks
+        run: |
+          pnpm --filter @lunarbase/math publish --access public --no-git-checks
+          pnpm --filter @lunarbase/client-core publish --access public --no-git-checks
+          pnpm --filter @lunarbase/client-base publish --access public --no-git-checks

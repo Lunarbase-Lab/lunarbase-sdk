@@ -595,6 +595,7 @@ Normalize all sources into the same records:
 ChainCursor {
     chainId,
     blockNumber,
+    executionBlockNumber,
     blockHash?,
     transactionIndex?,
     logIndex?,
@@ -611,40 +612,60 @@ ContractLog {
     cursor
 }
 
-ChainUpdate = Head | Log | Reorg | Gap | SourceHealth
+ChainUpdate = Head | Log | Reorg | Gap
 ```
 
 `sourceSequence` and `sourceSubIndex` carry network-specific ordering numbers without changing the public
 shape. Consumers must not inspect them to decide network behavior.
+`executionBlockNumber` is the EVM-visible `NUMBER` context and must not be
+derived from `sourceSequence`.
 
 Recommended Rust boundary:
 
 ```rust
-#[async_trait]
-pub trait ChainEventSource: Send + Sync {
+pub trait ChainDataSource: Send + Sync {
     fn network(&self) -> Network;
-    async fn snapshot_cursor(&self) -> Result<ChainCursor, SourceError>;
-    async fn backfill(&self, request: BackfillRequest) -> Result<Vec<ContractLog>, SourceError>;
-    async fn subscribe(
+    fn snapshot(
+        &self,
+        deployment: &DeploymentConfig,
+    ) -> impl Future<Output = Result<BootstrapSnapshot, SourceError>> + Send;
+    fn backfill(
+        &self,
+        request: BackfillRequest,
+    ) -> impl Future<Output = Result<Vec<ContractLog>, SourceError>> + Send;
+    fn subscribe(
         &self,
         filter: ContractFilter,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<ChainUpdate, SourceError>> + Send>>, SourceError>;
+    ) -> impl Future<Output = Result<SourceStream, SourceError>> + Send;
+    fn canonical_head(
+        &self,
+    ) -> impl Future<Output = Result<ChainCursor, SourceError>> + Send;
+    fn validate_checkpoint(
+        &self,
+        checkpoint: &Checkpoint,
+    ) -> impl Future<Output = Result<bool, SourceError>> + Send;
 }
 ```
+
+The runtime is generic over the concrete source, so this native RPITIT
+boundary does not need `async-trait` boxing or a `dyn ChainDataSource`.
 
 Recommended TypeScript boundary:
 
 ```ts
-export interface ChainEventSource {
+export interface ChainDataSource {
   readonly network: Network;
-  snapshotCursor(): Promise<ChainCursor>;
+  snapshot(deployment: DeploymentConfig): Promise<BootstrapSnapshot>;
   backfill(request: BackfillRequest): Promise<readonly ContractLog[]>;
   subscribe(filter: ContractFilter, signal?: AbortSignal): AsyncIterable<ChainUpdate>;
+  canonicalHead(): Promise<ChainCursor>;
+  validateCheckpoint(checkpoint: Checkpoint): Promise<boolean>;
 }
 ```
 
 The network-independent `QuoteIndexer` owns bootstrap, ABI decoding, reducer order, state publication,
-recovery, and Redis. A factory selects the source implementation from `Network` and source config.
+and recovery. Persistence is outside `client-core`; each network package
+exports a high-level constructor around its concrete source.
 
 ## 18. Base source
 
@@ -654,32 +675,26 @@ Use a Flashblocks-aware WebSocket/RPC endpoint:
 
 - Subscribe to [`pendingLogs`](https://docs.base.org/base-chain/api-reference/flashblocks-api/pendingLogs)
   filtered by Core address and relevant topics for low-volume sub-block contract updates.
-- Subscribe to [`newFlashblocks`](https://docs.base.org/base-chain/api-reference/flashblocks-api/newFlashblocks)
-  for `payload_id`, flashblock `index`, partial block hash, and block boundary/cursor information.
-- Optionally use [`newFlashblockTransactions(full=true)`](https://docs.base.org/base-chain/api-reference/flashblocks-api/newFlashblockTransactions)
-  when transaction-level receipt/log grouping is needed. Do not ingest all transactions by default when
-  filtered `pendingLogs` is sufficient.
+- Subscribe to `newHeads`, which the Flashblocks endpoint emits at roughly
+  200 ms cadence. Multiple heads can advance one L2 block height; their
+  changing partial hash is ordered by `sourceSequence` and is not a reorg
+  while the parent hash remains stable.
 - Use standard RPC/log queries for canonical backfill and reconciliation.
 
-Flashblocks arrive around every 200 ms. All flashblocks sharing a `payload_id` belong to the same block;
-the final flashblock index is not fixed. Treat a payload change or canonical standard-RPC block as the block
-boundary.
-
-Maintain a canonical snapshot plus a provisional Flashblocks overlay. Deduplicate events by stable cursor and
-transaction/log identity. When a sealed block appears, verify that the provisional transitions match
-canonical logs before committing the overlay.
-
-Do not depend on unstable `metadata` fields. Use documented `base`, `diff`, and log/receipt fields.
+Do not decode the larger `newFlashblocks` payload unless a demonstrated
+quote-critical requirement cannot be satisfied by `pendingLogs + newHeads`.
+The ordered reducer directly applies normalized preconfirmation logs. A gap,
+reorg, removed log, or discontinuity revokes readiness and triggers canonical
+RPC recovery; there is no separate provisional overlay.
 
 For production, support either a provider Flashblocks endpoint or a local Flashblocks-aware Base node. The
 public endpoints are rate limited.
 
 ## 19. Monad source
 
-Preferred Rust runtime: `MonadExecutionEngine` from `lunarbase-client-core`,
-parameterized by an `ExecutionEventReader`. The publishable
-`lunarbase-client-monad` crate provides the parser reader now and should add the
-native shared-memory reader for deployment beside the Monad execution node.
+All Monad-specific code belongs to `lunarbase-client-monad`. The Rust package
+provides both the portable parser WebSocket and a Linux native shared-memory
+reader for deployment beside the execution node.
 
 Official setup and SDK references:
 
@@ -687,8 +702,9 @@ Official setup and SDK references:
 - [Consume Execution Events in Rust](https://docs.monad.xyz/guides/execution-events/consume-rust)
 - [Category Labs Monad execution repository](https://github.com/category-labs/monad)
 
-The source should use pinned compatible releases of `monad-event-ring` and `monad-exec-events`, open the
-configured hugetlbfs ring path, rewind to the current `BlockStart`, and consume:
+The native feature uses the official `release/exec-events-sdk-v1.0` releases of
+`monad-event-ring` and `monad-exec-events`, opens the configured hugetlbfs ring
+path, rewinds to the current `BlockStart`, and consumes:
 
 - `BlockStart` / block-end and commitment events for cursors,
 - transaction boundaries/hashes,
@@ -708,12 +724,8 @@ ordered processing, health metrics, and WebSocket subscriptions for `logs`, `new
 execution events. Its server retains no replay history: a sequence gap or close code `1013` requires a client
 resnapshot from an authoritative RPC source.
 
-Recommended TypeScript implementation: use `@lunarbase/client-monad` to consume
-the local Rust parser/sidecar over Unix-domain socket or loopback WebSocket.
-The package feeds the universal TypeScript `MonadExecutionEngine`. Do not
-independently reimplement hugetlbfs/event-ring FFI in TypeScript for v1. A
-normal Monad `eth_subscribe logs/newHeads` adapter remains a portable fallback
-with higher latency.
+TypeScript uses `@lunarbase/client-monad` to consume the parser/sidecar over
+WebSocket. It does not independently bind hugetlbfs or the native event ring.
 
 On `EventNextResult::Gap` or expired payload, emit normalized `Gap`, reset the ring reader, discard the
 provisional state, and recover through RPC snapshot/backfill. Never continue as though the stream were
@@ -756,55 +768,29 @@ the feed/block context, or the contract should migrate the validity rule to time
 
 ## 21. Redis and process model
 
-Interpret "the client manages Redis" as:
-
-- connection pool and reconnect policy,
-- namespacing/schema version,
-- code-hash and compatibility checks,
-- canonical checkpoints and provisional cursors,
-- atomic reducer writes,
-- leader lease for the single source writer,
-- bounded update stream for worker catch-up,
-- deduplication windows and TTLs,
-- migrations, health, and shutdown.
-
-The production library should not spawn and supervise a Redis server process. Development/integration tests
-may start Redis through Testcontainers or Docker.
-
-Suggested cluster-safe namespace:
+Redis is optional restart acceleration owned only by `lunarbase-indexer`.
+Embeddable client packages have no Redis dependency. Use one schema-v3 key:
 
 ```text
-lb:{chainId:coreAddress}:meta
-lb:{chainId:coreAddress}:state
-lb:{chainId:coreAddress}:checkpoint
-lb:{chainId:coreAddress}:updates
-lb:{chainId:coreAddress}:writer-lease
+lunarbase:v3:{chainId}:{coreAddress}:{routerAddress}
 ```
 
-Use the same Redis hash tag `{chainId:coreAddress}` so atomic Lua/MULTI operations remain in one cluster slot.
-Include schema version and expected contract code hash in `meta`.
+The value is one versioned JSON DTO containing complete state. U256 values are
+decimal or fixed-width hexadecimal strings, never JSON numbers. Only `GET` and
+an atomic full-value `SET` are required; the key has no TTL.
 
-Recommended storage roles:
+At startup validate schema/math version, Core code hash, chain/Core/router
+identity, router profile, and canonical checkpoint block hash. If a checkpoint
+is missing, malformed, incompatible, forked, or cannot be safely recovered,
+discard it and take a full RPC snapshot.
 
-- In-memory state is the hot quote path.
-- Redis is the durable/shared checkpoint and ordered catch-up path.
-- One writer owns source ingestion and the ordered reducer.
-- Quote workers consume immutable snapshots or ordered deltas and never mutate canonical state.
-- Redis Streams may carry bounded deltas with approximate `MAXLEN`; a periodic full checkpoint allows old
-  deltas to be trimmed.
-- Redis Pub/Sub alone is insufficient because it loses updates during disconnects.
+All replicas independently index state and serve quotes. There is no writer
+lease, leader election, fencing, standby role, Redis Stream, update-dedup key,
+or cross-language binary update codec. Concurrent checkpoint `SET`s are
+best-effort because every value is complete and is revalidated at startup.
 
-Encode U256 values as fixed 32-byte big-endian values, addresses as 20 bytes, and slot0 as 32 bytes. Define one
-versioned cross-language binary schema, for example MessagePack with explicit byte fields. Do not serialize
-money through JSON numbers.
-
-Atomicity options:
-
-1. Keep quote-critical values in one Redis hash and update fields plus cursor in one Lua script.
-2. Store versioned immutable checkpoint blobs and atomically switch an active-version pointer.
-
-Option 1 is recommended for v1. The in-memory reducer publishes a new read snapshot only after the complete
-event transition has been applied.
+Redis failure must not revoke readiness after the indexer is running. The
+process logs and counts checkpoint failures and continues with in-memory state.
 
 ## 22. Memory, concurrency, and backpressure
 
@@ -813,31 +799,29 @@ reordered before reduction.
 
 Rust process:
 
-- one source I/O task or dedicated Monad ring-reader OS thread,
-- bounded raw/decode queues,
-- fixed decode pool,
-- cursor reorder buffer with a strict maximum,
+- one source I/O task or dedicated Monad ring-reader thread,
+- one bounded runtime queue and bounded transport reorder buffer,
 - one reducer task,
-- one batched Redis checkpoint task,
-- immutable quote snapshots published through `ArcSwap` or an equivalent mechanism,
-- fixed quote worker pool only if benchmarked demand justifies it.
+- hot state under a short synchronous `RwLock`,
+- shared quote read guards without cloning state,
+- one periodic checkpoint task only in the runnable indexer.
 
 TypeScript process:
 
 - one ordered reducer in the main event loop,
 - bounded async source queue,
 - worker threads only for demonstrated CPU-heavy decoding/batches,
-- immutable state version passed to quote handlers,
+- synchronous quote/quoteMany calls within one event-loop turn,
 - no worker per asset or per request.
 
-State size should be bounded by configured deployments, lane assets, and actively observed routers. Dynamic
-router entries need LRU/TTL eviction, but configured routers and entries with nonzero partner configuration
-must be pinned or recoverable from Redis/RPC.
+State size is bounded by one configured deployment/router and discovered lane
+assets. Do not maintain dynamic router maps. Principal, slippage, delay, and
+compact flags are colocated with the lane's packed `slot0`.
 
 When a queue cannot keep up, block/backpressure where the source permits it. If the source ring or broadcast
 can overwrite data, detect the gap and resnapshot. Dropping updates silently is forbidden.
 
-## 23. Proposed monorepo layout
+## 23. Monorepo layout
 
 ```text
 lunarbase-math/
@@ -849,11 +833,12 @@ lunarbase-math/
 
   crates/
     lunarbase-math/             # pure Rust U256 math and quote engine
-    lunarbase-client-core/      # universal Rust runtime and Monad engine
+    lunarbase-client-core/      # universal Rust runtime and reducer
     lunarbase-client-base/      # Base Flashblocks client
     lunarbase-client-monad/     # parser/native Monad execution readers
     lunarbase-client-arbitrum/  # executed Nitro client
-    lunarbase-client/           # compatibility facade
+    lunarbase-indexer/          # runnable Rust HTTP service
+    lunarbase-tools/            # E2E, load, and live validators
 
   packages/
     math/                       # pure TypeScript bigint math and quote engine
@@ -861,33 +846,25 @@ lunarbase-math/
     client-base/                # Base client
     client-monad/               # Monad sidecar client
     client-arbitrum/            # Arbitrum client
-    client/                     # compatibility facade
-
-  schemas/
-    quote-state/                # versioned Redis/checkpoint encoding schema
-    normalized-events/          # cross-language cursor/update schema
 
   abi/
     Core.json                   # ABI pinned to contract commit/code version
 
   fixtures/
     quote-vectors.json          # shared deterministic vectors
-    event-replay/               # decoded and raw event fixtures
     base-flashblocks/
     monad-exec-events/
     arbitrum-nitro/
 
-  solidity-reference/
-    foundry.toml
-    src/QuoteReferenceHarness.sol
-    test/DifferentialVectors.t.sol
-
-  examples/
-    rust-quote-service/
-    typescript-quote-service/
+  config/
+    base.toml
+    monad.toml
+    arbitrum.toml
+    prometheus-alerts.yml
 ```
 
-Package names can change, but the pure/client boundary must remain explicit.
+Canonical Solidity FFI remains in the sibling `lunarbase-contracts`
+repository; this repository must not duplicate the contract harness.
 
 ## 24. Pure-library public API
 
@@ -895,41 +872,31 @@ Both implementations should expose equivalent concepts and field names.
 
 ```text
 QuoteRequest {
-    router,
     assetIn,
     assetOut,
     amount,
     mode: ExactIn | ExactOut
 }
 
-QuoteContext {
-    cash,
-    executionBlockNumber,
-    stateVersion
-}
-
 LaneState {
-    slot0,
-    exists,
-    paused,
-    blockDelay,
-    slippageKBps
+    slot0: U256,
+    totalPrincipalAmount: u128,
+    slippageK: u32,
+    blockDelay: u8,
+    flags: exists | paused
 }
 
-QuoteStateView {
-    lane(asset),
-    totalPrincipalAmount(asset),
-    isWhitelisted(router),
-    blacklistFeeMultiplier(),
-    partnerFeeBps(router, asset)
+FeeProfile {
+    whitelisted,
+    blacklistFeeMultiplier,
+    partnerFeeBpsByAsset
 }
 ```
 
 Core functions:
 
 ```text
-quoteExactIn(request, context, state)  -> Result<QuoteOutcome, QuoteError>
-quoteExactOut(request, context, state) -> Result<QuoteOutcome, QuoteError>
+quote(request, executionBlockNumber, state) -> Result<QuoteOutcome, QuoteError>
 decodeLaneSlot0(word)                  -> LaneSlot0
 encodeLaneSlot0(fields)                -> Word
 ```
@@ -948,16 +915,14 @@ splitFee
 
 ## 25. High-level client API
 
-Recommended common behavior:
+Common embeddable behavior:
 
 ```text
-connect(config)
-awaitReady(minCommitment?)
-quoteExactIn(request, freshnessPolicy?)
-quoteExactOut(request, freshnessPolicy?)
-stateSnapshot()
+connect(config, dataSource, optionalCheckpoint)
+quote(request)
+quoteMany(requests)
 health()
-resync()
+checkpoint()
 shutdown()
 ```
 
@@ -967,17 +932,13 @@ High-level quote response:
 ClientQuote {
     outcome,
     cursor,
-    commitment,
-    observedAt,
-    age,
-    stale,
-    contractCodeHash,
-    mathCompatibilityVersion
+    executionBlockNumber
 }
 ```
 
-The client should reject a requested freshness policy it cannot prove. It must not label a fallback RPC
-snapshot as real-time after a source gap.
+Router/profile, execution block, and freshness are runtime-owned. Callers
+cannot override them per request. A source gap revokes readiness; fallback RPC
+state must not be labeled realtime until recovery completes.
 
 ## 26. Bit-for-bit parity rules
 
@@ -1038,13 +999,15 @@ the test generator, because that would only compare two copies of the same off-c
 
 - Replay canonical event sequences and compare with block-tagged getters.
 - Verify `requestWithdrawal` does not reduce principal.
-- Verify preconfirmed overlay commit and discard.
-- Simulate duplicate, reordered, removed, and missing logs.
+- Verify `SwapExecuted` is not part of quote-critical replay.
+- Simulate reordered, removed, and missing logs.
 - Simulate Monad ring gap/expired payload and mandatory resnapshot.
-- Simulate Base payload-id change and non-fixed final flashblock index.
+- Replay official Base `pendingLogs + newHeads` payload fixtures.
 - Simulate Arbitrum WS disconnect and canonical backfill.
-- Kill/restart Redis and source processes; verify cursor-safe recovery.
-- Run the same normalized event fixture through Rust and TypeScript reducers and compare checkpoint bytes.
+- Verify valid, incompatible, stale/forked, and unavailable Redis bootstrap.
+- Run two simultaneously ready process replicas and compare state/quotes.
+- Prove quote-path source and Redis call counts remain zero.
+- Verify `quoteMany` uses one cursor and equals sequential quotes.
 
 ## 28. Acceptance criteria
 
@@ -1058,16 +1021,19 @@ Math v1 is complete when:
 
 Client v1 is complete when:
 
-- the same high-level API works for Base, Monad, and Arbitrum;
+- the high-level API and source contract are shared across network packages;
 - a real deployment can bootstrap from a block-tagged snapshot and quote without `eth_call` per request;
 - every quote carries a cursor and commitment;
-- all quote-critical events update in-memory state and Redis atomically/in order;
+- all quote-critical events update in-memory state atomically/in order;
 - source gaps stop freshness claims and trigger deterministic recovery;
 - Monad Rust can read a colocated event ring, and TypeScript can consume the local sidecar;
-- Base consumes Flashblocks preconfirmation logs;
+- Base consumes `pendingLogs + newHeads`;
 - Arbitrum consumes executed local Nitro state fed by the sequencer feed;
 - contract code-hash mismatch fails closed;
-- memory, queues, Redis streams, and worker counts are bounded/configurable.
+- memory and queues are bounded/configurable;
+- two replicas can independently remain ready without leader election;
+- Redis loss affects restart speed only;
+- Monad and Arbitrum remain experimental until their live-validation gates pass.
 
 ## 29. Implementation phases
 
@@ -1087,12 +1053,12 @@ Client v1 is complete when:
 4. Implement generic WebSocket/RPC fallback.
 5. Add in-memory quote client.
 
-### Phase 3: Redis and process safety
+### Phase 3: Runnable indexer and process safety
 
 1. Add schema-versioned Redis checkpoint.
-2. Add writer lease, atomic cursor/state updates, bounded streams, and recovery.
-3. Add health/readiness and freshness policies.
-4. Add restart/gap/reorg integration tests.
+2. Add HTTP quote/batch APIs, metrics, and graceful shutdown.
+3. Add multi-replica and Redis-unavailable process E2E.
+4. Add gap/reorg/restart integration tests.
 
 ### Phase 4: specialized real-time sources
 
@@ -1110,22 +1076,25 @@ Client v1 is complete when:
    `DepositExecuted` and `WithdrawalExecuted`, which are currently the only production mutations.
 4. A new contract path that mutates `totalPrincipalAmount` without one of those events requires an event and
    reducer update before deployment.
-5. Public quote methods return only one amount and use `msg.sender` as router. The off-chain API must make
-   router explicit and can return richer fee detail.
+5. Public quote methods return only one amount and use `msg.sender` as router.
+   Each off-chain runtime instance therefore has one configured router/profile;
+   callers cannot override it per request.
 6. Current quote math does not verify transferable output liquidity. Keep parity quote and optional execution
    preflight separate.
 7. Base preconfirmed state, Monad proposed state, and Arbitrum unsafe state are not equivalent to finality.
    The normalized commitment and cursor must always accompany a quote.
-8. "Manage Redis" currently means managing cache state and connections, not launching Redis itself. Change
-   this explicitly if an embedded/supervised Redis process is a product requirement.
+8. Redis is optional restart acceleration in `lunarbase-indexer`; it is not
+   shared canonical state and is absent from embeddable clients.
 
-## 31. Handoff instruction for the next agent
+## 31. Release gates
 
-Before writing implementation code:
-
-1. Re-read the pinned Solidity functions in section 2.
-2. Confirm the checked arithmetic semantics against Solady v0.1.26.
-3. Create the monorepo skeleton and shared vector schema.
-4. Implement and differential-test pure math first.
-5. Do not begin three network adapters until pure Rust and TypeScript produce identical vectors.
-6. Treat this document as the compatibility baseline; record any intentional deviation in an ADR.
+1. Re-run the canonical Solidity/Rust/TypeScript FFI whenever math or the
+   pinned contract revision changes.
+2. Require a Base deployment smoke test before declaring the Base adapter
+   stable.
+3. Require a native execution-event-ring soak before publishing Monad as
+   production-ready.
+4. Require Nitro-node execution-block validation before publishing Arbitrum as
+   production-ready.
+5. Run `make verify`, process E2E, and the 15-lane/100-pair load profile before
+   each release.

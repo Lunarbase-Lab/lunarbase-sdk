@@ -51,21 +51,40 @@ const TOPIC_BLACKLIST_MULTIPLIER_SET: U256 = U256::from_limbs([
     0xa15057886e6ebcdf,
 ]);
 const TOPIC_DEPOSIT_EXECUTED: U256 = U256::from_limbs([
-    0x52a8456903010aca,
-    0x8df84bda2a5d044e,
-    0xc5be91dee4aaf233,
-    0x4ecbd5689892dbcc,
+    0xc1db56a8d05ba20f,
+    0x8a364beebc215a2e,
+    0x28f3f10fa362b793,
+    0x9fb4891ffe3e11f4,
 ]);
 const TOPIC_WITHDRAWAL_EXECUTED: U256 = U256::from_limbs([
-    0xfd7ed276fa025aee,
-    0x30f1e6366edb7ef4,
-    0x2ebd38ec88a72232,
-    0x5073d783c0221e6f,
+    0x14da8f4c9c35d251,
+    0x5b7119723568feda,
+    0x283dc08891a94ba4,
+    0x722ca578dc087cbf,
 ]);
 
 /// Returns the `LaneAdded` and `LaneRemoved` topic0 values used for discovery.
 pub fn lane_discovery_topics() -> [U256; 2] {
     [TOPIC_LANE_ADDED, TOPIC_LANE_REMOVED]
+}
+
+/// Returns every quote-critical Core topic accepted by the reducer.
+///
+/// `SwapExecuted` is deliberately excluded because quotes derive their state
+/// from lane, fee-profile, deposit, and withdrawal transitions.
+pub fn quote_critical_topics() -> [U256; 10] {
+    [
+        TOPIC_LANE_ADDED,
+        TOPIC_LANE_REMOVED,
+        TOPIC_LANE_UPDATED,
+        TOPIC_SLIPPAGE_K_SET,
+        TOPIC_PARTNER_INFO_SET,
+        TOPIC_PARTNER_FEE_SET,
+        TOPIC_WHITELIST_SET,
+        TOPIC_BLACKLIST_MULTIPLIER_SET,
+        TOPIC_DEPOSIT_EXECUTED,
+        TOPIC_WITHDRAWAL_EXECUTED,
+    ]
 }
 fn topic_address(topic: U256) -> Result<Address, LogDecodeError> {
     let bytes = topic.to_be_bytes::<32>();
@@ -188,7 +207,7 @@ pub fn decode_core_event(log: &ContractLog) -> Result<Option<QuoteEvent>, LogDec
         })
     } else if topic0 == TOPIC_WITHDRAWAL_EXECUTED {
         expect_topics(topics, 4)?;
-        expect_data_words(data, 2)?;
+        expect_data_words(data, 4)?;
         Some(QuoteEvent::WithdrawalExecuted {
             asset: topic_address(topics[3])?,
             principal: data_word(data, 0)?,
@@ -197,4 +216,61 @@ pub fn decode_core_event(log: &ContractLog) -> Result<Option<QuoteEvent>, LogDec
         None
     };
     Ok(event)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ChainCursor, Commitment};
+
+    #[test]
+    fn position_topics_match_the_pinned_solidity_abi() {
+        assert_eq!(
+            format!("{TOPIC_DEPOSIT_EXECUTED:#066x}"),
+            "0x9fb4891ffe3e11f428f3f10fa362b7938a364beebc215a2ec1db56a8d05ba20f"
+        );
+        assert_eq!(
+            format!("{TOPIC_WITHDRAWAL_EXECUTED:#066x}"),
+            "0x722ca578dc087cbf283dc08891a94ba45b7119723568feda14da8f4c9c35d251"
+        );
+    }
+
+    #[test]
+    fn withdrawal_accepts_the_complete_four_word_payload() {
+        let asset = Address([0x11; 20]);
+        let mut asset_topic = [0_u8; 32];
+        asset_topic[12..].copy_from_slice(&asset.0);
+        let mut data = vec![0_u8; 4 * 32];
+        data[31] = 7;
+        let log = ContractLog {
+            address: Address([0x22; 20]),
+            topics: vec![
+                TOPIC_WITHDRAWAL_EXECUTED,
+                U256::ONE,
+                U256::from(2_u8),
+                U256::from_be_bytes(asset_topic),
+            ],
+            data,
+            removed: false,
+            cursor: ChainCursor {
+                chain_id: 1,
+                block_number: 1,
+                execution_block_number: 1,
+                block_hash: Some([0x33; 32]),
+                transaction_index: Some(0),
+                log_index: Some(0),
+                source_sequence: Some(1),
+                source_sub_index: Some(0),
+                commitment: Commitment::Canonical,
+            },
+        };
+
+        assert_eq!(
+            decode_core_event(&log).unwrap(),
+            Some(QuoteEvent::WithdrawalExecuted {
+                asset,
+                principal: U256::from(7_u8),
+            })
+        );
+    }
 }

@@ -1,4 +1,13 @@
-async fn rpc(State(state): State<Arc<MockState>>, Json(request): Json<Value>) -> Json<Value> {
+use super::{
+    environment::MockState,
+    helpers::{address_word, block_hash, word_hex, words},
+    *,
+};
+
+pub(super) async fn rpc(
+    State(state): State<Arc<MockState>>,
+    Json(request): Json<Value>,
+) -> Json<Value> {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let method = request
         .get("method")
@@ -27,10 +36,6 @@ async fn rpc(State(state): State<Arc<MockState>>, Json(request): Json<Value>) ->
         _ => Value::Null,
     };
     Json(json!({"jsonrpc": "2.0", "id": id, "result": result}))
-}
-
-async fn webhook(State(state): State<Arc<MockState>>, Json(_payload): Json<Value>) {
-    state.webhook_deliveries.fetch_add(1, Ordering::Relaxed);
 }
 
 fn discovery_logs(request: &Value, block: u64) -> Value {
@@ -75,4 +80,3 @@ fn eth_call_result(data: &str, slot0: U256) -> String {
         _ => words(&[U256::ZERO]),
     }
 }
-

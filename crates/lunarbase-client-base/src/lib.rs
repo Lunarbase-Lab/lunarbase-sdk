@@ -1,24 +1,23 @@
-//! Base Flashblocks client.
-//!
-//! This crate contains only Base-specific normalization and transport code.
-//! Stateful runtime, recovery, persistence, and quoting live in
-//! `lunarbase-client-core`.
+//! Base Flashblocks client using official `pendingLogs + newHeads`.
 
-mod normalizer;
 mod transport;
 
-pub use normalizer::*;
-pub use transport::*;
+pub use transport::{BaseFlashblocksConfig, BaseFlashblocksSource};
 
-use lunarbase_client_core::{Network, NetworkSource, NormalizedBackend};
+use lunarbase_client_core::{
+    Checkpoint, ClientConnectConfig, ConnectedQuoteClient, IndexerError, RpcHttpClient,
+};
 use std::sync::Arc;
 
-/// Runtime-facing Base source backed by a Flashblocks transport.
-pub type BaseFlashblocksSource<B> = NetworkSource<B>;
-
-/// Wraps a Base backend with the common runtime source interface.
-pub fn make_base_source<B: NormalizedBackend + 'static>(
-    backend: Arc<B>,
-) -> BaseFlashblocksSource<B> {
-    NetworkSource::new(Network::Base, backend)
+/// Connects a ready-to-use Base client from the common runtime config.
+pub async fn connect_base(
+    config: ClientConnectConfig,
+    checkpoint: Option<Checkpoint>,
+) -> Result<ConnectedQuoteClient, IndexerError> {
+    let source = Arc::new(BaseFlashblocksSource::new(
+        RpcHttpClient::new(config.deployment.http_rpc_url.clone()),
+        config.deployment.realtime_source.clone(),
+        config.deployment.chain_id,
+    ));
+    ConnectedQuoteClient::connect(config, source, checkpoint).await
 }

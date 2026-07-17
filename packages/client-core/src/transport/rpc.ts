@@ -1,15 +1,24 @@
-import { assertU256, parseAddress, U128_MAX, type Address, type Word } from "@lunarbase/math";
+import {
+  assertU256,
+  BPS,
+  createLaneState,
+  parseAddress,
+  U128_MAX,
+  type Address,
+  type QuoteState,
+  type Word,
+} from "@lunarbase/math";
 import type {
   BackfillRequest,
   BootstrapSnapshot,
   ChainCursor,
+  Checkpoint,
   ContractLog,
   DeploymentConfig,
   Network,
-  SnapshotProvider,
 } from "../model.js";
 import { Commitment as CommitmentValue } from "../model.js";
-import type { NormalizedBackend } from "../source.js";
+import { compareCursor } from "../source.js";
 
 const SELECTOR_CASH = "0x961be391";
 const SELECTOR_LANE = "0xd1bacd10";
@@ -83,6 +92,10 @@ export class JsonRpcHttpClient {
     return {
       chainId,
       blockNumber: parseHexU64(block.number, "block.number"),
+      executionBlockNumber:
+        block.l1BlockNumber === undefined
+          ? parseHexU64(block.number, "block.number")
+          : parseHexU64(block.l1BlockNumber, "block.l1BlockNumber"),
       blockHash: block.hash === null || block.hash === undefined ? undefined : parseHash(block.hash, "block.hash"),
       commitment,
     };
@@ -105,7 +118,7 @@ export class JsonRpcHttpClient {
   }
 }
 
-export class RpcHttpBackend implements NormalizedBackend {
+export class RpcHttpBackend {
   /** Creates the canonical HTTP fallback backend for one network. */
   constructor(
     readonly rpc: JsonRpcHttpClient,
@@ -114,8 +127,7 @@ export class RpcHttpBackend implements NormalizedBackend {
     readonly snapshotTag = "finalized",
   ) {}
   /** Reads the block-tagged source head. */
-  snapshotCursor(network: Network): Promise<ChainCursor> {
-    if (network !== this.network) return Promise.reject(new RpcError("INVALID", "RPC backend network mismatch"));
+  canonicalHead(): Promise<ChainCursor> {
     return this.rpc.blockCursor(
       this.snapshotTag,
       this.chainId,
@@ -126,27 +138,30 @@ export class RpcHttpBackend implements NormalizedBackend {
   backfill(request: BackfillRequest): Promise<readonly ContractLog[]> {
     return this.rpc.getLogs(request, this.chainId, CommitmentValue.Canonical);
   }
-  /** Rejects realtime subscription because HTTP alone cannot prove continuity. */
-  subscribe(): AsyncIterable<never> {
-    return (async function* (): AsyncGenerator<never> {
-      yield* [] as never[];
-      throw new RpcError("INVALID", "HTTP RPC backend has no realtime subscription");
-    })();
+
+  /** Confirms that a checkpoint block hash remains canonical. */
+  async validateCheckpoint(checkpoint: Checkpoint): Promise<boolean> {
+    const canonical = await this.rpc.blockCursor(
+      hexU64(checkpoint.cursor.blockNumber),
+      this.chainId,
+      CommitmentValue.Canonical,
+    );
+    return (
+      canonical.blockHash !== undefined &&
+      checkpoint.cursor.blockHash !== undefined &&
+      canonical.blockHash.toLowerCase() === checkpoint.cursor.blockHash.toLowerCase()
+    );
   }
 }
 
-export class RpcSnapshotProvider implements SnapshotProvider {
+export class RpcSnapshotProvider {
   /** Creates a provider that materializes Core state at one block tag. */
   constructor(
     readonly rpc: JsonRpcHttpClient,
     readonly snapshotTag = "finalized",
   ) {}
   /** Reads code, lane state, reserves, router policy, and the snapshot cursor. */
-  async snapshot(
-    config: DeploymentConfig,
-    laneAssets: readonly Address[],
-    routers: readonly Address[],
-  ): Promise<BootstrapSnapshot> {
+  async snapshot(config: DeploymentConfig): Promise<BootstrapSnapshot> {
     const commitment = this.snapshotTag === "finalized" ? CommitmentValue.Finalized : CommitmentValue.Canonical;
     const cursor = await this.rpc.blockCursor(this.snapshotTag, config.chainId, commitment);
     if (cursor.blockNumber < config.deploymentBlock)
@@ -157,22 +172,31 @@ export class RpcSnapshotProvider implements SnapshotProvider {
       runtimeCodeHash.toLowerCase() !== config.expectedRuntimeCodeHash.toLowerCase()
     )
       throw new RpcError("INVALID", "runtime code hash mismatch");
-    const requestedAssets = laneAssets.length > 0 ? laneAssets : config.explicitLaneAssets;
-    const assets = await this.resolveLaneAssets(config, requestedAssets, cursor.blockNumber);
+    const assets = await this.resolveLaneAssets(config, config.explicitLaneAssets, cursor.blockNumber);
     const cash = decodeAddressWord(await this.rpc.callAt(config.core, SELECTOR_CASH, this.snapshotTag));
-    const state = {
-      cash,
-      blacklistFeeMultiplier: decodeWord(
-        await this.rpc.callAt(config.core, SELECTOR_BLACKLIST_FEE_MULTIPLIER, this.snapshotTag),
+    const whitelisted = decodeBool(
+      decodeWord(
+        await this.rpc.callAt(config.core, selectorAddress(SELECTOR_WHITELIST, config.router), this.snapshotTag),
       ),
-      lanes: new Map<
-        Address,
-        { slot0: Word; exists: boolean; paused: boolean; blockDelay: bigint; slippageKBps: bigint }
-      >(),
-      totalPrincipalAmount: new Map<Address, bigint>(),
-      whitelist: new Map<Address, boolean>(),
-      partnerFeeBps: new Map<string, bigint>(),
-      stateVersion: 0n,
+    );
+    if (whitelisted !== config.expectWhitelisted)
+      throw new RpcError(
+        "INVALID",
+        `configured router whitelist mismatch: expected ${config.expectWhitelisted}, got ${whitelisted}`,
+      );
+    // Cache the underlying global value even while whitelisted so a later
+    // WhitelistSet(false) transition is immediately quote-correct.
+    const blacklistFeeMultiplier = decodeWord(
+      await this.rpc.callAt(config.core, SELECTOR_BLACKLIST_FEE_MULTIPLIER, this.snapshotTag),
+    );
+    const state: QuoteState = {
+      cash,
+      lanes: new Map(),
+      feeProfile: {
+        whitelisted,
+        blacklistFeeMultiplier,
+        partnerFeeBps: new Map(),
+      },
     };
     for (const asset of assets) {
       const lane = decodeWords(
@@ -184,36 +208,31 @@ export class RpcSnapshotProvider implements SnapshotProvider {
         5,
       );
       if (lane[3] > 0xffn || lane[4] > 0xffff_ffffn) throw new RpcError("INVALID", "lane metadata exceeds ABI width");
-      state.lanes.set(asset, {
-        slot0: lane[0],
-        exists: decodeBool(lane[1]),
-        paused: decodeBool(lane[2]),
-        blockDelay: lane[3],
-        slippageKBps: lane[4],
-      });
       if (reserves[4] > U128_MAX) throw new RpcError("INVALID", "principal exceeds uint128");
-      state.totalPrincipalAmount.set(asset, reserves[4]);
-    }
-    const partnerAssets = [...new Set([...assets, cash])];
-    for (const router of routers.length > 0 ? routers : config.eagerRouters) {
-      state.whitelist.set(
-        router,
-        decodeBool(
-          decodeWord(await this.rpc.callAt(config.core, selectorAddress(SELECTOR_WHITELIST, router), this.snapshotTag)),
+      (state.lanes as Map<Address, ReturnType<typeof createLaneState>>).set(
+        asset.toLowerCase() as Address,
+        createLaneState(
+          lane[0],
+          reserves[4],
+          Number(lane[4]),
+          Number(lane[3]),
+          decodeBool(lane[1]),
+          decodeBool(lane[2]),
         ),
       );
-      for (const asset of partnerAssets)
-        state.partnerFeeBps.set(
-          `${router.toLowerCase()}:${asset.toLowerCase()}`,
-          decodeWord(
-            await this.rpc.callAt(
-              config.core,
-              selectorTwoAddresses(SELECTOR_PARTNERS, router, asset),
-              this.snapshotTag,
-            ),
-            1,
-          ),
-        );
+    }
+    const partnerAssets = [...new Set([...assets, cash])];
+    for (const asset of partnerAssets) {
+      const fee = decodeWord(
+        await this.rpc.callAt(
+          config.core,
+          selectorTwoAddresses(SELECTOR_PARTNERS, config.router, asset),
+          this.snapshotTag,
+        ),
+        1,
+      );
+      if (fee > BPS) throw new RpcError("INVALID", "partner fee exceeds BPS");
+      (state.feeProfile.partnerFeeBps as Map<Address, number>).set(asset.toLowerCase() as Address, Number(fee));
     }
     return { state, cursor, runtimeCodeHash };
   }
@@ -265,6 +284,7 @@ export function parseRpcLog(value: unknown, chainId: bigint, commitment: ChainCu
     cursor: {
       chainId,
       blockNumber: parseHexU64(log.blockNumber, "log.blockNumber"),
+      executionBlockNumber: parseHexU64(log.blockNumber, "log.blockNumber"),
       blockHash:
         log.blockHash === null || log.blockHash === undefined ? undefined : parseHash(log.blockHash, "log.blockHash"),
       transactionIndex: parseHexU64(log.transactionIndex, "log.transactionIndex"),
@@ -338,17 +358,6 @@ function hexU64(value: bigint): string {
 }
 function wordHex(value: Word): string {
   return `0x${value.toString(16).padStart(64, "0")}`;
-}
-function compareCursor(left: ChainCursor, right: ChainCursor): number {
-  for (const [a, b] of [
-    [left.blockNumber, right.blockNumber],
-    [left.transactionIndex ?? 0n, right.transactionIndex ?? 0n],
-    [left.logIndex ?? 0n, right.logIndex ?? 0n],
-  ] as const) {
-    if (a < b) return -1;
-    if (a > b) return 1;
-  }
-  return 0;
 }
 function isZeroHash(value: string): boolean {
   return /^0x0{64}$/i.test(value);

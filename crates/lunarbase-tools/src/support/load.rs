@@ -156,7 +156,7 @@ pub async fn run(arguments: LoadArguments) -> Result<(), LoadError> {
     let checkpoint_delta = metric_delta(
         &metrics_before,
         &metrics_after,
-        "lunarbase_redis_checkpoint_commits_total",
+        "lunarbase_checkpoint_success_total",
     );
     let report = LoadReport {
         lanes: arguments.lanes,
@@ -173,11 +173,7 @@ pub async fn run(arguments: LoadArguments) -> Result<(), LoadError> {
         rss_bytes_after: rss_after,
         bytes_per_lane: rss_after.map(|rss| rss / arguments.lanes as u64),
         bytes_per_pair: rss_after.map(|rss| rss / arguments.pairs as u64),
-        indexed_block_delta: metric_delta(
-            &metrics_before,
-            &metrics_after,
-            "lunarbase_indexer_current_block",
-        ),
+        indexed_block_delta: metric_delta(&metrics_before, &metrics_after, "lunarbase_head_block"),
         checkpoint_commits_delta: checkpoint_delta,
         checkpoint_commits_per_second: checkpoint_delta / elapsed.as_secs_f64(),
         event_burst_requested,
@@ -198,18 +194,14 @@ fn load_vectors(arguments: &LoadArguments) -> Result<Vec<Value>, LoadError> {
         return Ok(serde_json::from_slice(&std::fs::read(path)?)?);
     }
     let cash = address(1);
-    let router = address(3);
     Ok((0..arguments.pairs)
         .map(|index| {
             let asset = address(u64::try_from(index % arguments.lanes).unwrap_or(0) + 10);
             json!({
-                "router": router,
                 "assetIn": cash,
                 "assetOut": asset,
                 "amount": (1_000 + index).to_string(),
-                "mode": "exactIn",
-                "executionBlockNumber": "0",
-                "minimumCommitment": "realtime",
+                "mode": "exactIn"
             })
         })
         .collect())

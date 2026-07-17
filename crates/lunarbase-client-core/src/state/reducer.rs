@@ -1,9 +1,14 @@
-//! Core single-writer quote state reducer.
+//! Ordered single-writer quote-state reducer.
 
-use crate::{ChainCursor, Checkpoint, QuoteEvent, MATH_COMPATIBILITY_VERSION, SCHEMA_VERSION};
-use lunarbase_math::{QuoteState, U256};
+use crate::{
+    ChainCursor, Checkpoint, DeploymentConfig, QuoteEvent, MATH_COMPATIBILITY_VERSION,
+    SCHEMA_VERSION,
+};
+use lunarbase_math::{Address, QuoteState};
 use thiserror::Error;
+
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
+/// Failure that revokes quote readiness until canonical recovery.
 pub enum ReducerError {
     #[error("cursor chain id mismatch")]
     ChainIdMismatch,
@@ -13,72 +18,79 @@ pub enum ReducerError {
     RemovedLog,
     #[error("block hash mismatch")]
     BlockHashMismatch,
-    #[error("arithmetic transition failed: {0}")]
-    Arithmetic(#[from] lunarbase_math::MathError),
+    #[error("arithmetic transition failed")]
+    Arithmetic,
     #[error("invalid lane slippage K")]
     InvalidSlippageK,
     #[error("event value does not fit the contract storage width")]
     InvalidWidth,
 }
 
-/// Single-writer state reducer. Events must arrive in `(block, tx, log)` order.
 #[derive(Clone, Debug)]
+/// Single-writer reducer over quote-critical state.
+///
+/// Every fallible value is validated before mutation, avoiding the previous
+/// full-state clone used for rollback on each event.
 pub struct QuoteReducer {
     state: QuoteState,
+    configured_router: Address,
     cursor: Option<ChainCursor>,
     ready: bool,
 }
 
 impl QuoteReducer {
-    /// Creates a not-ready reducer around a block-tagged quote state.
-    pub fn new(state: QuoteState) -> Self {
+    /// Creates a not-ready reducer around a block-tagged state.
+    pub fn new(state: QuoteState, configured_router: Address) -> Self {
         Self {
             state,
+            configured_router,
             cursor: None,
             ready: false,
         }
     }
-    /// Restores a ready reducer from a compatibility-checked checkpoint.
+
+    /// Restores a ready reducer from a prevalidated checkpoint.
     pub fn from_checkpoint(checkpoint: Checkpoint) -> Self {
         Self {
             state: checkpoint.state,
+            configured_router: checkpoint.router,
             cursor: Some(checkpoint.cursor),
             ready: true,
         }
     }
+
     /// Returns the current immutable state view.
     pub fn state(&self) -> &QuoteState {
         &self.state
     }
-    /// Returns the last accepted cursor, if bootstrap or replay has occurred.
+
+    /// Returns the last accepted cursor.
     pub fn cursor(&self) -> Option<&ChainCursor> {
         self.cursor.as_ref()
     }
-    /// Reports whether the state may be served as fresh.
-    pub fn is_ready(&self) -> bool {
+
+    /// Reports whether the state may be used for quotes.
+    pub const fn is_ready(&self) -> bool {
         self.ready
     }
-    /// Marks the state unavailable until canonical recovery completes.
+
+    /// Revokes readiness until a canonical recovery succeeds.
     pub fn mark_not_ready(&mut self) {
         self.ready = false;
     }
-    /// Publishes the current state as ready after all invariants pass.
+
+    /// Publishes the current canonical state.
     pub fn publish_ready(&mut self) {
         self.ready = true;
     }
-    /// Installs the initial snapshot cursor and marks the reducer ready.
+
+    /// Installs the initial snapshot cursor.
     pub fn bootstrap(&mut self, cursor: ChainCursor) {
         self.cursor = Some(cursor);
         self.ready = true;
     }
 
-    /// Observe a source head without mutating quote state. Heads advance the
-    /// durable cursor and can promote commitment for the current block, but a
-    /// late realtime head must never downgrade a finalized cursor.
     /// Advances a block-level cursor without changing quote state.
-    ///
-    /// Same-block commitment upgrades are accepted; older heads are ignored;
-    /// block-hash conflicts and chain-id mismatches fail closed.
     pub fn observe_head(&mut self, head: ChainCursor) -> Result<(), ReducerError> {
         if let Some(current) = &mut self.cursor {
             if current.chain_id != head.chain_id {
@@ -88,6 +100,7 @@ impl QuoteReducer {
                 && current.block_hash.is_some()
                 && head.block_hash.is_some()
                 && current.block_hash != head.block_hash
+                && !is_realtime_progression(current, &head)
             {
                 return Err(ReducerError::BlockHashMismatch);
             }
@@ -95,11 +108,16 @@ impl QuoteReducer {
                 return Ok(());
             }
             if head.block_number == current.block_number {
-                if current.block_hash.is_none() {
+                if current.block_hash.is_none() || is_realtime_progression(current, &head) {
                     current.block_hash = head.block_hash;
                 }
+                current.execution_block_number = head.execution_block_number;
                 if head.commitment > current.commitment {
                     current.commitment = head.commitment;
+                }
+                if head.source_sequence > current.source_sequence {
+                    current.source_sequence = head.source_sequence;
+                    current.source_sub_index = head.source_sub_index;
                 }
                 return Ok(());
             }
@@ -108,10 +126,7 @@ impl QuoteReducer {
         Ok(())
     }
 
-    /// Applies one decoded quote event atomically to state and cursor.
-    ///
-    /// Duplicate cursors are idempotent. Arithmetic or ordering errors roll
-    /// back both state and cursor so callers can trigger canonical recovery.
+    /// Applies one decoded event after validating ordering and storage widths.
     pub fn apply(&mut self, cursor: ChainCursor, event: QuoteEvent) -> Result<(), ReducerError> {
         if let Some(previous) = &self.cursor {
             if previous.chain_id != cursor.chain_id {
@@ -121,6 +136,7 @@ impl QuoteReducer {
                 && previous.block_hash.is_some()
                 && cursor.block_hash.is_some()
                 && previous.block_hash != cursor.block_hash
+                && !is_realtime_progression(previous, &cursor)
             {
                 return Err(ReducerError::BlockHashMismatch);
             }
@@ -136,29 +152,15 @@ impl QuoteReducer {
                 return Ok(());
             }
         }
-        let previous_state = self.state.clone();
-        let previous_cursor = self.cursor.clone();
-        let result = (|| {
-            self.apply_event(event)?;
-            self.state.state_version = self
-                .state
-                .state_version
-                .checked_add(1)
-                .ok_or(lunarbase_math::MathError::Overflow)?;
-            self.cursor = Some(cursor);
-            Ok::<(), ReducerError>(())
-        })();
-        if result.is_err() {
-            self.state = previous_state;
-            self.cursor = previous_cursor;
-        }
-        result
+        self.apply_event(event)?;
+        self.cursor = Some(cursor);
+        Ok(())
     }
 
     fn apply_event(&mut self, event: QuoteEvent) -> Result<(), ReducerError> {
         match event {
             QuoteEvent::LaneAdded { asset } => {
-                self.state.lanes.entry(asset).or_default().exists = true;
+                self.state.lanes.entry(asset).or_default().set_exists(true);
             }
             QuoteEvent::LaneRemoved { asset } => {
                 self.state.lanes.remove(&asset);
@@ -170,75 +172,72 @@ impl QuoteReducer {
                 if new_k > lunarbase_math::BPS {
                     return Err(ReducerError::InvalidSlippageK);
                 }
-                self.state.lanes.entry(asset).or_default().slippage_k_bps =
-                    u32::try_from(new_k).map_err(|_| ReducerError::InvalidWidth)?;
+                let value = u32::try_from(new_k).map_err(|_| ReducerError::InvalidWidth)?;
+                self.state.lanes.entry(asset).or_default().slippage_k_bps = value;
             }
             QuoteEvent::PartnerInfoSet { router, asset, fee }
             | QuoteEvent::PartnerFeeSet { router, asset, fee } => {
+                if router != self.configured_router {
+                    return Ok(());
+                }
                 if fee > lunarbase_math::BPS {
                     return Err(ReducerError::InvalidWidth);
                 }
-                self.state.partner_fee_bps.insert((router, asset), fee);
+                let value = u32::try_from(fee).map_err(|_| ReducerError::InvalidWidth)?;
+                self.state.fee_profile.partner_fee_bps.insert(asset, value);
             }
             QuoteEvent::WhitelistSet {
                 router,
                 whitelisted,
             } => {
-                self.state.whitelist.insert(router, whitelisted);
+                if router == self.configured_router {
+                    self.state.fee_profile.whitelisted = whitelisted;
+                }
             }
             QuoteEvent::BlacklistFeeMultiplierSet { multiplier } => {
-                self.state.blacklist_fee_multiplier = multiplier;
+                self.state.fee_profile.blacklist_fee_multiplier = multiplier;
             }
             QuoteEvent::DepositExecuted { asset, principal } => {
-                if principal > lunarbase_math::U128_MAX {
-                    return Err(ReducerError::InvalidWidth);
-                }
-                let current = self
-                    .state
+                let principal =
+                    u128::try_from(principal).map_err(|_| ReducerError::InvalidWidth)?;
+                let lane = self.state.lanes.entry(asset).or_default();
+                let next = lane
                     .total_principal_amount
-                    .get(&asset)
-                    .copied()
-                    .unwrap_or(U256::ZERO);
-                self.state.total_principal_amount.insert(
-                    asset,
-                    current
-                        .checked_add(principal)
-                        .ok_or(lunarbase_math::MathError::Overflow)?,
-                );
-                if self.state.total_principal_amount[&asset] > lunarbase_math::U128_MAX {
-                    return Err(ReducerError::InvalidWidth);
-                }
+                    .checked_add(principal)
+                    .ok_or(ReducerError::Arithmetic)?;
+                lane.total_principal_amount = next;
             }
             QuoteEvent::WithdrawalExecuted { asset, principal } => {
-                if principal > lunarbase_math::U128_MAX {
-                    return Err(ReducerError::InvalidWidth);
-                }
-                let current = self
-                    .state
+                let principal =
+                    u128::try_from(principal).map_err(|_| ReducerError::InvalidWidth)?;
+                let lane = self.state.lanes.entry(asset).or_default();
+                let next = lane
                     .total_principal_amount
-                    .get(&asset)
-                    .copied()
-                    .unwrap_or(U256::ZERO);
-                self.state.total_principal_amount.insert(
-                    asset,
-                    current
-                        .checked_sub(principal)
-                        .ok_or(lunarbase_math::MathError::Overflow)?,
-                );
+                    .checked_sub(principal)
+                    .ok_or(ReducerError::Arithmetic)?;
+                lane.total_principal_amount = next;
             }
-            QuoteEvent::SwapExecuted => {}
         }
         Ok(())
     }
 
-    /// Serializes the current state and cursor as a durable checkpoint.
-    pub fn checkpoint(&self, code_hash: [u8; 32]) -> Option<Checkpoint> {
+    /// Builds a durable v3 checkpoint. This clone is outside the quote path.
+    pub fn checkpoint(&self, deployment: &DeploymentConfig) -> Option<Checkpoint> {
         Some(Checkpoint {
             schema_version: SCHEMA_VERSION,
             math_compatibility_version: MATH_COMPATIBILITY_VERSION.into(),
-            expected_runtime_code_hash: code_hash,
+            expected_runtime_code_hash: deployment.expected_runtime_code_hash,
+            chain_id: deployment.chain_id,
+            core: deployment.core,
+            router: deployment.router,
             cursor: self.cursor.clone()?,
             state: self.state.clone(),
         })
     }
+}
+
+fn is_realtime_progression(previous: &ChainCursor, next: &ChainCursor) -> bool {
+    previous.commitment == crate::Commitment::Realtime
+        && next.commitment == crate::Commitment::Realtime
+        && next.source_sequence > previous.source_sequence
 }

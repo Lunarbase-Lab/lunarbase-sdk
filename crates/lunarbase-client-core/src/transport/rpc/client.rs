@@ -1,11 +1,25 @@
-const SELECTOR_CASH: &str = "0x961be391";
-const SELECTOR_LANE: &str = "0xd1bacd10";
-const SELECTOR_RESERVES: &str = "0xd66bd524";
-const SELECTOR_WHITELIST: &str = "0x9b19251a";
-const SELECTOR_BLACKLIST_FEE_MULTIPLIER: &str = "0x93b6ab27";
-const SELECTOR_PARTNERS: &str = "0xaa5f434c";
+use super::codec::{
+    hex_u64, parse_hex_bytes, parse_hex_u64, parse_optional_hash, parse_rpc_log, word_hex,
+};
+use crate::{BackfillRequest, ChainCursor, Commitment, ContractLog, SourceError};
+use lunarbase_math::Address;
+use reqwest::Client;
+use serde_json::{json, Value};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
+use thiserror::Error;
+
+pub(super) const SELECTOR_CASH: &str = "0x961be391";
+pub(super) const SELECTOR_LANE: &str = "0xd1bacd10";
+pub(super) const SELECTOR_RESERVES: &str = "0xd66bd524";
+pub(super) const SELECTOR_WHITELIST: &str = "0x9b19251a";
+pub(super) const SELECTOR_BLACKLIST_FEE_MULTIPLIER: &str = "0x93b6ab27";
+pub(super) const SELECTOR_PARTNERS: &str = "0xaa5f434c";
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
+/// Failure returned by the HTTP JSON-RPC boundary.
 pub enum RpcError {
     #[error("HTTP RPC request failed: {0}")]
     Http(String),
@@ -24,6 +38,7 @@ impl From<RpcError> for SourceError {
 }
 
 #[derive(Clone)]
+/// Minimal pooled HTTP JSON-RPC client.
 pub struct RpcHttpClient {
     endpoint: Arc<str>,
     client: Client,
@@ -130,18 +145,22 @@ impl RpcHttpClient {
             .as_object()
             .cloned()
             .ok_or_else(|| RpcError::Invalid("block result is null or not an object".into()))?;
+        let block_number = parse_hex_u64(result.get("number"), "block.number")?;
+        let execution_block_number = result
+            .get("l1BlockNumber")
+            .map(|value| parse_hex_u64(Some(value), "block.l1BlockNumber"))
+            .transpose()?
+            .unwrap_or(block_number);
         Ok(ChainCursor {
             chain_id,
-            block_number: parse_hex_u64(result.get("number"), "block.number")?,
+            block_number,
+            execution_block_number,
             block_hash: parse_optional_hash(result.get("hash"), "block.hash")?,
             transaction_index: None,
             log_index: None,
             // Nitro exposes the EVM-visible parent-chain block in this
             // Arbitrum extension. Other networks simply omit the field.
-            source_sequence: result
-                .get("l1BlockNumber")
-                .map(|value| parse_hex_u64(Some(value), "block.l1BlockNumber"))
-                .transpose()?,
+            source_sequence: None,
             source_sub_index: None,
             commitment,
         })
@@ -188,4 +207,3 @@ impl RpcHttpClient {
             .collect()
     }
 }
-

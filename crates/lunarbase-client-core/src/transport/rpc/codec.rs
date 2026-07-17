@@ -1,3 +1,9 @@
+use super::RpcError;
+use crate::{ChainCursor, Commitment, ContractLog, SourceError};
+use lunarbase_math::{Address, U256};
+use serde_json::Value;
+use tiny_keccak::{Hasher, Keccak};
+
 /// Decodes one standard Ethereum JSON-RPC log into the normalized model.
 pub fn parse_rpc_log(
     value: &Value,
@@ -30,6 +36,7 @@ pub fn parse_rpc_log(
         .get("data")
         .and_then(Value::as_str)
         .ok_or_else(|| RpcError::Invalid("log data is missing".into()))?;
+    let block_number = parse_hex_u64(object.get("blockNumber"), "log.blockNumber")?;
     Ok(ContractLog {
         address,
         topics,
@@ -40,7 +47,8 @@ pub fn parse_rpc_log(
             .unwrap_or(false),
         cursor: ChainCursor {
             chain_id,
-            block_number: parse_hex_u64(object.get("blockNumber"), "log.blockNumber")?,
+            block_number,
+            execution_block_number: block_number,
             block_hash: parse_optional_hash(object.get("blockHash"), "log.blockHash")?,
             transaction_index: Some(checked_u32(
                 U256::from(parse_hex_u64(
@@ -60,11 +68,11 @@ pub fn parse_rpc_log(
     })
 }
 
-fn selector_address(selector: &str, address: Address) -> String {
+pub(super) fn selector_address(selector: &str, address: Address) -> String {
     format!("{selector}{}{}", "0".repeat(24), &address.to_hex()[2..])
 }
 
-fn selector_two_addresses(selector: &str, first: Address, second: Address) -> String {
+pub(super) fn selector_two_addresses(selector: &str, first: Address, second: Address) -> String {
     format!(
         "{selector}{}{}{}{}",
         "0".repeat(24),
@@ -74,9 +82,9 @@ fn selector_two_addresses(selector: &str, first: Address, second: Address) -> St
     )
 }
 
-fn parse_hex_bytes(value: &str) -> Result<Vec<u8>, RpcError> {
+pub(super) fn parse_hex_bytes(value: &str) -> Result<Vec<u8>, RpcError> {
     let value = value.strip_prefix("0x").unwrap_or(value);
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         return Err(RpcError::Invalid("hex string has odd length".into()));
     }
     (0..value.len() / 2)
@@ -87,7 +95,7 @@ fn parse_hex_bytes(value: &str) -> Result<Vec<u8>, RpcError> {
         .collect()
 }
 
-fn parse_hex_u64(value: Option<&Value>, field: &str) -> Result<u64, RpcError> {
+pub(super) fn parse_hex_u64(value: Option<&Value>, field: &str) -> Result<u64, RpcError> {
     let value = value
         .and_then(Value::as_str)
         .ok_or_else(|| RpcError::Invalid(format!("{field} is not a hex string")))?;
@@ -95,7 +103,10 @@ fn parse_hex_u64(value: Option<&Value>, field: &str) -> Result<u64, RpcError> {
     u64::from_str_radix(value, 16).map_err(|_| RpcError::Invalid(format!("{field} is invalid")))
 }
 
-fn parse_optional_hash(value: Option<&Value>, field: &str) -> Result<Option<[u8; 32]>, RpcError> {
+pub(super) fn parse_optional_hash(
+    value: Option<&Value>,
+    field: &str,
+) -> Result<Option<[u8; 32]>, RpcError> {
     match value {
         None | Some(Value::Null) => Ok(None),
         Some(value) => {
@@ -110,7 +121,7 @@ fn parse_optional_hash(value: Option<&Value>, field: &str) -> Result<Option<[u8;
     }
 }
 
-fn decode_words(value: &str, expected: usize) -> Result<Vec<U256>, RpcError> {
+pub(super) fn decode_words(value: &str, expected: usize) -> Result<Vec<U256>, RpcError> {
     let bytes = parse_hex_bytes(value)?;
     if bytes.len() != expected * 32 {
         return Err(RpcError::Invalid(format!(
@@ -124,14 +135,14 @@ fn decode_words(value: &str, expected: usize) -> Result<Vec<U256>, RpcError> {
         .collect())
 }
 
-fn decode_word(value: &str, index: usize) -> Result<U256, RpcError> {
+pub(super) fn decode_word(value: &str, index: usize) -> Result<U256, RpcError> {
     decode_words(value, index + 1)?
         .get(index)
         .copied()
         .ok_or_else(|| RpcError::Invalid("missing ABI word".into()))
 }
 
-fn decode_address_word(value: &str) -> Result<Address, RpcError> {
+pub(super) fn decode_address_word(value: &str) -> Result<Address, RpcError> {
     let word = decode_word(value, 0)?.to_be_bytes::<32>();
     if word[..12].iter().any(|byte| *byte != 0) {
         return Err(RpcError::Invalid("ABI address word is not padded".into()));
@@ -139,7 +150,7 @@ fn decode_address_word(value: &str) -> Result<Address, RpcError> {
     Ok(Address(word[12..].try_into().expect("20-byte address")))
 }
 
-fn decode_bool(value: U256) -> Result<bool, SourceError> {
+pub(super) fn decode_bool(value: U256) -> Result<bool, SourceError> {
     match value {
         U256::ZERO => Ok(false),
         U256::ONE => Ok(true),
@@ -147,11 +158,11 @@ fn decode_bool(value: U256) -> Result<bool, SourceError> {
     }
 }
 
-fn checked_u32(value: U256, field: &str) -> Result<u32, RpcError> {
+pub(super) fn checked_u32(value: U256, field: &str) -> Result<u32, RpcError> {
     u32::try_from(value).map_err(|_| RpcError::Invalid(format!("{field} does not fit u32")))
 }
 
-fn checked_u128(value: U256, field: &str) -> Result<U256, SourceError> {
+pub(super) fn checked_u128(value: U256, field: &str) -> Result<U256, SourceError> {
     if value > lunarbase_math::U128_MAX {
         return Err(SourceError::Unavailable(format!(
             "{field} does not fit uint128"
@@ -160,15 +171,15 @@ fn checked_u128(value: U256, field: &str) -> Result<U256, SourceError> {
     Ok(value)
 }
 
-fn hex_u64(value: u64) -> String {
+pub(super) fn hex_u64(value: u64) -> String {
     format!("0x{value:x}")
 }
 
-fn word_hex(value: U256) -> String {
+pub(super) fn word_hex(value: U256) -> String {
     format!("0x{}", hex_encode(&value.to_be_bytes::<32>()))
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
+pub(super) fn hex_encode(bytes: &[u8]) -> String {
     let mut result = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
         result.push_str(&format!("{byte:02x}"));
@@ -176,11 +187,10 @@ fn hex_encode(bytes: &[u8]) -> String {
     result
 }
 
-fn keccak256(bytes: &[u8]) -> [u8; 32] {
+pub(super) fn keccak256(bytes: &[u8]) -> [u8; 32] {
     let mut output = [0u8; 32];
     let mut hasher = Keccak::v256();
     hasher.update(bytes);
     hasher.finalize(&mut output);
     output
 }
-

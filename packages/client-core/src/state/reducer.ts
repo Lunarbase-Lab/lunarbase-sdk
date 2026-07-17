@@ -1,215 +1,267 @@
-/** Single-writer quote state reducer. */
-import { BPS, type LaneState, type QuoteState } from "@lunarbase/math";
-import type { Address, ChainCursor, Checkpoint, QuoteEvent } from "../model.js";
-import { commitmentRank, ReducerError, SCHEMA_VERSION, MATH_COMPATIBILITY_VERSION } from "../model.js";
+/** Ordered single-writer quote-state reducer. */
+import {
+  BPS,
+  LaneFlags,
+  quote as computeQuote,
+  type Address,
+  type LaneState,
+  type QuoteOutcome,
+  type QuoteRequest,
+  type QuoteState,
+} from "@lunarbase/math";
+import {
+  Commitment,
+  commitmentRank,
+  IndexerError,
+  MATH_COMPATIBILITY_VERSION,
+  ReducerError,
+  SCHEMA_VERSION,
+} from "../model.js";
+import type { ChainCursor, Checkpoint, DeploymentConfig, QuoteEvent } from "../model.js";
+import { compareCursor } from "../source.js";
 
-const U64_MAX = (1n << 64n) - 1n;
-function cursorOrder(cursor: ChainCursor): readonly [bigint, bigint, bigint] {
-  return [cursor.blockNumber, cursor.transactionIndex ?? 0n, cursor.logIndex ?? 0n];
-}
-function compareCursor(a: ChainCursor, b: ChainCursor): number {
-  const left = cursorOrder(a);
-  const right = cursorOrder(b);
-  for (let i = 0; i < left.length; i += 1) {
-    if (left[i] < right[i]) return -1;
-    if (left[i] > right[i]) return 1;
-  }
-  return 0;
-}
-function feeKey(router: Address, asset: Address): string {
-  return `${router.toLowerCase()}:${asset.toLowerCase()}`;
-}
+const U128_MAX = (1n << 128n) - 1n;
+const key = (address: Address): Address => address.toLowerCase() as Address;
+
 function emptyLane(): LaneState {
-  return { slot0: 0n, exists: false, paused: false, blockDelay: 0n, slippageKBps: 0n };
-}
-function cloneLane(lane: LaneState): LaneState {
-  return { ...lane };
-}
-type MutableQuoteState = Omit<QuoteState, "lanes" | "totalPrincipalAmount" | "whitelist" | "partnerFeeBps"> & {
-  lanes: Map<Address, LaneState>;
-  totalPrincipalAmount: Map<Address, bigint>;
-  whitelist: Map<Address, boolean>;
-  partnerFeeBps: Map<string, bigint>;
-};
-function cloneState(state: QuoteState): MutableQuoteState {
   return {
-    cash: state.cash,
-    lanes: new Map([...state.lanes].map(([key, lane]) => [key, cloneLane(lane)])),
-    totalPrincipalAmount: new Map(state.totalPrincipalAmount),
-    whitelist: new Map(state.whitelist),
-    blacklistFeeMultiplier: state.blacklistFeeMultiplier,
-    partnerFeeBps: new Map(state.partnerFeeBps),
-    stateVersion: state.stateVersion,
+    slot0: 0n,
+    totalPrincipalAmount: 0n,
+    slippageKBps: 0,
+    blockDelay: 0,
+    flags: 0,
   };
 }
 
+function cloneState(state: QuoteState): QuoteState {
+  return {
+    cash: state.cash,
+    lanes: new Map([...state.lanes].map(([asset, lane]) => [key(asset), { ...lane }])),
+    feeProfile: {
+      whitelisted: state.feeProfile.whitelisted,
+      blacklistFeeMultiplier: state.feeProfile.blacklistFeeMultiplier,
+      partnerFeeBps: new Map([...state.feeProfile.partnerFeeBps].map(([asset, fee]) => [key(asset), fee])),
+    },
+  };
+}
+
+/** In-memory reducer whose maps never escape the client API. */
 export class QuoteReducer {
-  private currentState: MutableQuoteState;
-  private lastCursor?: ChainCursor;
+  private state: QuoteState;
+  private cursorValue?: ChainCursor;
   private ready = false;
-  /** Creates a single-writer reducer from a mutable clone of a quote snapshot. */
-  constructor(state: QuoteState) {
-    this.currentState = cloneState(state);
+
+  /** Creates a not-ready reducer for one configured router. */
+  constructor(
+    state: QuoteState,
+    private readonly configuredRouter: Address,
+  ) {
+    this.state = cloneState(state);
   }
-  /** Restores a ready reducer from a compatibility-checked checkpoint. */
+
+  /** Restores a prevalidated checkpoint. */
   static fromCheckpoint(checkpoint: Checkpoint): QuoteReducer {
-    const reducer = new QuoteReducer(checkpoint.state);
-    reducer.lastCursor = checkpoint.cursor;
+    const reducer = new QuoteReducer(checkpoint.state, checkpoint.router);
+    reducer.cursorValue = { ...checkpoint.cursor };
     reducer.ready = true;
     return reducer;
   }
-  /** Returns a defensive immutable-state clone. */
-  state(): QuoteState {
-    return cloneState(this.currentState);
-  }
-  /** Returns the last accepted cursor, if bootstrapped. */
+
+  /** Returns the last accepted cursor. */
   cursor(): ChainCursor | undefined {
-    return this.lastCursor;
+    return this.cursorValue ? { ...this.cursorValue } : undefined;
   }
-  /** Returns whether the reducer may serve fresh quotes. */
+
+  /** Reports whether quotes may use current state. */
   isReady(): boolean {
     return this.ready;
   }
-  /** Revokes readiness after a gap, reorg, or persistence failure. */
+
+  /** Revokes readiness until a complete canonical recovery succeeds. */
   markNotReady(): void {
     this.ready = false;
   }
-  /** Publishes the current state as ready after a complete handoff/recovery. */
+
+  /** Publishes recovered state. */
   publishReady(): void {
     this.ready = true;
   }
-  /** Installs the initial cursor and marks the reducer ready. */
+
+  /** Installs the initial block-tagged cursor. */
   bootstrap(cursor: ChainCursor): void {
-    this.lastCursor = cursor;
+    this.cursorValue = { ...cursor };
     this.ready = true;
   }
-  /** Advances the cursor from a head while checking chain/hash consistency. */
+
+  /** Advances head metadata without changing quote state. */
   observeHead(head: ChainCursor): void {
-    if (!this.lastCursor) {
-      this.lastCursor = head;
+    const current = this.cursorValue;
+    if (!current) {
+      this.cursorValue = { ...head };
       return;
     }
-    if (this.lastCursor.chainId !== head.chainId)
-      throw new ReducerError("CHAIN_ID_MISMATCH", "cursor chain id mismatch");
-    if (
-      this.lastCursor.blockNumber === head.blockNumber &&
-      this.lastCursor.blockHash &&
-      head.blockHash &&
-      this.lastCursor.blockHash.toLowerCase() !== head.blockHash.toLowerCase()
-    )
-      throw new ReducerError("BLOCK_HASH_MISMATCH", "block hash mismatch");
-    if (head.blockNumber < this.lastCursor.blockNumber) return;
-    if (head.blockNumber === this.lastCursor.blockNumber) {
-      this.lastCursor = {
-        ...this.lastCursor,
-        blockHash: this.lastCursor.blockHash ?? head.blockHash,
-        commitment:
-          commitmentRank(head.commitment) > commitmentRank(this.lastCursor.commitment)
-            ? head.commitment
-            : this.lastCursor.commitment,
-      };
+    this.validateChainAndHash(current, head);
+    if (head.blockNumber < current.blockNumber) return;
+    if (head.blockNumber > current.blockNumber) {
+      this.cursorValue = { ...head };
       return;
     }
-    this.lastCursor = head;
+    const progression = isRealtimeProgression(current, head);
+    this.cursorValue = {
+      ...current,
+      executionBlockNumber: head.executionBlockNumber,
+      blockHash: current.blockHash === undefined || progression ? head.blockHash : current.blockHash,
+      commitment:
+        commitmentRank(head.commitment) > commitmentRank(current.commitment) ? head.commitment : current.commitment,
+      sourceSequence:
+        (head.sourceSequence ?? 0n) > (current.sourceSequence ?? 0n) ? head.sourceSequence : current.sourceSequence,
+      sourceSubIndex:
+        (head.sourceSequence ?? 0n) > (current.sourceSequence ?? 0n) ? head.sourceSubIndex : current.sourceSubIndex,
+    };
   }
-  /** Applies one ordered event transactionally, rolling back on validation failure. */
+
+  /** Applies one already-ordered quote-critical event. */
   apply(cursor: ChainCursor, event: QuoteEvent): void {
-    if (this.lastCursor) {
-      if (this.lastCursor.chainId !== cursor.chainId)
-        throw new ReducerError("CHAIN_ID_MISMATCH", "cursor chain id mismatch");
-      if (
-        this.lastCursor.blockNumber === cursor.blockNumber &&
-        this.lastCursor.blockHash &&
-        cursor.blockHash &&
-        this.lastCursor.blockHash.toLowerCase() !== cursor.blockHash.toLowerCase()
-      )
-        throw new ReducerError("BLOCK_HASH_MISMATCH", "block hash mismatch");
-      const blockHeadToEvent =
-        this.lastCursor.blockNumber === cursor.blockNumber &&
-        this.lastCursor.transactionIndex === undefined &&
-        this.lastCursor.logIndex === undefined &&
+    const previous = this.cursorValue;
+    if (previous) {
+      this.validateChainAndHash(previous, cursor);
+      const previousIsHead =
+        previous.blockNumber === cursor.blockNumber &&
+        previous.transactionIndex === undefined &&
+        previous.logIndex === undefined &&
         cursor.transactionIndex !== undefined &&
         cursor.logIndex !== undefined;
-      const order = compareCursor(cursor, this.lastCursor);
-      if (!blockHeadToEvent && order < 0) throw new ReducerError("CURSOR_REGRESSION", "cursor regression");
-      if (!blockHeadToEvent && order === 0) return;
+      const order = compareCursor(cursor, previous);
+      if (!previousIsHead && order < 0) throw new ReducerError("CURSOR_REGRESSION", "cursor regression");
+      if (!previousIsHead && order === 0) return;
     }
-    const previousState = cloneState(this.currentState);
-    const previousCursor = this.lastCursor;
-    try {
-      this.applyEvent(event);
-      this.currentState.stateVersion += 1n;
-      if (this.currentState.stateVersion > U64_MAX) throw new ReducerError("ARITHMETIC", "state version overflow");
-      this.lastCursor = cursor;
-    } catch (error) {
-      this.currentState = previousState;
-      this.lastCursor = previousCursor;
-      throw error;
-    }
+    this.validateEvent(event);
+    this.applyEvent(event);
+    this.cursorValue = { ...cursor };
   }
+
+  /** Computes one quote synchronously from the current event-loop snapshot. */
+  quote(request: QuoteRequest): QuoteOutcome {
+    const cursor = this.requireReadyCursor();
+    return computeQuote(request, cursor.executionBlockNumber, this.state);
+  }
+
+  /** Computes a batch without yielding, so every result uses one cursor/state. */
+  quoteMany(requests: readonly QuoteRequest[]): readonly QuoteOutcome[] {
+    const cursor = this.requireReadyCursor();
+    return requests.map((request) => computeQuote(request, cursor.executionBlockNumber, this.state));
+  }
+
+  /** Creates a deep-cloned v3 restart checkpoint outside the quote path. */
+  checkpoint(config: DeploymentConfig): Checkpoint | undefined {
+    if (!this.cursorValue) return undefined;
+    return {
+      schemaVersion: SCHEMA_VERSION,
+      mathCompatibilityVersion: MATH_COMPATIBILITY_VERSION,
+      expectedRuntimeCodeHash: config.expectedRuntimeCodeHash,
+      chainId: config.chainId,
+      core: config.core,
+      router: config.router,
+      cursor: { ...this.cursorValue },
+      state: cloneState(this.state),
+    };
+  }
+
+  private requireReadyCursor(): ChainCursor {
+    if (!this.ready) throw new IndexerError("NOT_READY", "indexer is not ready");
+    if (!this.cursorValue) throw new IndexerError("NO_CURSOR", "indexer has no cursor");
+    return this.cursorValue;
+  }
+
+  private validateChainAndHash(previous: ChainCursor, next: ChainCursor): void {
+    if (previous.chainId !== next.chainId) throw new ReducerError("CHAIN_ID_MISMATCH", "cursor chain id mismatch");
+    if (
+      previous.blockNumber === next.blockNumber &&
+      previous.blockHash &&
+      next.blockHash &&
+      previous.blockHash.toLowerCase() !== next.blockHash.toLowerCase() &&
+      !isRealtimeProgression(previous, next)
+    )
+      throw new ReducerError("BLOCK_HASH_MISMATCH", "block hash mismatch");
+  }
+
+  private validateEvent(event: QuoteEvent): void {
+    if (event.kind === "SlippageKSet" && (event.newK < 0n || event.newK > BPS))
+      throw new ReducerError("INVALID_SLIPPAGE_K", "slippage K exceeds BPS");
+    if ((event.kind === "PartnerInfoSet" || event.kind === "PartnerFeeSet") && (event.fee < 0n || event.fee > BPS))
+      throw new ReducerError("INVALID_WIDTH", "partner fee exceeds BPS");
+    if (
+      (event.kind === "DepositExecuted" || event.kind === "WithdrawalExecuted") &&
+      (event.principal < 0n || event.principal > U128_MAX)
+    )
+      throw new ReducerError("INVALID_WIDTH", "principal does not fit uint128");
+  }
+
   private applyEvent(event: QuoteEvent): void {
     switch (event.kind) {
       case "LaneAdded": {
-        const lane = this.currentState.lanes.get(event.asset) ?? emptyLane();
-        this.currentState.lanes.set(event.asset, { ...lane, exists: true });
+        const lane = this.lane(event.asset);
+        lane.flags |= LaneFlags.Exists;
+        this.setLane(event.asset, lane);
         break;
       }
       case "LaneRemoved":
-        this.currentState.lanes.delete(event.asset);
+        (this.state.lanes as Map<Address, LaneState>).delete(key(event.asset));
         break;
       case "LaneUpdated": {
-        const lane = this.currentState.lanes.get(event.asset) ?? emptyLane();
-        this.currentState.lanes.set(event.asset, { ...lane, slot0: event.slot0 });
+        const lane = this.lane(event.asset);
+        lane.slot0 = event.slot0;
+        this.setLane(event.asset, lane);
         break;
       }
       case "SlippageKSet": {
-        if (event.newK > BPS) throw new ReducerError("INVALID_SLIPPAGE_K", "slippage K exceeds BPS");
-        const lane = this.currentState.lanes.get(event.asset) ?? emptyLane();
-        this.currentState.lanes.set(event.asset, { ...lane, slippageKBps: event.newK });
+        const lane = this.lane(event.asset);
+        lane.slippageKBps = Number(event.newK);
+        this.setLane(event.asset, lane);
         break;
       }
       case "PartnerInfoSet":
       case "PartnerFeeSet":
-        if (event.fee > BPS) throw new ReducerError("INVALID_WIDTH", "partner fee exceeds BPS");
-        this.currentState.partnerFeeBps.set(feeKey(event.router, event.asset), event.fee);
+        if (key(event.router) === key(this.configuredRouter))
+          (this.state.feeProfile.partnerFeeBps as Map<Address, number>).set(key(event.asset), Number(event.fee));
         break;
       case "WhitelistSet":
-        this.currentState.whitelist.set(event.router, event.whitelisted);
+        if (key(event.router) === key(this.configuredRouter)) this.state.feeProfile.whitelisted = event.whitelisted;
         break;
       case "BlacklistFeeMultiplierSet":
-        this.currentState.blacklistFeeMultiplier = event.multiplier;
+        this.state.feeProfile.blacklistFeeMultiplier = event.multiplier;
         break;
       case "DepositExecuted": {
-        const current = this.currentState.totalPrincipalAmount.get(event.asset) ?? 0n;
-        if (event.principal > (1n << 128n) - 1n)
-          throw new ReducerError("INVALID_WIDTH", "principal does not fit uint128");
-        const next = current + event.principal;
-        if (next > (1n << 128n) - 1n) throw new ReducerError("INVALID_WIDTH", "principal storage overflow");
-        this.currentState.totalPrincipalAmount.set(event.asset, next);
+        const lane = this.lane(event.asset);
+        const next = lane.totalPrincipalAmount + event.principal;
+        if (next > U128_MAX) throw new ReducerError("ARITHMETIC", "principal storage overflow");
+        lane.totalPrincipalAmount = next;
+        this.setLane(event.asset, lane);
         break;
       }
       case "WithdrawalExecuted": {
-        const current = this.currentState.totalPrincipalAmount.get(event.asset) ?? 0n;
-        if (event.principal > (1n << 128n) - 1n)
-          throw new ReducerError("INVALID_WIDTH", "principal does not fit uint128");
-        if (event.principal > current) throw new ReducerError("ARITHMETIC", "principal underflow");
-        this.currentState.totalPrincipalAmount.set(event.asset, current - event.principal);
+        const lane = this.lane(event.asset);
+        if (event.principal > lane.totalPrincipalAmount) throw new ReducerError("ARITHMETIC", "principal underflow");
+        lane.totalPrincipalAmount -= event.principal;
+        this.setLane(event.asset, lane);
         break;
       }
-      case "SwapExecuted":
-        break;
     }
   }
-  /** Serializes the current state and cursor into a durable checkpoint. */
-  checkpoint(codeHash: string): Checkpoint | undefined {
-    return this.lastCursor
-      ? {
-          schemaVersion: SCHEMA_VERSION,
-          mathCompatibilityVersion: MATH_COMPATIBILITY_VERSION,
-          expectedRuntimeCodeHash: codeHash,
-          cursor: this.lastCursor,
-          state: this.state(),
-        }
-      : undefined;
+
+  private lane(asset: Address): LaneState {
+    return { ...(this.state.lanes.get(key(asset)) ?? emptyLane()) };
   }
+
+  private setLane(asset: Address, lane: LaneState): void {
+    (this.state.lanes as Map<Address, LaneState>).set(key(asset), lane);
+  }
+}
+
+function isRealtimeProgression(previous: ChainCursor, next: ChainCursor): boolean {
+  return (
+    previous.commitment === Commitment.Realtime &&
+    next.commitment === Commitment.Realtime &&
+    (next.sourceSequence ?? 0n) > (previous.sourceSequence ?? 0n)
+  );
 }

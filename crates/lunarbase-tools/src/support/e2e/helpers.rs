@@ -1,4 +1,6 @@
-async fn wait_until<F, Fut>(deadline: Duration, mut predicate: F) -> Result<(), ()>
+use super::*;
+
+pub(super) async fn wait_until<F, Fut>(deadline: Duration, mut predicate: F) -> Result<(), ()>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = bool>,
@@ -13,7 +15,7 @@ where
     Err(())
 }
 
-async fn stop_requested(stop: &mut watch::Receiver<bool>) {
+pub(super) async fn stop_requested(stop: &mut watch::Receiver<bool>) {
     if *stop.borrow() {
         return;
     }
@@ -24,17 +26,17 @@ async fn stop_requested(stop: &mut watch::Receiver<bool>) {
     }
 }
 
-fn free_port() -> Result<u16, E2eError> {
+pub(super) fn free_port() -> Result<u16, E2eError> {
     let listener =
         std::net::TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))?;
     Ok(listener.local_addr()?.port())
 }
 
-fn address_word(address: &str) -> String {
+pub(super) fn address_word(address: &str) -> String {
     format!("0x{}{}", "0".repeat(24), address.trim_start_matches("0x"))
 }
 
-fn words(values: &[U256]) -> String {
+pub(super) fn words(values: &[U256]) -> String {
     let mut output = String::from("0x");
     for value in values {
         output.push_str(&format!("{value:064x}"));
@@ -42,10 +44,10 @@ fn words(values: &[U256]) -> String {
     output
 }
 
-fn word_hex(value: U256) -> String {
+pub(super) fn word_hex(value: U256) -> String {
     format!("0x{value:064x}")
 }
 
-fn block_hash(block: u64) -> String {
+pub(super) fn block_hash(block: u64) -> String {
     format!("0x{block:064x}")
 }

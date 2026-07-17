@@ -1,4 +1,4 @@
-import { QuoteError, assertU256, type Address } from "./constants.js";
+import { assertU256, type Address } from "./constants.js";
 import { checkedAdd, checkedSub } from "./arithmetic.js";
 import { laneSlot0AskFeeBps, laneSlot0BidFeeBps, laneSlot0LatestUpdateBlock, laneSlot0Price } from "./slot0.js";
 import {
@@ -11,33 +11,43 @@ import {
   quoteLaneWeightedSlippageKBps,
   splitFee,
 } from "./fees.js";
-import type { LaneState, QuoteContext, QuoteOutcome, QuoteRequest, QuoteState, UnavailableReason } from "./types.js";
+import {
+  laneExists,
+  lanePaused,
+  type LaneState,
+  type QuoteOutcome,
+  type QuoteRequest,
+  type QuoteState,
+  type UnavailableReason,
+} from "./types.js";
 
-function feeKey(router: Address, asset: Address): string {
-  return `${router.toLowerCase()}:${asset.toLowerCase()}`;
+function partnerFee(state: QuoteState, asset: Address): bigint {
+  return BigInt(state.feeProfile.partnerFeeBps.get(asset) ?? 0);
 }
-function partnerFee(state: QuoteState, router: Address, asset: Address): bigint {
-  return state.partnerFeeBps.get(feeKey(router, asset)) ?? 0n;
-}
-function laneOrReason(state: QuoteState, asset: Address, context: QuoteContext): LaneState | UnavailableReason {
+
+function laneOrReason(state: QuoteState, asset: Address, executionBlockNumber: bigint): LaneState | UnavailableReason {
   const lane = state.lanes.get(asset);
-  if (!lane || !lane.exists) return { kind: "MissingLane", asset };
-  if (lane.paused) return { kind: "PausedLane", asset };
-  const readyAt = checkedAdd(laneSlot0LatestUpdateBlock(lane.slot0), lane.blockDelay);
-  if (context.executionBlockNumber < readyAt) return { kind: "DelayedLane", asset };
+  if (!lane || !laneExists(lane)) return { kind: "MissingLane", asset };
+  if (lanePaused(lane)) return { kind: "PausedLane", asset };
+  const readyAt = checkedAdd(laneSlot0LatestUpdateBlock(lane.slot0), BigInt(lane.blockDelay));
+  if (executionBlockNumber < readyAt) return { kind: "DelayedLane", asset };
   if (laneSlot0Price(lane.slot0) === 0n) return { kind: "ZeroPrice", asset };
   return lane;
 }
-function principalCashValue(state: QuoteState, asset: Address, lane: LaneState): bigint {
-  const principal = state.totalPrincipalAmount.get(asset) ?? 0n;
-  return principal === 0n ? 0n : quoteLaneExactIn(laneSlot0Price(lane.slot0), principal, false);
+
+function principalCashValue(lane: LaneState): bigint {
+  return lane.totalPrincipalAmount === 0n
+    ? 0n
+    : quoteLaneExactIn(laneSlot0Price(lane.slot0), lane.totalPrincipalAmount, false);
 }
+
 function laneSpread(anchor: bigint, feeBps: bigint, slippageBps: bigint, exactIn: boolean): readonly [bigint, bigint] {
   const fee = exactIn ? quoteLaneExactInFee(anchor, feeBps) : quoteLaneExactOutFee(anchor, feeBps);
   const totalBps = checkedAdd(feeBps, slippageBps);
   const total = exactIn ? quoteLaneExactInFee(anchor, totalBps) : quoteLaneExactOutFee(anchor, totalBps);
   return [fee, checkedSub(total, fee)];
 }
+
 function assembleQuote(
   state: QuoteState,
   request: QuoteRequest,
@@ -57,12 +67,13 @@ function assembleQuote(
     amountIn = checkedAdd(anchor, totalSpread);
     amountOut = request.amount;
   }
-  const [partner, treasury] = splitFee(anchor, fee, partnerFee(state, request.router, feeAsset));
+  const [partner, treasury] = splitFee(anchor, fee, partnerFee(state, feeAsset));
   return {
     kind: "Available",
     result: { amountIn, amountOut, feeAsset, feeAmount: fee, partnerFee: partner, treasuryFee: treasury },
   };
 }
+
 function directQuote(
   state: QuoteState,
   request: QuoteRequest,
@@ -76,12 +87,12 @@ function directQuote(
       ? quoteLaneExactIn(laneSlot0Price(lane.slot0), request.amount, cashToAsset)
       : quoteLaneExactOut(laneSlot0Price(lane.slot0), request.amount, cashToAsset);
   if (anchor === 0n) return { kind: "Unavailable", reason: { kind: "ZeroAnchor" } };
-  const principal = principalCashValue(state, laneAsset, lane);
+  const principal = principalCashValue(lane);
   if (principal === 0n) return { kind: "Unavailable", reason: { kind: "ZeroPrincipal", asset: laneAsset } };
   const rawFee = cashToAsset ? laneSlot0AskFeeBps(lane.slot0) : laneSlot0BidFeeBps(lane.slot0);
   const feeBps = calculateFeeBpsForRouter(
-    state.whitelist.get(request.router) ?? false,
-    state.blacklistFeeMultiplier,
+    state.feeProfile.whitelisted,
+    state.feeProfile.blacklistFeeMultiplier,
     rawFee,
   );
   const swapCash = cashToAsset
@@ -91,10 +102,11 @@ function directQuote(
     : request.mode === "ExactIn"
       ? anchor
       : request.amount;
-  const slippage = quoteLaneSlippageBps(swapCash, principal, lane.slippageKBps);
+  const slippage = quoteLaneSlippageBps(swapCash, principal, BigInt(lane.slippageKBps));
   const [fee, slippageAmount] = laneSpread(anchor, feeBps, slippage, request.mode === "ExactIn");
   return assembleQuote(state, request, feeAsset, anchor, fee, slippageAmount);
 }
+
 function routeQuote(
   state: QuoteState,
   request: QuoteRequest,
@@ -111,21 +123,22 @@ function routeQuote(
     anchor = quoteLaneExactOut(laneSlot0Price(inputLane.slot0), intermediateCash, false);
   }
   if (anchor === 0n) return { kind: "Unavailable", reason: { kind: "ZeroAnchor" } };
-  const firstPrincipal = principalCashValue(state, request.assetIn, inputLane);
+  const firstPrincipal = principalCashValue(inputLane);
   if (firstPrincipal === 0n) return { kind: "Unavailable", reason: { kind: "ZeroPrincipal", asset: request.assetIn } };
-  const secondPrincipal = principalCashValue(state, request.assetOut, outputLane);
+  const secondPrincipal = principalCashValue(outputLane);
   if (secondPrincipal === 0n)
     return { kind: "Unavailable", reason: { kind: "ZeroPrincipal", asset: request.assetOut } };
   const weightedK = quoteLaneWeightedSlippageKBps(
     firstPrincipal,
-    inputLane.slippageKBps,
+    BigInt(inputLane.slippageKBps),
     secondPrincipal,
-    outputLane.slippageKBps,
+    BigInt(outputLane.slippageKBps),
   );
   const slippage = quoteLaneSlippageBps(intermediateCash, checkedAdd(firstPrincipal, secondPrincipal), weightedK);
-  const whitelisted = state.whitelist.get(request.router) ?? false;
-  const bid = calculateFeeBpsForRouter(whitelisted, state.blacklistFeeMultiplier, laneSlot0BidFeeBps(inputLane.slot0));
-  const ask = calculateFeeBpsForRouter(whitelisted, state.blacklistFeeMultiplier, laneSlot0AskFeeBps(outputLane.slot0));
+  const whitelisted = state.feeProfile.whitelisted;
+  const multiplier = state.feeProfile.blacklistFeeMultiplier;
+  const bid = calculateFeeBpsForRouter(whitelisted, multiplier, laneSlot0BidFeeBps(inputLane.slot0));
+  const ask = calculateFeeBpsForRouter(whitelisted, multiplier, laneSlot0AskFeeBps(outputLane.slot0));
   const feeBps = checkedAdd(bid, ask);
   const fee = request.mode === "ExactIn" ? quoteLaneExactInFee(anchor, feeBps) : quoteLaneExactOutFee(anchor, feeBps);
   const totalBps = checkedAdd(checkedAdd(bid, slippage), checkedAdd(ask, slippage));
@@ -135,51 +148,58 @@ function routeQuote(
   return assembleQuote(state, request, feeAsset, anchor, fee, checkedSub(total, fee));
 }
 
-/** Produces an exact-in or exact-out quote from a versioned immutable state snapshot. */
-export function quote(request: QuoteRequest, context: QuoteContext, state: QuoteState): QuoteOutcome {
+/**
+ * Produces a bit-exact quote from one immutable in-memory state snapshot.
+ *
+ * `executionBlockNumber` is the EVM-visible block tracked by the runtime.
+ * Pure math never reads RPC, persistence, wall-clock freshness, or a router.
+ */
+export function quote(request: QuoteRequest, executionBlockNumber: bigint, state: QuoteState): QuoteOutcome {
   assertU256(request.amount, "amount");
-  assertU256(context.executionBlockNumber, "executionBlockNumber");
-  if (state.cash !== context.cash) throw new QuoteError("CASH_MISMATCH", "state snapshot cash does not match context");
-  if (state.stateVersion !== context.stateVersion)
-    throw new QuoteError("STATE_VERSION_MISMATCH", "state snapshot version does not match context");
+  assertU256(executionBlockNumber, "executionBlockNumber");
   if (request.amount === 0n) return { kind: "Unavailable", reason: { kind: "ZeroAmount" } };
   if (request.assetIn.toLowerCase() === request.assetOut.toLowerCase())
     return { kind: "Unavailable", reason: { kind: "EqualAssets" } };
   const feeAsset = request.mode === "ExactIn" ? request.assetOut : request.assetIn;
-  if (request.assetOut === context.cash) {
-    const lane = laneOrReason(state, request.assetIn, context);
+  if (request.assetOut.toLowerCase() === state.cash.toLowerCase()) {
+    const lane = laneOrReason(state, request.assetIn, executionBlockNumber);
     return "kind" in lane
       ? { kind: "Unavailable", reason: lane }
       : directQuote(state, request, request.assetIn, lane, false, feeAsset);
   }
-  if (request.assetIn === context.cash) {
-    const lane = laneOrReason(state, request.assetOut, context);
+  if (request.assetIn.toLowerCase() === state.cash.toLowerCase()) {
+    const lane = laneOrReason(state, request.assetOut, executionBlockNumber);
     return "kind" in lane
       ? { kind: "Unavailable", reason: lane }
       : directQuote(state, request, request.assetOut, lane, true, feeAsset);
   }
-  const input = laneOrReason(state, request.assetIn, context);
+  const input = laneOrReason(state, request.assetIn, executionBlockNumber);
   if ("kind" in input) return { kind: "Unavailable", reason: input };
-  const output = laneOrReason(state, request.assetOut, context);
+  const output = laneOrReason(state, request.assetOut, executionBlockNumber);
   if ("kind" in output) return { kind: "Unavailable", reason: output };
   return routeQuote(state, request, input, output);
 }
+
 /** Forces exact-input mode before delegating to the shared quote engine. */
-export function quoteExactIn(request: QuoteRequest, context: QuoteContext, state: QuoteState): QuoteOutcome {
-  return quote({ ...request, mode: "ExactIn" }, context, state);
+export function quoteExactIn(request: QuoteRequest, executionBlockNumber: bigint, state: QuoteState): QuoteOutcome {
+  return quote({ ...request, mode: "ExactIn" }, executionBlockNumber, state);
 }
+
 /** Forces exact-output mode before delegating to the shared quote engine. */
-export function quoteExactOut(request: QuoteRequest, context: QuoteContext, state: QuoteState): QuoteOutcome {
-  return quote({ ...request, mode: "ExactOut" }, context, state);
+export function quoteExactOut(request: QuoteRequest, executionBlockNumber: bigint, state: QuoteState): QuoteOutcome {
+  return quote({ ...request, mode: "ExactOut" }, executionBlockNumber, state);
 }
+
 /** Returns the Solidity-compatible exact-input amount or zero when unavailable. */
 export function solidityExactInAmount(outcome: QuoteOutcome): bigint {
   return outcome.kind === "Available" ? outcome.result.amountOut : 0n;
 }
+
 /** Returns the Solidity-compatible exact-output amount or uint256 max when unavailable. */
 export function solidityExactOutAmount(outcome: QuoteOutcome): bigint {
   return outcome.kind === "Available" ? outcome.result.amountIn : (1n << 256n) - 1n;
 }
+
 /** Applies Solidity's zero-request convention before converting an exact-output result. */
 export function solidityExactOutAmountForRequest(request: QuoteRequest, outcome: QuoteOutcome): bigint {
   return request.amount === 0n ? 0n : solidityExactOutAmount(outcome);

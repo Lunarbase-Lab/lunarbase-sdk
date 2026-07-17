@@ -1,9 +1,8 @@
 use futures_util::StreamExt;
-use lunarbase_client_core::{ChainEventSource, ContractFilter};
-use lunarbase_client_monad::{MonadParserConfig, MonadParserSource, MonadRpcCanonicalBackend};
+use lunarbase_client_core::{ChainDataSource, ContractFilter};
+use lunarbase_client_monad::{MonadParserConfig, MonadParserSource};
 use lunarbase_math::Address;
 use std::env;
-use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -22,8 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let rpc_url =
         env::var("LUNARBASE_MONAD_RPC").unwrap_or_else(|_| "http://127.0.0.1:8545".into());
-    let canonical = Arc::new(MonadRpcCanonicalBackend::new(rpc_url, chain_id));
-    let source = MonadParserSource::new(config, canonical)?;
+    let source = MonadParserSource::new(config, rpc_url)?;
     let filter = ContractFilter {
         address: core,
         topics: Vec::new(),

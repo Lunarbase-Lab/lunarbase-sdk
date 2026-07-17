@@ -1,3 +1,11 @@
+use super::{
+    comparison::compare_vector,
+    helpers::{is_success, metric_delta, metrics, require_success, rpc_block_number},
+    parser_monitor::monitor_parser,
+    types::{MonadArguments, MonadError, MonadReport, ValidationVector},
+    *,
+};
+
 /// Monitors parser sequencing/commitments and repeatedly compares indexer
 /// quotes with direct Solidity `eth_call` results.
 pub async fn run(arguments: MonadArguments) -> Result<(), MonadError> {
@@ -16,10 +24,7 @@ pub async fn run(arguments: MonadArguments) -> Result<(), MonadError> {
     require_success(&http, &arguments.parser_ready_url, "Monad parser").await?;
     require_success(
         &http,
-        &format!(
-            "{}/health/ready",
-            arguments.indexer_url.trim_end_matches('/')
-        ),
+        &format!("{}/readyz", arguments.indexer_url.trim_end_matches('/')),
         "LunarBase indexer",
     )
     .await?;
@@ -47,19 +52,15 @@ pub async fn run(arguments: MonadArguments) -> Result<(), MonadError> {
         if !is_success(&http, &arguments.parser_ready_url).await {
             parser_ready_failures = parser_ready_failures.saturating_add(1);
         }
-        let indexer_health_url = format!(
-            "{}/health/ready",
-            arguments.indexer_url.trim_end_matches('/')
-        );
+        let indexer_health_url = format!("{}/readyz", arguments.indexer_url.trim_end_matches('/'));
         let indexer_health = http.get(&indexer_health_url).send().await;
         let indexed_block = match indexer_health {
             Ok(response) if response.status().is_success() => {
                 response.json::<Value>().await.ok().and_then(|value| {
-                    value
-                        .pointer("/cursor/blockNumber")?
-                        .as_str()?
-                        .parse::<u64>()
-                        .ok()
+                    let block = value.pointer("/cursor/blockNumber")?;
+                    block
+                        .as_u64()
+                        .or_else(|| block.as_str()?.parse::<u64>().ok())
                 })
             }
             _ => {
@@ -118,11 +119,7 @@ pub async fn run(arguments: MonadArguments) -> Result<(), MonadError> {
             &metrics_after,
             "lunarbase_source_reconnects_total",
         ),
-        gaps_delta: metric_delta(
-            &metrics_before,
-            &metrics_after,
-            "lunarbase_source_gaps_total",
-        ),
+        gaps_delta: metric_delta(&metrics_before, &metrics_after, "lunarbase_gaps_total"),
         recoveries_delta: metric_delta(
             &metrics_before,
             &metrics_after,
@@ -147,4 +144,3 @@ pub async fn run(arguments: MonadArguments) -> Result<(), MonadError> {
     }
     Ok(())
 }
-

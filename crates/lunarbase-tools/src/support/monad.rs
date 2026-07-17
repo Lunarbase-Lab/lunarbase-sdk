@@ -14,8 +14,11 @@ use tokio::sync::watch;
 use tokio::time::{interval, timeout, MissedTickBehavior};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-include!("monad/types.rs");
-include!("monad/runner.rs");
-include!("monad/parser_monitor.rs");
-include!("monad/comparison.rs");
-include!("monad/helpers.rs");
+mod comparison;
+mod helpers;
+mod parser_monitor;
+mod runner;
+mod types;
+
+pub use runner::run;
+pub use types::{MonadArguments, MonadError};

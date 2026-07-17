@@ -25,7 +25,7 @@ PNPM_CMD := $(shell if command -v "$(PNPM)" >/dev/null 2>&1; then printf '%s' "$
 .PHONY: help install build build-rust build-ts build-release build-indexer run run-indexer \
 	check check-rust check-ts fmt fmt-rust fmt-ts fmt-check fmt-check-rust fmt-check-ts lint lint-rust lint-ts \
 	test test-rust test-ts test-runtime test-process-e2e load monad-live-validate docs docs-rust ffi \
-	monad-parser-smoke docker-build docker-up docker-down release-artifacts release-check source-size-check verify ci clean check-pnpm
+	monad-parser-smoke docker-build docker-build-monad-native docker-up docker-down release-artifacts release-check source-size-check verify ci clean check-pnpm
 
 help:
 	@echo "LunarBase build targets:"
@@ -37,7 +37,7 @@ help:
 	@echo "  make check          Run Rust and TypeScript compile checks"
 	@echo "  make test           Run Rust and TypeScript tests"
 	@echo "  make test-runtime   Test only client runtime crates/packages"
-	@echo "  make test-process-e2e  Run real-process RPC/WS/Redis/failover scenarios"
+	@echo "  make test-process-e2e  Run real-process RPC/WS/Redis/multi-replica scenarios"
 	@echo "  make load           Benchmark 15 lanes / 100 pairs by default"
 	@echo "  make monad-live-validate  Run the real Monad parser/RPC/indexer soak"
 	@echo "  make lint           Run Rust clippy and TypeScript ESLint"
@@ -47,6 +47,7 @@ help:
 	@echo "  make ffi            Run Solidity differential FFI from lunarbase-contracts"
 	@echo "  make monad-parser-smoke  Connect the Rust Monad client to a local parser"
 	@echo "  make docker-up      Build and start indexer + Redis"
+	@echo "  make docker-build-monad-native  Build the x86_64 native Monad image"
 	@echo "  make release-check  Validate Rust/npm package contents"
 	@echo "  make source-size-check  Enforce the 500-line source-file limit"
 	@echo "  make verify         Run formatting, checks, lint, tests, and docs"
@@ -113,11 +114,11 @@ test-rust:
 	$(CARGO) test --workspace
 
 test-ts: build-ts
-	$(NODE) --test packages/math/dist/*.test.js packages/client/dist/tests/*.test.js
+	$(PNPM_CMD) test
 
 test-runtime: build-ts
 	$(CARGO) test -p lunarbase-client-core -p lunarbase-client-base -p lunarbase-client-monad -p lunarbase-client-arbitrum
-	$(NODE) --test packages/client/dist/tests/*.test.js
+	$(NODE) --test packages/client-core/dist/*.test.js packages/client-core/dist/**/*.test.js packages/client-base/dist/*.test.js packages/client-monad/dist/*.test.js packages/client-arbitrum/dist/*.test.js
 
 test-process-e2e:
 	$(CARGO) build -p lunarbase-indexer -p lunarbase-tools
@@ -151,6 +152,11 @@ monad-parser-smoke:
 docker-build:
 	docker compose build
 
+docker-build-monad-native:
+	docker build --platform linux/amd64 \
+		--build-arg NETWORK_FEATURES=monad-native \
+		--tag lunarbase-indexer:monad-native .
+
 docker-up:
 	docker compose up --build -d
 
@@ -161,10 +167,6 @@ release-artifacts:
 	mkdir -p dist
 	$(CARGO) build --locked --release -p lunarbase-indexer --no-default-features --features base
 	cp target/release/lunarbase-indexer dist/lunarbase-indexer-base
-	$(CARGO) build --locked --release -p lunarbase-indexer --no-default-features --features monad
-	cp target/release/lunarbase-indexer dist/lunarbase-indexer-monad
-	$(CARGO) build --locked --release -p lunarbase-indexer --no-default-features --features arbitrum
-	cp target/release/lunarbase-indexer dist/lunarbase-indexer-arbitrum
 
 release-check: build-ts
 	mkdir -p dist
@@ -173,7 +175,6 @@ release-check: build-ts
 	$(CARGO) package --offline --list -p lunarbase-client-base --allow-dirty
 	$(CARGO) package --offline --list -p lunarbase-client-monad --allow-dirty
 	$(CARGO) package --offline --list -p lunarbase-client-arbitrum --allow-dirty
-	$(CARGO) package --offline --list -p lunarbase-client --allow-dirty
 	$(NODE) scripts/check-release-dist.mjs
 	$(PNPM_CMD) -r --filter "./packages/**" pack --pack-destination dist
 
@@ -186,7 +187,7 @@ ci: verify
 
 clean: check-pnpm
 	$(CARGO) clean
-	$(PNPM_CMD) exec tsc -b packages/math/tsconfig.json packages/client-core/tsconfig.json packages/client-base/tsconfig.json packages/client-monad/tsconfig.json packages/client-arbitrum/tsconfig.json packages/client/tsconfig.json --clean
+	$(PNPM_CMD) exec tsc -b packages/math/tsconfig.json packages/client-core/tsconfig.json packages/client-base/tsconfig.json packages/client-monad/tsconfig.json packages/client-arbitrum/tsconfig.json --clean
 
 check-pnpm:
 	@if [ -n "$(PNPM_CMD)" ]; then :; else \

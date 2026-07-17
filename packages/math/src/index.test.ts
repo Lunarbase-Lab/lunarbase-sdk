@@ -7,6 +7,7 @@ import {
   U256_MAX,
   WAD,
   calculateFeeBpsForRouter,
+  createLaneState,
   decodeLaneSlot0,
   encodeLaneSlot0,
   fullMulDivDown,
@@ -48,7 +49,6 @@ interface GoldenVector {
   mode: "ExactIn" | "ExactOut";
   amount: string;
   executionBlockNumber: string;
-  stateVersion: string;
   blacklistFeeMultiplier: string;
   whitelisted: boolean;
   partnerFeeBps: string;
@@ -86,39 +86,34 @@ test("zero multiplier and whitelist behavior are explicit", () => {
 test("direct quote returns complete result and Solidity sentinels", () => {
   const cash = address("1");
   const asset = address("2");
-  const router = address("3");
   const state: QuoteState = {
     cash,
     lanes: new Map([
       [
         asset,
-        {
-          slot0: encodeLaneSlot0({ ...EMPTY_SLOT0, price: 2n * WAD, askFeeBps: 10_000n }),
-          exists: true,
-          paused: false,
-          blockDelay: 0n,
-          slippageKBps: 0n,
-        },
+        createLaneState(
+          encodeLaneSlot0({ ...EMPTY_SLOT0, price: 2n * WAD, askFeeBps: 10_000n }),
+          1_000_000n,
+          0,
+          0,
+          true,
+          false,
+        ),
       ],
     ]),
-    totalPrincipalAmount: new Map([[asset, 1_000_000n]]),
-    whitelist: new Map(),
-    blacklistFeeMultiplier: 1n,
-    partnerFeeBps: new Map([[`${router}:${asset}`, 500_000n]]),
-    stateVersion: 1n,
+    feeProfile: {
+      whitelisted: false,
+      blacklistFeeMultiplier: 1n,
+      partnerFeeBps: new Map([[asset, 500_000]]),
+    },
   };
-  const outcome = quote(
-    { router, assetIn: cash, assetOut: asset, amount: 100n, mode: "ExactIn" },
-    { cash, executionBlockNumber: 1n, stateVersion: 1n },
-    state,
-  );
+  const outcome = quote({ assetIn: cash, assetOut: asset, amount: 100n, mode: "ExactIn" }, 1n, state);
   assert.equal(outcome.kind, "Available");
   if (outcome.kind === "Available") assert.equal(outcome.result.feeAsset, asset);
-  const unavailable = quote(
-    { router, assetIn: cash, assetOut: asset, amount: 1n, mode: "ExactOut" },
-    { cash, executionBlockNumber: 1n, stateVersion: 2n },
-    { ...state, stateVersion: 2n, lanes: new Map() },
-  );
+  const unavailable = quote({ assetIn: cash, assetOut: asset, amount: 1n, mode: "ExactOut" }, 1n, {
+    ...state,
+    lanes: new Map(),
+  });
   assert.equal(solidityExactInAmount(unavailable), 0n);
   assert.equal(solidityExactOutAmount(unavailable), U256_MAX);
 });
@@ -148,55 +143,51 @@ test("shared golden vectors match TypeScript engine", () => {
   ) as { vectors: GoldenVector[] };
   for (const vector of fixture.vectors) {
     const cash = vector.cash as string;
-    const router = vector.router as string;
     const assetIn = vector.assetIn as string;
     const assetOut = vector.assetOut as string;
     const lanes = new Map<string, LaneState>();
-    const principals = new Map<string, bigint>();
     for (const [asset, lane] of [
       [assetIn, vector.laneIn],
       [assetOut, vector.laneOut],
     ] as const) {
       if (!lane) continue;
-      lanes.set(asset, {
-        slot0: encodeLaneSlot0({
-          price: BigInt(lane.price),
-          askFeeBps: BigInt(lane.askFeeBps),
-          bidFeeBps: BigInt(lane.bidFeeBps),
-          pricePushThreshold: 0n,
-          thresholdEnabled: false,
-          latestUpdateBlock: BigInt(lane.latestUpdateBlock),
-          reservedHighBits: 0n,
-        }),
-        exists: lane.exists,
-        paused: lane.paused,
-        blockDelay: BigInt(lane.blockDelay),
-        slippageKBps: BigInt(lane.slippageKBps),
-      });
-      principals.set(asset, BigInt(lane.principal));
+      lanes.set(
+        asset,
+        createLaneState(
+          encodeLaneSlot0({
+            price: BigInt(lane.price),
+            askFeeBps: BigInt(lane.askFeeBps),
+            bidFeeBps: BigInt(lane.bidFeeBps),
+            pricePushThreshold: 0n,
+            thresholdEnabled: false,
+            latestUpdateBlock: BigInt(lane.latestUpdateBlock),
+            reservedHighBits: 0n,
+          }),
+          BigInt(lane.principal),
+          Number(lane.slippageKBps),
+          Number(lane.blockDelay),
+          lane.exists,
+          lane.paused,
+        ),
+      );
     }
     const feeAsset = vector.mode === "ExactIn" ? assetOut : assetIn;
     const state: QuoteState = {
       cash,
       lanes,
-      totalPrincipalAmount: principals,
-      whitelist: new Map([[router, vector.whitelisted]]),
-      blacklistFeeMultiplier: BigInt(vector.blacklistFeeMultiplier),
-      partnerFeeBps: new Map([[`${router}:${feeAsset}`, BigInt(vector.partnerFeeBps)]]),
-      stateVersion: BigInt(vector.stateVersion),
+      feeProfile: {
+        whitelisted: vector.whitelisted,
+        blacklistFeeMultiplier: BigInt(vector.blacklistFeeMultiplier),
+        partnerFeeBps: new Map([[feeAsset, Number(vector.partnerFeeBps)]]),
+      },
     };
     const request = {
-      router,
       assetIn,
       assetOut,
       amount: BigInt(vector.amount),
       mode: vector.mode as "ExactIn" | "ExactOut",
     };
-    const outcome = quote(
-      request,
-      { cash, executionBlockNumber: BigInt(vector.executionBlockNumber), stateVersion: state.stateVersion },
-      state,
-    );
+    const outcome = quote(request, BigInt(vector.executionBlockNumber), state);
     if (vector.expected) {
       assert.equal(outcome.kind, "Available", vector.name);
       if (outcome.kind === "Available") {

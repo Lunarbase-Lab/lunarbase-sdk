@@ -3,7 +3,7 @@
 use crate::{ChainCursor, ChainUpdate, SourceError};
 use std::collections::BTreeMap;
 
-type CursorKey = (u64, u32, u32, u8);
+type CursorKey = (u64, u32, u32, u64, u32, u8);
 
 /// Bounded single-writer reorder buffer for transport/decode work.
 ///
@@ -48,30 +48,23 @@ impl CursorReorderBuffer {
         self.poisoned
     }
 
-    /// Returns `true` when the update was inserted and `false` for an exact
-    /// duplicate. A different payload at the same event cursor is a
-    /// continuity failure, not something that can be resolved by ordering.
-    /// Inserts an update, deduplicating an identical cursor/payload.
+    /// Inserts one update. Any repeated cursor is treated as a continuity
+    /// failure and recovered canonically instead of maintaining dedup state.
     ///
     /// # Errors
     ///
     /// Returns a gap for overflow, conflicting payloads at one cursor, or any
     /// insertion after the buffer has already been poisoned.
-    pub fn push(&mut self, update: ChainUpdate) -> Result<bool, SourceError> {
+    pub fn push(&mut self, update: ChainUpdate) -> Result<(), SourceError> {
         if self.poisoned {
             return Err(SourceError::Gap(
                 "reorder buffer is poisoned; resnapshot required".into(),
             ));
         }
         let key = update_key(&update);
-        if let Some(existing) = self.pending.get(&key) {
-            if existing == &update {
-                return Ok(false);
-            }
+        if self.pending.contains_key(&key) {
             self.poisoned = true;
-            return Err(SourceError::Gap(
-                "conflicting updates share one cursor".into(),
-            ));
+            return Err(SourceError::Gap("multiple updates share one cursor".into()));
         }
         if self.pending.len() >= self.capacity {
             self.poisoned = true;
@@ -80,7 +73,7 @@ impl CursorReorderBuffer {
             ));
         }
         self.pending.insert(key, update);
-        Ok(true)
+        Ok(())
     }
 
     /// Drain updates through a watermark. A head without transaction/log
@@ -108,23 +101,36 @@ fn update_key(update: &ChainUpdate) -> CursorKey {
         ChainUpdate::Reorg { new_head, .. } => cursor_key(new_head, 2),
         ChainUpdate::Gap { cursor, .. } => cursor
             .as_ref()
-            .map_or((u64::MAX, 0, 0, 3), |cursor| cursor_key(cursor, 3)),
-        ChainUpdate::SourceHealth { .. } => (0, 0, 0, 4),
+            .map_or((u64::MAX, 0, 0, 0, 0, 3), |cursor| cursor_key(cursor, 3)),
     }
 }
 
 fn watermark_key(cursor: &ChainCursor) -> CursorKey {
-    let (block, transaction, log) = cursor.event_order();
+    let (block, transaction, log, source_sequence, source_sub_index) = cursor.event_order();
     if cursor.transaction_index.is_none() && cursor.log_index.is_none() {
-        (block, u32::MAX, u32::MAX, u8::MAX)
+        (block, u32::MAX, u32::MAX, u64::MAX, u32::MAX, u8::MAX)
     } else {
-        (block, transaction, log, u8::MAX)
+        (
+            block,
+            transaction,
+            log,
+            source_sequence,
+            source_sub_index,
+            u8::MAX,
+        )
     }
 }
 
 fn cursor_key(cursor: &ChainCursor, rank: u8) -> CursorKey {
-    let (block, transaction, log) = cursor.event_order();
-    (block, transaction, log, rank)
+    let (block, transaction, log, source_sequence, source_sub_index) = cursor.event_order();
+    (
+        block,
+        transaction,
+        log,
+        source_sequence,
+        source_sub_index,
+        rank,
+    )
 }
 
 #[cfg(test)]
@@ -136,6 +142,7 @@ mod tests {
         ChainCursor {
             chain_id: 143,
             block_number: block,
+            execution_block_number: block,
             block_hash: None,
             transaction_index: tx,
             log_index: log,
@@ -146,17 +153,25 @@ mod tests {
     }
 
     #[test]
-    fn reorders_and_deduplicates_logs_without_eviction() {
+    fn reorders_unique_updates_without_eviction() {
         let mut buffer = CursorReorderBuffer::new(3).unwrap();
         let later = ChainUpdate::Head(cursor(11, None, None));
         let earlier = ChainUpdate::Head(cursor(10, None, None));
-        assert!(buffer.push(later.clone()).unwrap());
-        assert!(buffer.push(earlier.clone()).unwrap());
-        assert!(!buffer.push(earlier).unwrap());
+        buffer.push(later.clone()).unwrap();
+        buffer.push(earlier.clone()).unwrap();
         assert_eq!(
             buffer.drain_all(),
             vec![ChainUpdate::Head(cursor(10, None, None)), later,]
         );
+    }
+
+    #[test]
+    fn repeated_cursor_requires_canonical_recovery() {
+        let mut buffer = CursorReorderBuffer::new(3).unwrap();
+        let update = ChainUpdate::Head(cursor(10, None, None));
+        buffer.push(update.clone()).unwrap();
+        assert!(buffer.push(update).is_err());
+        assert!(buffer.is_poisoned());
     }
 
     #[test]

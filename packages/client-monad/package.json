@@ -1,7 +1,7 @@
 {
   "name": "@lunarbase/client-monad",
-  "version": "0.1.0",
-  "description": "Monad execution-events client for LunarBase",
+  "version": "0.2.0",
+  "description": "Experimental Monad execution-events client for LunarBase",
   "license": "MIT OR Apache-2.0",
   "type": "module",
   "files": ["dist", "!dist/**/*.test.*"],

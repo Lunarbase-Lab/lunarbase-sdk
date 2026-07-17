@@ -28,7 +28,7 @@ make run
 Select another compiled adapter with `make run NETWORK=monad` or
 `make run NETWORK=arbitrum`.
 
-Production deployments should set `LUNARBASE_ALERT_WEBHOOK_URL` and tune the
-`[shutdown]`/`[alerts]` sections in the selected TOML config. `SIGTERM` drains
-HTTP requests, cooperatively stops runtime workers, and commits a final
-checkpoint before the process exits.
+Production deployments should scrape `/metrics` and load
+`config/prometheus-alerts.yml` into their Prometheus/Alertmanager stack.
+`SIGTERM` drains HTTP requests, cooperatively stops runtime workers, and
+best-effort writes a final checkpoint before the process exits.

@@ -1,47 +1,20 @@
-# Production-shaped Compose example. Replace deployment identity and node URLs.
+# Production-shaped Base example. Replace every deployment identity value.
 network = "base"
+chain_id = 8453
 core = "0x0000000000000000000000000000000000000001"
+router = "0x0000000000000000000000000000000000000002"
+expect_whitelisted = true
 deployment_block = 0
 expected_runtime_code_hash = "0x0000000000000000000000000000000000000000000000000000000000000000"
+contract_compatibility_version = "lunarbase-contracts@24db47b866e8150a0d91cffd80efe49df85179b5:math-v1"
 http_rpc_url = "http://host.docker.internal:8545"
 realtime_url = "ws://host.docker.internal:8546"
-snapshot_tag = "finalized"
-bind = "0.0.0.0:8080"
 explicit_lane_assets = []
-eager_routers = []
-
-[runtime]
-buffer_capacity = 16384
+bind = "0.0.0.0:8080"
+queue_bound = 16384
 reconnect_delay_milliseconds = 500
 
-[redis]
-enabled = true
-url = "redis://redis:6379/"
-io_timeout_milliseconds = 2000
-stream_max_len = 100000
-dedup_ttl_seconds = 86400
-checkpoint_interval_updates = 100
-
-[writer_lease]
-# Redis deployments enable this by default; it is explicit here for clarity.
-enabled = true
-owner = ""
-ttl_milliseconds = 15000
-renew_interval_milliseconds = 5000
-retry_interval_milliseconds = 2000
-
-[transport]
-max_frame_bytes = 1048576
-reorder_capacity = 16384
-require_evm_parent_context = true
-
-[shutdown]
-timeout_seconds = 20
-
-[alerts]
-enabled = true
-webhook_url = ""
-poll_interval_seconds = 5
-not_ready_after_seconds = 30
-repeat_interval_seconds = 300
-request_timeout_seconds = 5
+# Optional restart acceleration only. Remove this line to run without Redis.
+redis_url = "redis://redis:6379/"
+checkpoint_interval_seconds = 30
+shutdown_timeout_seconds = 20

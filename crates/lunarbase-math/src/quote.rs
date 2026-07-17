@@ -9,29 +9,28 @@ use crate::slot0::{
     lane_slot0_price,
 };
 use crate::{
-    Address, LaneState, MathError, QuoteContext, QuoteError, QuoteMode, QuoteOutcome, QuoteRequest,
-    QuoteResult, QuoteState, UnavailableReason, U256,
+    Address, LaneState, MathError, QuoteError, QuoteMode, QuoteOutcome, QuoteRequest, QuoteResult,
+    QuoteState, UnavailableReason, U256,
 };
 
-fn lane_or_reason<'a>(
-    state: &'a QuoteState,
+fn lane_or_reason(
+    state: &QuoteState,
     asset: Address,
-    context: &QuoteContext,
-) -> Result<&'a LaneState, UnavailableReason> {
+    execution_block_number: u64,
+) -> Result<&LaneState, UnavailableReason> {
     let lane = state
         .lanes
         .get(&asset)
         .ok_or(UnavailableReason::MissingLane(asset))?;
-    if !lane.exists {
+    if !lane.exists() {
         return Err(UnavailableReason::MissingLane(asset));
     }
-    if lane.paused {
+    if lane.paused() {
         return Err(UnavailableReason::PausedLane(asset));
     }
-    let ready_at = lane_slot0_latest_update_block(lane.slot0)
-        .checked_add(U256::from(lane.block_delay))
-        .unwrap_or(U256::MAX);
-    if context.execution_block_number < ready_at {
+    let ready_at =
+        lane_slot0_latest_update_block(lane.slot0).saturating_add(u64::from(lane.block_delay));
+    if execution_block_number < ready_at {
         return Err(UnavailableReason::DelayedLane(asset));
     }
     if lane_slot0_price(lane.slot0) == U256::ZERO {
@@ -39,27 +38,12 @@ fn lane_or_reason<'a>(
     }
     Ok(lane)
 }
-fn principal_cash_value(
-    state: &QuoteState,
-    asset: Address,
-    lane: &LaneState,
-) -> Result<U256, MathError> {
-    let principal = state
-        .total_principal_amount
-        .get(&asset)
-        .copied()
-        .unwrap_or(U256::ZERO);
+fn principal_cash_value(lane: &LaneState) -> Result<U256, MathError> {
+    let principal = U256::from(lane.total_principal_amount);
     if principal == U256::ZERO {
         return Ok(U256::ZERO);
     }
     quote_lane_exact_in(lane_slot0_price(lane.slot0), principal, false)
-}
-fn partner_fee(state: &QuoteState, router: Address, asset: Address) -> U256 {
-    state
-        .partner_fee_bps
-        .get(&(router, asset))
-        .copied()
-        .unwrap_or(U256::ZERO)
 }
 fn lane_spread(
     anchor: U256,
@@ -100,8 +84,7 @@ fn assemble_quote(
         }
         QuoteMode::ExactOut => (checked_add(anchor, total_spread)?, request.amount),
     };
-    let (partner, treasury) =
-        split_fee(anchor, fee, partner_fee(state, request.router, fee_asset))?;
+    let (partner, treasury) = split_fee(anchor, fee, state.fee_profile.partner_fee_bps(fee_asset))?;
     Ok(QuoteOutcome::Available(QuoteResult {
         amount_in,
         amount_out,
@@ -130,7 +113,7 @@ fn quote_direct(
     if anchor == U256::ZERO {
         return Ok(QuoteOutcome::Unavailable(UnavailableReason::ZeroAnchor));
     }
-    let principal = principal_cash_value(state, lane_asset, lane)?;
+    let principal = principal_cash_value(lane)?;
     if principal == U256::ZERO {
         return Ok(QuoteOutcome::Unavailable(UnavailableReason::ZeroPrincipal(
             lane_asset,
@@ -142,12 +125,8 @@ fn quote_direct(
         lane_slot0_bid_fee_bps(lane.slot0)
     };
     let fee_bps = calculate_fee_bps_for_router(
-        state
-            .whitelist
-            .get(&request.router)
-            .copied()
-            .unwrap_or(false),
-        state.blacklist_fee_multiplier,
+        state.fee_profile.whitelisted,
+        state.fee_profile.blacklist_fee_multiplier,
         raw_fee,
     )?;
     let swap_cash = if cash_to_asset {
@@ -197,13 +176,13 @@ fn quote_route(
     if anchor == U256::ZERO {
         return Ok(QuoteOutcome::Unavailable(UnavailableReason::ZeroAnchor));
     }
-    let first_principal = principal_cash_value(state, request.asset_in, input_lane)?;
+    let first_principal = principal_cash_value(input_lane)?;
     if first_principal == U256::ZERO {
         return Ok(QuoteOutcome::Unavailable(UnavailableReason::ZeroPrincipal(
             request.asset_in,
         )));
     }
-    let second_principal = principal_cash_value(state, request.asset_out, output_lane)?;
+    let second_principal = principal_cash_value(output_lane)?;
     if second_principal == U256::ZERO {
         return Ok(QuoteOutcome::Unavailable(UnavailableReason::ZeroPrincipal(
             request.asset_out,
@@ -220,19 +199,15 @@ fn quote_route(
         checked_add(first_principal, second_principal)?,
         weighted_k,
     )?;
-    let whitelisted = state
-        .whitelist
-        .get(&request.router)
-        .copied()
-        .unwrap_or(false);
+    let whitelisted = state.fee_profile.whitelisted;
     let bid = calculate_fee_bps_for_router(
         whitelisted,
-        state.blacklist_fee_multiplier,
+        state.fee_profile.blacklist_fee_multiplier,
         lane_slot0_bid_fee_bps(input_lane.slot0),
     )?;
     let ask = calculate_fee_bps_for_router(
         whitelisted,
-        state.blacklist_fee_multiplier,
+        state.fee_profile.blacklist_fee_multiplier,
         lane_slot0_ask_fee_bps(output_lane.slot0),
     )?;
     let fee_bps = checked_add(bid, ask)?;
@@ -261,39 +236,24 @@ fn quote_route(
         checked_sub(total, fee)?,
     )
 }
-fn validate_context(state: &QuoteState, context: &QuoteContext) -> Result<(), QuoteError> {
-    if state.cash != context.cash {
-        return Err(QuoteError::CashMismatch);
-    }
-    if state.state_version != context.state_version {
-        return Err(QuoteError::StateVersionMismatch);
-    }
-    Ok(())
-}
 /// Calculates a complete quote for a direct lane or a two-leg CASH route.
 ///
-/// The function validates the snapshot identity first, then applies the
-/// contract's zero/equal-asset sentinels, lane validity predicate, anchor
-/// conversion, router-adjusted fees, principal-based slippage, spread, and
-/// partner/treasury split. It returns the complete `QuoteResult`, including
-/// the fee asset, while Solidity-compatible scalar wrappers are provided below.
+/// The function applies the contract's zero/equal-asset sentinels, lane
+/// validity predicate, anchor conversion, configured fee profile,
+/// principal-based slippage, spread, and partner/treasury split.
 ///
-/// `context.execution_block_number` must be the EVM-visible block number, not
-/// an arbitrary provider height. `context.state_version` prevents a quote from
-/// mixing a request with a different immutable state snapshot.
+/// `execution_block_number` must be the EVM-visible block number supplied by
+/// the runtime's normalized head, not an arbitrary provider sequence.
 ///
 /// # Errors
 ///
-/// Returns [`QuoteError::CashMismatch`] or
-/// [`QuoteError::StateVersionMismatch`] when the snapshot identity is wrong,
-/// or [`QuoteError::Arithmetic`] when Solidity's checked arithmetic boundary is
-/// exceeded.
+/// Returns [`QuoteError::Arithmetic`] when Solidity's checked arithmetic
+/// boundary is exceeded.
 pub fn quote(
     request: &QuoteRequest,
-    context: &QuoteContext,
+    execution_block_number: u64,
     state: &QuoteState,
 ) -> Result<QuoteOutcome, QuoteError> {
-    validate_context(state, context)?;
     if request.amount == U256::ZERO {
         return Ok(QuoteOutcome::Unavailable(UnavailableReason::ZeroAmount));
     }
@@ -305,8 +265,8 @@ pub fn quote(
     } else {
         request.asset_in
     };
-    if request.asset_out == context.cash {
-        let lane = lane_or_reason(state, request.asset_in, context);
+    if request.asset_out == state.cash {
+        let lane = lane_or_reason(state, request.asset_in, execution_block_number);
         return match lane {
             Ok(lane) => Ok(quote_direct(
                 state,
@@ -319,8 +279,8 @@ pub fn quote(
             Err(reason) => Ok(QuoteOutcome::Unavailable(reason)),
         };
     }
-    if request.asset_in == context.cash {
-        let lane = lane_or_reason(state, request.asset_out, context);
+    if request.asset_in == state.cash {
+        let lane = lane_or_reason(state, request.asset_out, execution_block_number);
         return match lane {
             Ok(lane) => Ok(quote_direct(
                 state,
@@ -333,11 +293,11 @@ pub fn quote(
             Err(reason) => Ok(QuoteOutcome::Unavailable(reason)),
         };
     }
-    let input_lane = match lane_or_reason(state, request.asset_in, context) {
+    let input_lane = match lane_or_reason(state, request.asset_in, execution_block_number) {
         Ok(lane) => lane,
         Err(reason) => return Ok(QuoteOutcome::Unavailable(reason)),
     };
-    let output_lane = match lane_or_reason(state, request.asset_out, context) {
+    let output_lane = match lane_or_reason(state, request.asset_out, execution_block_number) {
         Ok(lane) => lane,
         Err(reason) => return Ok(QuoteOutcome::Unavailable(reason)),
     };
@@ -349,12 +309,12 @@ pub fn quote(
 /// rounding or sentinel behavior.
 pub fn quote_exact_in(
     request: &QuoteRequest,
-    context: &QuoteContext,
+    execution_block_number: u64,
     state: &QuoteState,
 ) -> Result<QuoteOutcome, QuoteError> {
     let mut request = request.clone();
     request.mode = QuoteMode::ExactIn;
-    quote(&request, context, state)
+    quote(&request, execution_block_number, state)
 }
 /// Calculates a quote while forcing `QuoteMode::ExactOut`.
 ///
@@ -362,12 +322,12 @@ pub fn quote_exact_in(
 /// converted with [`solidity_exact_out_amount`].
 pub fn quote_exact_out(
     request: &QuoteRequest,
-    context: &QuoteContext,
+    execution_block_number: u64,
     state: &QuoteState,
 ) -> Result<QuoteOutcome, QuoteError> {
     let mut request = request.clone();
     request.mode = QuoteMode::ExactOut;
-    quote(&request, context, state)
+    quote(&request, execution_block_number, state)
 }
 /// Converts a rich quote outcome to `Lanes.quoteExactIn`'s public scalar.
 ///

@@ -1,4 +1,10 @@
-async fn monitor_parser(
+use super::{
+    helpers::{commitment_rank, parse_u64, stop_requested},
+    types::{MonadError, ParserReport},
+    *,
+};
+
+pub(super) async fn monitor_parser(
     url: &str,
     mut stop: watch::Receiver<bool>,
 ) -> Result<ParserReport, MonadError> {
@@ -115,4 +121,3 @@ async fn monitor_parser(
     }
     Ok(report)
 }
-

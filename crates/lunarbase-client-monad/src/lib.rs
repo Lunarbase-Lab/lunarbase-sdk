@@ -1,78 +1,57 @@
-//! Monad parser and execution-events client.
+//! Monad execution-events client.
 //!
-//! The crate supplies a parser reader today and shares the universal
-//! [`MonadExecutionEngine`] with future native event-ring readers deployed
-//! beside a Monad node.
+//! Parser WebSocket and native shared-memory readers live in this network
+//! package; the common reducer has no Monad-specific dependency.
 
+mod execution;
 mod parser;
 mod protocol;
 
+#[cfg(all(feature = "native-event-ring", target_os = "linux"))]
+mod native;
+
+pub use execution::*;
 pub use parser::*;
 pub use protocol::*;
 
-pub use lunarbase_client_core::{ExecutionEventReader, MonadExecutionEngine};
+#[cfg(all(feature = "native-event-ring", target_os = "linux"))]
+pub use native::*;
 
-use lunarbase_client_core::{
-    ChainUpdate, Commitment, ExecutionLog, MonadExecutionNormalizer, Network, SourceError,
-};
-use lunarbase_math::{Address, U256};
-use serde::{Deserialize, Serialize};
+use lunarbase_client_core::{Checkpoint, ClientConnectConfig, ConnectedQuoteClient, IndexerError};
+use std::sync::Arc;
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SidecarConfig {
-    pub ring_path: String,
-    pub core: Address,
-    pub chain_id: u64,
-    pub bounded_queue_capacity: usize,
+/// Connects the portable parser/RPC Monad implementation.
+pub async fn connect_monad_parser(
+    config: ClientConnectConfig,
+    checkpoint: Option<Checkpoint>,
+) -> Result<ConnectedQuoteClient, IndexerError> {
+    let source = Arc::new(MonadParserSource::new(
+        MonadParserConfig {
+            ws_url: config.deployment.realtime_source.clone(),
+            core: config.deployment.core,
+            chain_id: config.deployment.chain_id,
+            ..Default::default()
+        },
+        config.deployment.http_rpc_url.clone(),
+    )?);
+    ConnectedQuoteClient::connect(config, source, checkpoint).await
 }
 
-/// Backward-compatible name for native Monad reader deployment settings.
-pub type MonadNodeConfig = SidecarConfig;
-
-impl SidecarConfig {
-    /// Returns the network identity carried by this sidecar configuration.
-    pub fn network(&self) -> Network {
-        Network::Monad
-    }
-}
-
-/// Converts a ring transaction log into the common source record. The caller
-/// supplies source sequence/sub-index from the ring and EVM transaction/log
-/// positions from the execution event.
-#[allow(clippy::too_many_arguments)]
-pub fn normalize_txn_log(
-    config: &SidecarConfig,
-    block_number: u64,
-    block_hash: Option<[u8; 32]>,
-    transaction_index: u32,
-    log_index: u32,
-    source_sequence: u64,
-    source_sub_index: u32,
-    topics: Vec<U256>,
-    data: Vec<u8>,
-    commitment: Commitment,
-) -> Result<ChainUpdate, SourceError> {
-    let mut normalizer = MonadExecutionNormalizer::new(config.chain_id);
-    normalizer
-        .normalize_log(ExecutionLog {
-            sequence: source_sequence,
-            source_sub_index,
-            block_number,
-            block_hash,
-            transaction_index,
-            log_index,
-            address: config.core,
-            topics,
-            data,
-            commitment,
-        })?
-        .ok_or_else(|| SourceError::Gap("duplicate Monad execution log".into()))
-}
-
-/// Converts parser/ring discontinuity into an explicit recovery marker.
-pub fn normalize_gap(reason: impl Into<String>) -> ChainUpdate {
-    ChainUpdate::Gap {
-        cursor: None,
-        reason: reason.into(),
-    }
+/// Connects the colocated native Monad event-ring implementation.
+#[cfg(all(feature = "native-event-ring", target_os = "linux"))]
+pub async fn connect_monad_event_ring(
+    config: ClientConnectConfig,
+    checkpoint: Option<Checkpoint>,
+) -> Result<ConnectedQuoteClient, IndexerError> {
+    let source = Arc::new(MonadEventRingSource::new(
+        MonadEventRingConfig {
+            event_ring_path: config.deployment.realtime_source.clone().into(),
+            core: config.deployment.core,
+            chain_id: config.deployment.chain_id,
+            queue_bound: config.buffer_capacity,
+            poll_interval: std::time::Duration::from_micros(100),
+        },
+        config.deployment.http_rpc_url.clone(),
+    )?);
+    ConnectedQuoteClient::connect(config, source, checkpoint).await
 }

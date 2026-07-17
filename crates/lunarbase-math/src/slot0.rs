@@ -1,42 +1,48 @@
 use crate::{MathError, U256};
 
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-/// Boundary view of the packed `Lane.slot0` word.
+const PRICE_BITS: usize = 112;
+const FEE_BITS: usize = 20;
+const THRESHOLD_BITS: usize = 7;
+const BLOCK_BITS: usize = 40;
+const RESERVED_BITS: usize = 56;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+/// Native-width boundary view of the packed `Lane.slot0` word.
 ///
-/// The struct is intended for decoding, validation, and explicit updates. The
-/// hot quote path should normally keep the raw `U256` word and use the masked
-/// accessors below to avoid allocating a view for every lane.
+/// The hot path retains the raw `U256`; this view is used only for explicit
+/// pack/unpack operations and therefore does not spread `U256` through fields
+/// whose Solidity widths are known.
 pub struct LaneSlot0 {
-    pub price: U256,
-    pub ask_fee_bps: U256,
-    pub bid_fee_bps: U256,
-    pub price_push_threshold: U256,
+    pub price: u128,
+    pub ask_fee_bps: u32,
+    pub bid_fee_bps: u32,
+    pub price_push_threshold: u8,
     pub threshold_enabled: bool,
-    pub latest_update_block: U256,
-    pub reserved_high_bits: U256,
+    pub latest_update_block: u64,
+    pub reserved_high_bits: u64,
 }
-impl Default for LaneSlot0 {
-    fn default() -> Self {
-        Self {
-            price: U256::ZERO,
-            ask_fee_bps: U256::ZERO,
-            bid_fee_bps: U256::ZERO,
-            price_push_threshold: U256::ZERO,
-            threshold_enabled: false,
-            latest_update_block: U256::ZERO,
-            reserved_high_bits: U256::ZERO,
-        }
-    }
-}
+
 #[inline(always)]
 fn field_mask(bits: usize) -> U256 {
     (U256::ONE << bits) - U256::ONE
 }
+
 #[inline(always)]
 fn read_field(word: U256, shift: usize, bits: usize) -> U256 {
     (word >> shift) & field_mask(bits)
 }
-fn validate_field(value: U256, bits: usize, field: &'static str) -> Result<(), MathError> {
+
+fn validate_native(value: u128, bits: usize, field: &'static str) -> Result<(), MathError> {
+    if bits < 128 && value >= (1u128 << bits) {
+        return Err(MathError::FieldOverflow {
+            field,
+            bits: bits as u16,
+        });
+    }
+    Ok(())
+}
+
+fn validate_word(value: U256, bits: usize, field: &'static str) -> Result<(), MathError> {
     if value > field_mask(bits) {
         return Err(MathError::FieldOverflow {
             field,
@@ -45,111 +51,132 @@ fn validate_field(value: U256, bits: usize, field: &'static str) -> Result<(), M
     }
     Ok(())
 }
-/// Decodes the packed `Lane.slot0` storage word without changing any bits.
-///
-/// The fields follow the Solidity layout: price `[0,112)`, ask fee `[112,132)`,
-/// bid fee `[132,152)`, threshold `[152,160)`, latest update block
-/// `[160,200)`, and preserved high bits `[200,256)`. Reserved bits are exposed
-/// so a read-modify-write update can preserve them exactly.
+
+/// Decodes the exact Solidity storage layout into native-width fields.
 pub fn decode_lane_slot0(word: U256) -> LaneSlot0 {
     LaneSlot0 {
-        price: read_field(word, 0, 112),
-        ask_fee_bps: read_field(word, 112, 20),
-        bid_fee_bps: read_field(word, 132, 20),
-        price_push_threshold: read_field(word, 152, 7),
+        price: read_field(word, 0, PRICE_BITS)
+            .try_into()
+            .expect("112-bit price fits u128"),
+        ask_fee_bps: read_field(word, 112, FEE_BITS)
+            .try_into()
+            .expect("20-bit fee fits u32"),
+        bid_fee_bps: read_field(word, 132, FEE_BITS)
+            .try_into()
+            .expect("20-bit fee fits u32"),
+        price_push_threshold: read_field(word, 152, THRESHOLD_BITS)
+            .try_into()
+            .expect("7-bit threshold fits u8"),
         threshold_enabled: read_field(word, 159, 1) == U256::ONE,
-        latest_update_block: read_field(word, 160, 40),
-        reserved_high_bits: word >> 200,
+        latest_update_block: read_field(word, 160, BLOCK_BITS)
+            .try_into()
+            .expect("40-bit block fits u64"),
+        reserved_high_bits: read_field(word, 200, RESERVED_BITS)
+            .try_into()
+            .expect("56-bit reserved field fits u64"),
     }
 }
+
 #[inline(always)]
-/// Reads the 112-bit pushed price from a packed slot word.
+/// Reads the 112-bit pushed price as a word ready for quote arithmetic.
 pub fn lane_slot0_price(word: U256) -> U256 {
-    read_field(word, 0, 112)
+    read_field(word, 0, PRICE_BITS)
 }
+
 #[inline(always)]
-/// Reads the 20-bit ask fee from a packed slot word.
+/// Reads the 20-bit ask fee as a word ready for quote arithmetic.
 pub fn lane_slot0_ask_fee_bps(word: U256) -> U256 {
-    read_field(word, 112, 20)
+    read_field(word, 112, FEE_BITS)
 }
+
 #[inline(always)]
-/// Reads the 20-bit bid fee from a packed slot word.
+/// Reads the 20-bit bid fee as a word ready for quote arithmetic.
 pub fn lane_slot0_bid_fee_bps(word: U256) -> U256 {
-    read_field(word, 132, 20)
+    read_field(word, 132, FEE_BITS)
 }
+
 #[inline(always)]
-/// Reads the 40-bit EVM block number of the last lane update.
-pub fn lane_slot0_latest_update_block(word: U256) -> U256 {
-    read_field(word, 160, 40)
+/// Reads the EVM block at which the lane price was last updated.
+pub fn lane_slot0_latest_update_block(word: U256) -> u64 {
+    read_field(word, 160, BLOCK_BITS)
+        .try_into()
+        .expect("40-bit block fits u64")
 }
-/// Encodes a [`LaneSlot0`] view into the exact 256-bit storage word.
-///
-/// Every bounded field is validated before shifting. In particular, the
-/// reserved high field is not discarded; callers can round-trip a word and
-/// update only the fields that Solidity's lane update writes.
+
+/// Encodes a native-width view into the exact 256-bit storage word.
 ///
 /// # Errors
 ///
-/// Returns [`MathError::FieldOverflow`] if any field exceeds its Solidity
-/// storage width.
+/// Returns [`MathError::FieldOverflow`] when a native value exceeds its
+/// narrower Solidity storage field.
 pub fn encode_lane_slot0(fields: &LaneSlot0) -> Result<U256, MathError> {
-    validate_field(fields.price, 112, "price")?;
-    validate_field(fields.ask_fee_bps, 20, "askFeeBps")?;
-    validate_field(fields.bid_fee_bps, 20, "bidFeeBps")?;
-    validate_field(fields.price_push_threshold, 7, "pricePushThreshold")?;
-    validate_field(fields.latest_update_block, 40, "latestUpdateBlock")?;
-    validate_field(fields.reserved_high_bits, 56, "reservedHighBits")?;
-    let mut word = fields.price
-        | (fields.ask_fee_bps << 112)
-        | (fields.bid_fee_bps << 132)
-        | (fields.price_push_threshold << 152);
+    validate_native(fields.price, PRICE_BITS, "price")?;
+    validate_native(fields.ask_fee_bps.into(), FEE_BITS, "askFeeBps")?;
+    validate_native(fields.bid_fee_bps.into(), FEE_BITS, "bidFeeBps")?;
+    validate_native(
+        fields.price_push_threshold.into(),
+        THRESHOLD_BITS,
+        "pricePushThreshold",
+    )?;
+    validate_native(
+        fields.latest_update_block.into(),
+        BLOCK_BITS,
+        "latestUpdateBlock",
+    )?;
+    validate_native(
+        fields.reserved_high_bits.into(),
+        RESERVED_BITS,
+        "reservedHighBits",
+    )?;
+    let mut word = U256::from(fields.price)
+        | (U256::from(fields.ask_fee_bps) << 112)
+        | (U256::from(fields.bid_fee_bps) << 132)
+        | (U256::from(fields.price_push_threshold) << 152);
     if fields.threshold_enabled {
         word |= U256::ONE << 159;
     }
-    word |= fields.latest_update_block << 160;
-    word |= fields.reserved_high_bits << 200;
+    word |= U256::from(fields.latest_update_block) << 160;
+    word |= U256::from(fields.reserved_high_bits) << 200;
     Ok(word)
 }
-/// Packs the two `uint20` update fees into the contract's `uint40` calldata
-/// field: ask fee occupies the low 20 bits and bid fee the high 20 bits.
+
+/// Packs two `uint20` fees into the contract's `uint40` calldata field.
 ///
 /// # Errors
 ///
-/// Returns [`MathError::FieldOverflow`] when either fee does not fit `uint20`.
-pub fn encode_update_fees(ask_fee_bps: U256, bid_fee_bps: U256) -> Result<U256, MathError> {
-    validate_field(ask_fee_bps, 20, "askFeeBps")?;
-    validate_field(bid_fee_bps, 20, "bidFeeBps")?;
-    Ok(ask_fee_bps | (bid_fee_bps << 20))
+/// Returns [`MathError::FieldOverflow`] when either fee exceeds `uint20`.
+pub fn encode_update_fees(ask_fee_bps: u32, bid_fee_bps: u32) -> Result<u64, MathError> {
+    validate_native(ask_fee_bps.into(), FEE_BITS, "askFeeBps")?;
+    validate_native(bid_fee_bps.into(), FEE_BITS, "bidFeeBps")?;
+    Ok(u64::from(ask_fee_bps) | (u64::from(bid_fee_bps) << FEE_BITS))
 }
-/// Unpacks a `uint40` fee field into `(ask_fee_bps, bid_fee_bps)`.
+
+/// Unpacks a contract `uint40` fee field into native fee widths.
 ///
 /// # Errors
 ///
-/// Returns [`MathError::FieldOverflow`] when `fees` contains bits above the
-/// declared 40-bit calldata width.
-pub fn decode_update_fees(fees: U256) -> Result<(U256, U256), MathError> {
-    validate_field(fees, 40, "fees")?;
-    Ok((fees & field_mask(20), fees >> 20))
+/// Returns [`MathError::FieldOverflow`] when bits above `uint40` are set.
+pub fn decode_update_fees(fees: u64) -> Result<(u32, u32), MathError> {
+    validate_native(fees.into(), 40, "fees")?;
+    let mask = (1u64 << FEE_BITS) - 1;
+    Ok(((fees & mask) as u32, (fees >> FEE_BITS) as u32))
 }
-/// Applies the Solidity `update_0x01e44214` write to a previous slot word.
-///
-/// Price, ask fee, bid fee, and `latestUpdateBlock` are replaced. Threshold
-/// fields and all reserved high bits are copied from `previous`, matching the
-/// contract's packed read-modify-write behavior.
+
+/// Applies the Solidity lane update while preserving threshold/reserved bits.
 ///
 /// # Errors
 ///
-/// Returns [`MathError::FieldOverflow`] for values outside the `uint112`,
-/// `uint40`, or `uint40` block-number widths.
+/// Returns [`MathError::FieldOverflow`] for values outside the corresponding
+/// Solidity widths.
 pub fn apply_lane_update_slot0(
     previous: U256,
-    price: U256,
-    fees: U256,
-    block_number: U256,
+    price: u128,
+    fees: u64,
+    block_number: u64,
 ) -> Result<U256, MathError> {
-    validate_field(price, 112, "price")?;
-    validate_field(fees, 40, "fees")?;
-    validate_field(block_number, 40, "blockNumber")?;
+    validate_native(price, PRICE_BITS, "price")?;
+    validate_native(fees.into(), 40, "fees")?;
+    validate_native(block_number.into(), BLOCK_BITS, "blockNumber")?;
     let (ask_fee_bps, bid_fee_bps) = decode_update_fees(fees)?;
     let mut fields = decode_lane_slot0(previous);
     fields.price = price;
@@ -157,4 +184,10 @@ pub fn apply_lane_update_slot0(
     fields.bid_fee_bps = bid_fee_bps;
     fields.latest_update_block = block_number;
     encode_lane_slot0(&fields)
+}
+
+/// Validates and converts a word received from an ABI boundary to `uint112`.
+pub fn lane_price_from_word(value: U256) -> Result<u128, MathError> {
+    validate_word(value, PRICE_BITS, "price")?;
+    Ok(value.try_into().expect("validated uint112 fits u128"))
 }

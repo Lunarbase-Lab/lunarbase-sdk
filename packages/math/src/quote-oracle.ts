@@ -1,5 +1,6 @@
 import {
   encodeLaneSlot0,
+  createLaneState,
   quote,
   solidityExactInAmount,
   solidityExactOutAmountForRequest,
@@ -30,7 +31,6 @@ type Vector = {
   mode: "ExactIn" | "ExactOut";
   amount: string;
   executionBlockNumber: string;
-  stateVersion: string;
   blacklistFeeMultiplier: string;
   whitelisted: boolean;
   partnerFeeBps: string;
@@ -39,45 +39,45 @@ type Vector = {
 };
 
 const value = (input: string): bigint => BigInt(input);
-const lane = (input: LaneVector): LaneState => ({
-  slot0: encodeLaneSlot0({
-    price: value(input.price),
-    askFeeBps: value(input.askFeeBps),
-    bidFeeBps: value(input.bidFeeBps),
-    pricePushThreshold: 0n,
-    thresholdEnabled: false,
-    latestUpdateBlock: value(input.latestUpdateBlock),
-    reservedHighBits: 0n,
-  }),
-  exists: input.exists,
-  paused: input.paused,
-  blockDelay: value(input.blockDelay),
-  slippageKBps: value(input.slippageKBps),
-});
+const lane = (input: LaneVector): LaneState =>
+  createLaneState(
+    encodeLaneSlot0({
+      price: value(input.price),
+      askFeeBps: value(input.askFeeBps),
+      bidFeeBps: value(input.bidFeeBps),
+      pricePushThreshold: 0n,
+      thresholdEnabled: false,
+      latestUpdateBlock: value(input.latestUpdateBlock),
+      reservedHighBits: 0n,
+    }),
+    value(input.principal),
+    Number(input.slippageKBps),
+    Number(input.blockDelay),
+    input.exists,
+    input.paused,
+  );
 function build(vector: Vector): { state: QuoteState; request: QuoteRequest; executionBlockNumber: bigint } {
   const state = {
     cash: vector.cash,
     lanes: new Map<string, LaneState>(),
-    totalPrincipalAmount: new Map<string, bigint>(),
-    whitelist: new Map<string, boolean>([[vector.router, vector.whitelisted]]),
-    blacklistFeeMultiplier: value(vector.blacklistFeeMultiplier),
-    partnerFeeBps: new Map<string, bigint>(),
-    stateVersion: value(vector.stateVersion),
+    feeProfile: {
+      whitelisted: vector.whitelisted,
+      blacklistFeeMultiplier: value(vector.blacklistFeeMultiplier),
+      partnerFeeBps: new Map<string, number>(),
+    },
   };
   const feeAsset = vector.mode === "ExactIn" ? vector.assetOut : vector.assetIn;
-  state.partnerFeeBps.set(`${vector.router.toLowerCase()}:${feeAsset.toLowerCase()}`, value(vector.partnerFeeBps));
+  state.feeProfile.partnerFeeBps.set(feeAsset, Number(vector.partnerFeeBps));
   for (const [asset, input] of [
     [vector.assetIn, vector.laneIn],
     [vector.assetOut, vector.laneOut],
   ] as const)
     if (input) {
       state.lanes.set(asset, lane(input));
-      state.totalPrincipalAmount.set(asset, value(input.principal));
     }
   return {
     state,
     request: {
-      router: vector.router,
       assetIn: vector.assetIn,
       assetOut: vector.assetOut,
       amount: value(vector.amount),
@@ -97,15 +97,7 @@ function word(valueToWrite: bigint): Uint8Array {
 }
 function output(vector: Vector): Uint8Array {
   const built = build(vector);
-  const outcome = quote(
-    built.request,
-    {
-      cash: built.state.cash,
-      executionBlockNumber: built.executionBlockNumber,
-      stateVersion: built.state.stateVersion,
-    },
-    built.state,
-  );
+  const outcome = quote(built.request, built.executionBlockNumber, built.state);
   const words =
     outcome.kind === "Available"
       ? [

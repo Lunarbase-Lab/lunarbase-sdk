@@ -27,15 +27,6 @@ export class MathError extends Error {
   }
 }
 
-export class QuoteError extends Error {
-  readonly code: "CASH_MISMATCH" | "STATE_VERSION_MISMATCH" | "ARITHMETIC";
-  constructor(code: QuoteError["code"], message: string, options?: { cause?: unknown }) {
-    super(message, options);
-    this.name = "QuoteError";
-    this.code = code;
-  }
-}
-
 /** Validates and returns a bigint in the uint256 range. */
 export function assertU256(value: bigint, label = "value"): bigint {
   if (typeof value !== "bigint" || value < 0n || value > U256_MAX)

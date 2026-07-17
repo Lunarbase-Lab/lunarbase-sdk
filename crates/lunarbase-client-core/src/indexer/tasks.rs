@@ -1,24 +1,49 @@
-async fn source_pump(
-    source: Arc<dyn ChainEventSource>,
+use super::client::publish;
+use super::client_types::ClientRuntimeStats;
+use super::{ClientConnectConfig, ClientRuntimeEvent, IndexerError, QuoteIndexer};
+use crate::{BackfillRequest, ChainDataSource, ChainUpdate, ContractFilter, SourceStream};
+use futures_util::StreamExt;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
+use tokio::sync::{broadcast, mpsc, watch, Notify};
+use tokio::time::sleep;
+
+pub(super) struct ReducerRuntime {
+    pub ready: Arc<Notify>,
+    pub available: Arc<AtomicBool>,
+    pub events: broadcast::Sender<ClientRuntimeEvent>,
+    pub stats: Arc<ClientRuntimeStats>,
+}
+
+pub(super) async fn source_pump<S>(
+    source: Arc<S>,
     filter: ContractFilter,
     sender: mpsc::Sender<ChainUpdate>,
     reconnect_delay: Duration,
     mut cancel: watch::Receiver<bool>,
-    runtime_events: broadcast::Sender<ClientRuntimeEvent>,
+    events: broadcast::Sender<ClientRuntimeEvent>,
     stats: Arc<ClientRuntimeStats>,
-) {
+) where
+    S: ChainDataSource + 'static,
+{
     loop {
-        let stream = match tokio::select! {
+        let stream = tokio::select! {
             biased;
             () = cancellation_requested(&mut cancel) => return,
             result = source.subscribe(filter.clone()) => result,
-        } {
-            Ok(stream) => stream,
+        };
+        match stream {
+            Ok(stream) => {
+                if !consume_stream(stream, &sender, &mut cancel, &events, &stats).await {
+                    return;
+                }
+            }
             Err(error) => {
                 stats.source_reconnects.fetch_add(1, Ordering::Relaxed);
                 let detail = error.to_string();
-                publish_runtime_event(
-                    &runtime_events,
+                publish(
+                    &events,
                     ClientRuntimeEvent::SourceSubscribeFailed {
                         detail: detail.clone(),
                     },
@@ -34,273 +59,250 @@ async fn source_pump(
                 )
                 .await
                 {
-                    break;
+                    return;
                 }
-                if sleep_or_cancel(reconnect_delay, &mut cancel).await {
-                    break;
-                }
-                continue;
-            }
-        };
-        futures_util::pin_mut!(stream);
-        let mut ended_with_gap = false;
-        loop {
-            let item = tokio::select! {
-                biased;
-                () = cancellation_requested(&mut cancel) => return,
-                item = stream.next() => item,
-            };
-            let Some(item) = item else {
-                break;
-            };
-            let update = match item {
-                Ok(update) => update,
-                Err(error) => {
-                    let detail = error.to_string();
-                    publish_runtime_event(
-                        &runtime_events,
-                        ClientRuntimeEvent::SourceStreamFailed {
-                            detail: detail.clone(),
-                        },
-                    );
-                    ChainUpdate::Gap {
-                        cursor: None,
-                        reason: format!("source stream failed: {detail}"),
-                    }
-                }
-            };
-            let terminal = matches!(&update, ChainUpdate::Gap { .. });
-            if !send_update(&sender, &mut cancel, update, &stats).await {
-                break;
-            }
-            if terminal {
-                ended_with_gap = true;
-                break;
             }
         }
-        if cancellation_is_requested(&cancel) {
-            return;
-        }
-        if ended_with_gap {
-            stats.source_reconnects.fetch_add(1, Ordering::Relaxed);
-        }
-        if !ended_with_gap {
-            stats.source_reconnects.fetch_add(1, Ordering::Relaxed);
-            publish_runtime_event(&runtime_events, ClientRuntimeEvent::SourceStreamClosed);
-            if !send_update(
-                &sender,
-                &mut cancel,
-                ChainUpdate::Gap {
-                    cursor: None,
-                    reason: "source stream closed; canonical recovery required".into(),
-                },
-                &stats,
-            )
-            .await
-            {
-                break;
-            }
-        }
+        stats.source_reconnects.fetch_add(1, Ordering::Relaxed);
         if sleep_or_cancel(reconnect_delay, &mut cancel).await {
             return;
         }
     }
-    if !cancellation_is_requested(&cancel) {
-        publish_runtime_event(
-            &runtime_events,
-            ClientRuntimeEvent::BackgroundTaskStopped {
-                task: "source-pump",
-            },
-        );
+}
+
+async fn consume_stream(
+    mut stream: SourceStream,
+    sender: &mpsc::Sender<ChainUpdate>,
+    cancel: &mut watch::Receiver<bool>,
+    events: &broadcast::Sender<ClientRuntimeEvent>,
+    stats: &Arc<ClientRuntimeStats>,
+) -> bool {
+    loop {
+        let item = tokio::select! {
+            biased;
+            () = cancellation_requested(cancel) => return false,
+            item = stream.next() => item,
+        };
+        let Some(item) = item else {
+            publish(events, ClientRuntimeEvent::SourceStreamClosed);
+            return send_update(
+                sender,
+                cancel,
+                ChainUpdate::Gap {
+                    cursor: None,
+                    reason: "source stream closed; canonical recovery required".into(),
+                },
+                stats,
+            )
+            .await;
+        };
+        let update = match item {
+            Ok(update) => update,
+            Err(error) => {
+                let detail = error.to_string();
+                publish(
+                    events,
+                    ClientRuntimeEvent::SourceStreamFailed {
+                        detail: detail.clone(),
+                    },
+                );
+                ChainUpdate::Gap {
+                    cursor: None,
+                    reason: format!("source stream failed: {detail}"),
+                }
+            }
+        };
+        let terminal = matches!(update, ChainUpdate::Gap { .. });
+        if !send_update(sender, cancel, update, stats).await {
+            return false;
+        }
+        if terminal {
+            return true;
+        }
     }
 }
 
-struct ReducerLoopContext {
-    indexer: Arc<Mutex<QuoteIndexer>>,
-    source: Arc<dyn ChainEventSource>,
-    filter: ContractFilter,
-    ready: Arc<Notify>,
-    available: Arc<AtomicBool>,
-    handoff_block: u64,
-    checkpoint_store: Option<SharedCheckpointStore>,
-    runtime_events: broadcast::Sender<ClientRuntimeEvent>,
-    stats: Arc<ClientRuntimeStats>,
+async fn send_update(
+    sender: &mpsc::Sender<ChainUpdate>,
+    cancel: &mut watch::Receiver<bool>,
+    update: ChainUpdate,
+    stats: &Arc<ClientRuntimeStats>,
+) -> bool {
+    let sent = tokio::select! {
+        biased;
+        () = cancellation_requested(cancel) => return false,
+        result = sender.send(update) => result,
+    };
+    if sent.is_ok() {
+        stats.queue_depth.fetch_add(1, Ordering::Relaxed);
+        true
+    } else {
+        false
+    }
 }
 
-async fn source_reducer_loop(
-    context: ReducerLoopContext,
-    updates: &mut mpsc::Receiver<ChainUpdate>,
+pub(super) async fn reducer_loop<S>(
+    indexer: Arc<RwLock<QuoteIndexer>>,
+    source: Arc<S>,
+    config: ClientConnectConfig,
+    mut updates: mpsc::Receiver<ChainUpdate>,
     mut cancel: watch::Receiver<bool>,
-) {
+    runtime: ReducerRuntime,
+) where
+    S: ChainDataSource + 'static,
+{
     loop {
         let update = tokio::select! {
             biased;
-            () = cancellation_requested(&mut cancel) => break,
+            () = cancellation_requested(&mut cancel) => return,
             update = updates.recv() => update,
         };
         let Some(update) = update else {
-            if !cancellation_is_requested(&cancel) {
-                publish_runtime_event(
-                    &context.runtime_events,
-                    ClientRuntimeEvent::BackgroundTaskStopped { task: "reducer" },
-                );
-            }
-            break;
-        };
-        context.stats.queue_depth.fetch_sub(1, Ordering::Relaxed);
-        let skip = match &update {
-            ChainUpdate::Log(log) => log.cursor.block_number <= context.handoff_block,
-            ChainUpdate::Head(cursor) => cursor.block_number < context.handoff_block,
-            _ => false,
-        };
-        if skip {
-            continue;
-        }
-        tokio::select! {
-            biased;
-            () = cancellation_requested(&mut cancel) => break,
-            () = process_reducer_update(&context, update) => {}
-        }
-    }
-    context.available.store(false, Ordering::Release);
-    context.indexer.lock().await.reducer.mark_not_ready();
-    context.ready.notify_waiters();
-}
-
-async fn process_reducer_update(context: &ReducerLoopContext, update: ChainUpdate) {
-    let discontinuity = matches!(&update, ChainUpdate::Gap { .. } | ChainUpdate::Reorg { .. });
-    if discontinuity {
-        context.stats.gaps.fetch_add(1, Ordering::Relaxed);
-        context.available.store(false, Ordering::Release);
-    }
-    let persisted_update = update.clone();
-    let apply_result = {
-        let mut indexer = context.indexer.lock().await;
-        indexer.apply_core_update(update)
-    };
-    if apply_result.is_ok() {
-        let persisted = persist_checkpoint(
-            &context.indexer,
-            context.checkpoint_store.as_ref(),
-            vec![persisted_update],
-            &context.stats,
-        )
-        .await;
-        if persisted.is_ok() {
-            let ready = context.indexer.lock().await.reducer.is_ready();
-            context.available.store(ready, Ordering::Release);
-            context.ready.notify_waiters();
-        } else {
-            publish_runtime_event(
-                &context.runtime_events,
-                ClientRuntimeEvent::CheckpointFailed {
-                    detail: persisted.expect_err("persistence result was checked as an error"),
-                },
+            publish(
+                &runtime.events,
+                ClientRuntimeEvent::BackgroundTaskStopped { task: "reducer" },
             );
-            context.available.store(false, Ordering::Release);
-            context.indexer.lock().await.reducer.mark_not_ready();
-        }
-        return;
-    }
-    let apply_error = apply_result.expect_err("apply result was checked as an error");
-    context.available.store(false, Ordering::Release);
-    publish_runtime_event(
-        &context.runtime_events,
-        ClientRuntimeEvent::StateTransitionFailed {
-            detail: apply_error.to_string(),
-        },
-    );
-
-    let recovery = {
-        let mut indexer = context.indexer.lock().await;
-        indexer
-            .recover_from_source(context.source.as_ref(), context.filter.clone())
-            .await
-    };
-    match recovery {
-        Ok(()) => {
-            match persist_checkpoint(
-                &context.indexer,
-                context.checkpoint_store.as_ref(),
-                Vec::new(),
-                &context.stats,
-            )
-            .await
-            {
-                Ok(()) => {
-                    context.stats.recoveries.fetch_add(1, Ordering::Relaxed);
-                    context.available.store(true, Ordering::Release);
-                    context.ready.notify_waiters();
-                }
-                Err(error) => {
-                    publish_runtime_event(
-                        &context.runtime_events,
-                        ClientRuntimeEvent::CheckpointFailed { detail: error },
-                    );
-                    context.available.store(false, Ordering::Release);
-                    context.indexer.lock().await.reducer.mark_not_ready();
-                }
-            }
-        }
-        Err(error) => {
-            context
-                .stats
-                .recovery_failures
-                .fetch_add(1, Ordering::Relaxed);
-            publish_runtime_event(
-                &context.runtime_events,
-                ClientRuntimeEvent::RecoveryFailed {
+            return;
+        };
+        runtime.stats.queue_depth.fetch_sub(1, Ordering::Relaxed);
+        let result = indexer
+            .write()
+            .map_err(|_| IndexerError::LockPoisoned)
+            .and_then(|mut indexer| indexer.apply_core_update(update));
+        if let Err(error) = result {
+            runtime.available.store(false, Ordering::Release);
+            runtime.stats.gaps.fetch_add(1, Ordering::Relaxed);
+            publish(
+                &runtime.events,
+                ClientRuntimeEvent::StateTransitionFailed {
                     detail: error.to_string(),
                 },
             );
-            context.indexer.lock().await.reducer.mark_not_ready();
+            if !recover_until_ready(
+                &indexer,
+                source.as_ref(),
+                &config,
+                &mut updates,
+                &mut cancel,
+                &runtime,
+            )
+            .await
+            {
+                return;
+            }
         }
     }
 }
 
-struct AbortOnDrop {
-    handle: Option<JoinHandle<()>>,
-}
-
-impl AbortOnDrop {
-    fn new(handle: JoinHandle<()>) -> Self {
-        Self {
-            handle: Some(handle),
+async fn recover_until_ready<S: ChainDataSource>(
+    indexer: &Arc<RwLock<QuoteIndexer>>,
+    source: &S,
+    config: &ClientConnectConfig,
+    updates: &mut mpsc::Receiver<ChainUpdate>,
+    cancel: &mut watch::Receiver<bool>,
+    runtime: &ReducerRuntime,
+) -> bool {
+    loop {
+        publish(&runtime.events, ClientRuntimeEvent::RecoveryStarted);
+        let snapshot = tokio::select! {
+            biased;
+            () = cancellation_requested(cancel) => return false,
+            result = source.snapshot(&config.deployment) => result,
+        };
+        match snapshot {
+            Ok(snapshot) => {
+                let mut buffered = Vec::new();
+                while let Ok(update) = updates.try_recv() {
+                    runtime.stats.queue_depth.fetch_sub(1, Ordering::Relaxed);
+                    buffered.push(update);
+                }
+                let result = indexer
+                    .write()
+                    .map_err(|_| IndexerError::LockPoisoned)
+                    .and_then(|mut indexer| indexer.bootstrap_normalized(snapshot, buffered));
+                match result {
+                    Ok(()) => {
+                        runtime.stats.recoveries.fetch_add(1, Ordering::Relaxed);
+                        runtime.available.store(true, Ordering::Release);
+                        runtime.ready.notify_waiters();
+                        publish(&runtime.events, ClientRuntimeEvent::RecoveryCompleted);
+                        return true;
+                    }
+                    Err(error) => record_recovery_failure(error, &runtime.events, &runtime.stats),
+                }
+            }
+            Err(error) => record_recovery_failure(error.into(), &runtime.events, &runtime.stats),
+        }
+        if sleep_or_cancel(config.reconnect_delay, cancel).await {
+            return false;
         }
     }
-
-    fn disarm(mut self) -> JoinHandle<()> {
-        self.handle
-            .take()
-            .expect("abort-on-drop task handle must exist")
-    }
 }
 
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        if let Some(handle) = &self.handle {
-            handle.abort();
-        }
-    }
-}
-
-fn publish_runtime_event(
-    sender: &broadcast::Sender<ClientRuntimeEvent>,
-    event: ClientRuntimeEvent,
+fn record_recovery_failure(
+    error: IndexerError,
+    events: &broadcast::Sender<ClientRuntimeEvent>,
+    stats: &ClientRuntimeStats,
 ) {
-    let _ = sender.send(event);
+    stats.recovery_failures.fetch_add(1, Ordering::Relaxed);
+    publish(
+        events,
+        ClientRuntimeEvent::RecoveryFailed {
+            detail: error.to_string(),
+        },
+    );
 }
 
-fn cancellation_is_requested(cancel: &watch::Receiver<bool>) -> bool {
-    *cancel.borrow()
+pub(super) async fn recover_checkpoint<S: ChainDataSource>(
+    indexer: &mut QuoteIndexer,
+    source: &S,
+    filter: &ContractFilter,
+) -> Result<(), IndexerError> {
+    let checkpoint_cursor = indexer
+        .reducer
+        .cursor()
+        .cloned()
+        .ok_or(IndexerError::NoCursor)?;
+    indexer.reducer.mark_not_ready();
+    let head = source.canonical_head().await?;
+    if head.chain_id != checkpoint_cursor.chain_id {
+        return Err(crate::ReducerError::ChainIdMismatch.into());
+    }
+    if head.block_number < checkpoint_cursor.block_number {
+        return Err(IndexerError::Gap(
+            "canonical head regressed below checkpoint".into(),
+        ));
+    }
+    let from_block =
+        if checkpoint_cursor.transaction_index.is_none() && checkpoint_cursor.log_index.is_none() {
+            checkpoint_cursor.block_number.saturating_add(1)
+        } else {
+            checkpoint_cursor.block_number
+        };
+    if from_block <= head.block_number {
+        let mut logs = source
+            .backfill(BackfillRequest {
+                from_block,
+                to_block: head.block_number,
+                filter: filter.clone(),
+            })
+            .await?;
+        logs.sort_by_key(|log| log.cursor.event_order());
+        for log in logs {
+            indexer.apply_core_update(ChainUpdate::Log(log))?;
+        }
+    }
+    indexer.apply_core_update(ChainUpdate::Head(head))?;
+    indexer.reducer.publish_ready();
+    Ok(())
 }
 
 async fn cancellation_requested(cancel: &mut watch::Receiver<bool>) {
-    if cancellation_is_requested(cancel) {
+    if *cancel.borrow() {
         return;
     }
     loop {
-        if cancel.changed().await.is_err() || cancellation_is_requested(cancel) {
+        if cancel.changed().await.is_err() || *cancel.borrow() {
             return;
         }
     }
@@ -312,56 +314,4 @@ async fn sleep_or_cancel(delay: Duration, cancel: &mut watch::Receiver<bool>) ->
         () = cancellation_requested(cancel) => true,
         () = sleep(delay) => false,
     }
-}
-
-async fn send_update(
-    sender: &mpsc::Sender<ChainUpdate>,
-    cancel: &mut watch::Receiver<bool>,
-    update: ChainUpdate,
-    stats: &ClientRuntimeStats,
-) -> bool {
-    let permit = tokio::select! {
-        biased;
-        () = cancellation_requested(cancel) => return false,
-        result = sender.reserve() => result,
-    };
-    match permit {
-        Ok(permit) => {
-            stats.queue_depth.fetch_add(1, Ordering::Relaxed);
-            permit.send(update);
-            true
-        }
-        Err(_) => false,
-    }
-}
-
-fn collect_join_failure(
-    task: &'static str,
-    result: Option<Result<(), tokio::task::JoinError>>,
-    runtime_events: &broadcast::Sender<ClientRuntimeEvent>,
-    failures: &mut Vec<String>,
-) {
-    let Some(Err(error)) = result else {
-        return;
-    };
-    let detail = error.to_string();
-    if error.is_panic() {
-        publish_runtime_event(
-            runtime_events,
-            ClientRuntimeEvent::BackgroundTaskPanicked {
-                task,
-                detail: detail.clone(),
-            },
-        );
-    } else {
-        publish_runtime_event(
-            runtime_events,
-            ClientRuntimeEvent::BackgroundTaskStopped { task },
-        );
-    }
-    failures.push(format!("background task `{task}` failed: {detail}"));
-}
-
-fn remaining_timeout(started_at: Instant, deadline: Duration) -> Duration {
-    deadline.saturating_sub(started_at.elapsed())
 }
