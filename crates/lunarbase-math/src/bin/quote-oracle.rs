@@ -113,8 +113,20 @@ fn build_state(vector: &Vector) -> (QuoteState, QuoteRequest, u64) {
 
 fn output_words(vector: &Vector) -> [U256; 7] {
     let (state, request, execution_block_number) = build_state(vector);
-    let outcome =
-        quote(&request, execution_block_number, &state).expect("oracle arithmetic must not fail");
+    let outcome = match quote(&request, execution_block_number, &state) {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            return [
+                U256::from(2),
+                U256::ZERO,
+                U256::ZERO,
+                U256::ZERO,
+                U256::ZERO,
+                U256::ZERO,
+                U256::ZERO,
+            ];
+        }
+    };
     match outcome {
         QuoteOutcome::Available(result) => [
             U256::ONE,

@@ -152,6 +152,7 @@ struct GoldenFile {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GoldenVector {
+    name: String,
     cash: String,
     asset_in: String,
     asset_out: String,
@@ -165,6 +166,7 @@ struct GoldenVector {
     lane_out: Option<GoldenLane>,
     expected: Option<GoldenResult>,
     expected_public_amount: Option<String>,
+    expected_error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -253,19 +255,29 @@ fn shared_quote_vectors_match_rust_math() {
             &request,
             vector.execution_block_number.parse().unwrap(),
             &state,
-        )
-        .unwrap();
+        );
+        if let Some(expected_error) = vector.expected_error {
+            assert_eq!(expected_error, "Overflow", "{}", vector.name);
+            assert_eq!(
+                outcome.unwrap_err(),
+                QuoteError::Arithmetic(MathError::Overflow),
+                "{}",
+                vector.name
+            );
+            continue;
+        }
+        let outcome = outcome.unwrap();
         if let Some(public_amount) = vector.expected_public_amount {
             let actual = if vector.mode == QuoteMode::ExactIn {
                 solidity_exact_in_amount(&outcome)
             } else {
                 solidity_exact_out_amount_for_request(&request, &outcome)
             };
-            assert_eq!(actual, golden_u256(&public_amount), "{}", vector.cash);
+            assert_eq!(actual, golden_u256(&public_amount), "{}", vector.name);
         } else {
             let expected = vector.expected.expect("full expected result");
             let QuoteOutcome::Available(actual) = outcome else {
-                panic!("golden vector unexpectedly unavailable")
+                panic!("golden vector unexpectedly unavailable: {}", vector.name)
             };
             assert_eq!(actual.amount_in, golden_u256(&expected.amount_in));
             assert_eq!(actual.amount_out, golden_u256(&expected.amount_out));

@@ -55,7 +55,8 @@ interface GoldenVector {
   laneIn: GoldenLane | null;
   laneOut: GoldenLane | null;
   expected?: GoldenExpected;
-  expectedPublicAmount: string;
+  expectedPublicAmount?: string;
+  expectedError?: "Overflow";
 }
 
 const address = (last: string) => `0x${last.padStart(40, "0")}`;
@@ -187,6 +188,15 @@ test("shared golden vectors match TypeScript engine", () => {
       amount: BigInt(vector.amount),
       mode: vector.mode as "ExactIn" | "ExactOut",
     };
+    if (vector.expectedError) {
+      assert.throws(
+        () => quote(request, BigInt(vector.executionBlockNumber), state),
+        (error: unknown) =>
+          error instanceof Error && "code" in error && (error as { code: unknown }).code === "OVERFLOW",
+        vector.name,
+      );
+      continue;
+    }
     const outcome = quote(request, BigInt(vector.executionBlockNumber), state);
     if (vector.expected) {
       assert.equal(outcome.kind, "Available", vector.name);
@@ -196,7 +206,10 @@ test("shared golden vectors match TypeScript engine", () => {
         assert.equal(outcome.result.feeAmount, BigInt(vector.expected.feeAmount));
       }
     } else {
-      assert.equal(solidityExactOutAmountForRequest(request, outcome), BigInt(vector.expectedPublicAmount));
+      assert.equal(
+        solidityExactOutAmountForRequest(request, outcome),
+        BigInt(vector.expectedPublicAmount ?? "missing"),
+      );
     }
   }
 });

@@ -97,19 +97,32 @@ function word(valueToWrite: bigint): Uint8Array {
 }
 function output(vector: Vector): Uint8Array {
   const built = build(vector);
-  const outcome = quote(built.request, built.executionBlockNumber, built.state);
-  const words =
-    outcome.kind === "Available"
-      ? [
-          1n,
-          outcome.result.amountIn,
-          outcome.result.amountOut,
-          BigInt(outcome.result.feeAsset),
-          outcome.result.feeAmount,
-          outcome.result.partnerFee,
-          outcome.result.treasuryFee,
-        ]
-      : [0n, solidityExactInAmount(outcome), solidityExactOutAmountForRequest(built.request, outcome), 0n, 0n, 0n, 0n];
+  let words: bigint[];
+  try {
+    const outcome = quote(built.request, built.executionBlockNumber, built.state);
+    words =
+      outcome.kind === "Available"
+        ? [
+            1n,
+            outcome.result.amountIn,
+            outcome.result.amountOut,
+            BigInt(outcome.result.feeAsset),
+            outcome.result.feeAmount,
+            outcome.result.partnerFee,
+            outcome.result.treasuryFee,
+          ]
+        : [
+            0n,
+            solidityExactInAmount(outcome),
+            solidityExactOutAmountForRequest(built.request, outcome),
+            0n,
+            0n,
+            0n,
+            0n,
+          ];
+  } catch {
+    words = [2n, 0n, 0n, 0n, 0n, 0n, 0n];
+  }
   const bytes = new Uint8Array(words.length * 32);
   words.forEach((item, index) => bytes.set(word(item), index * 32));
   return bytes;
