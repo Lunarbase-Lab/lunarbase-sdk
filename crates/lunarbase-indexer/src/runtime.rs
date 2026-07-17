@@ -51,11 +51,10 @@ async fn connect_monad(
 ) -> Result<ConnectedQuoteClient, RuntimeError> {
     #[cfg(all(feature = "monad-native", target_os = "linux"))]
     {
-        return Ok(lunarbase_client_monad::connect_monad_event_ring(
-            config.client.clone(),
-            checkpoint,
+        Ok(
+            lunarbase_client_monad::connect_monad_event_ring(config.client.clone(), checkpoint)
+                .await?,
         )
-        .await?);
     }
     #[cfg(not(all(feature = "monad-native", target_os = "linux")))]
     {
