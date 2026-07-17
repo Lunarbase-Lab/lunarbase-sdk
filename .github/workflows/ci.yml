@@ -8,19 +8,15 @@ on:
 jobs:
   rust:
     runs-on: ubuntu-24.04
-    env:
-      CC: gcc-14
-      CXX: g++-14
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y clang cmake gcc-14 g++-14 libhugetlbfs-dev
       - run: cargo fmt --all -- --check
       - run: cargo check --workspace --all-targets
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
@@ -29,27 +25,35 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        network: [base, monad, monad-native, arbitrum]
+        network: [base, monad, arbitrum]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - if: matrix.network == 'monad-native'
-        run: sudo apt-get update && sudo apt-get install -y clang cmake gcc-14 g++-14 libhugetlbfs-dev
       - run: cargo check -p lunarbase-indexer --no-default-features --features "${{ matrix.network }}" --all-targets
-        env:
-          CC: ${{ matrix.network == 'monad-native' && 'gcc-14' || 'cc' }}
-          CXX: ${{ matrix.network == 'monad-native' && 'g++-14' || 'c++' }}
+
+  monad-native:
+    runs-on: ubuntu-24.04
+    container: rust:1.90-trixie
+    steps:
+      - uses: actions/checkout@v4
+      - run: apt-get update && apt-get install -y clang cmake libhugetlbfs-dev
+      - run: rustup component add clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check -p lunarbase-indexer --no-default-features --features monad-native --all-targets
+      - run: cargo clippy -p lunarbase-indexer --no-default-features --features monad-native --all-targets -- -D warnings
 
   typescript:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
-      - run: corepack enable
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm lint
