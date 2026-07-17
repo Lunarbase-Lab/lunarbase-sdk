@@ -25,7 +25,7 @@ PNPM_CMD := $(shell if command -v "$(PNPM)" >/dev/null 2>&1; then printf '%s' "$
 .PHONY: help install build build-rust build-ts build-release build-indexer run run-indexer \
 	check check-rust check-ts fmt fmt-rust fmt-ts fmt-check fmt-check-rust fmt-check-ts lint lint-rust lint-ts \
 	test test-rust test-ts test-runtime test-process-e2e load monad-live-validate docs docs-rust ffi \
-	monad-parser-smoke docker-build docker-up docker-down release-artifacts release-check verify ci clean check-pnpm
+	monad-parser-smoke docker-build docker-up docker-down release-artifacts release-check source-size-check verify ci clean check-pnpm
 
 help:
 	@echo "LunarBase build targets:"
@@ -48,6 +48,7 @@ help:
 	@echo "  make monad-parser-smoke  Connect the Rust Monad client to a local parser"
 	@echo "  make docker-up      Build and start indexer + Redis"
 	@echo "  make release-check  Validate Rust/npm package contents"
+	@echo "  make source-size-check  Enforce the 500-line source-file limit"
 	@echo "  make verify         Run formatting, checks, lint, tests, and docs"
 	@echo "  make install        Install locked pnpm dependencies"
 	@echo "  make clean          Remove Rust and TypeScript build artifacts"
@@ -112,11 +113,11 @@ test-rust:
 	$(CARGO) test --workspace
 
 test-ts: build-ts
-	$(NODE) --test packages/math/dist/*.test.js packages/client/dist/*.test.js
+	$(NODE) --test packages/math/dist/*.test.js packages/client/dist/tests/*.test.js
 
 test-runtime: build-ts
 	$(CARGO) test -p lunarbase-client-core -p lunarbase-client-base -p lunarbase-client-monad -p lunarbase-client-arbitrum
-	$(NODE) --test packages/client/dist/*.test.js
+	$(NODE) --test packages/client/dist/tests/*.test.js
 
 test-process-e2e:
 	$(CARGO) build -p lunarbase-indexer -p lunarbase-tools
@@ -176,7 +177,10 @@ release-check: build-ts
 	$(NODE) scripts/check-release-dist.mjs
 	$(PNPM_CMD) -r --filter "./packages/**" pack --pack-destination dist
 
-verify: fmt-check check lint test docs
+source-size-check:
+	$(NODE) scripts/check-source-lines.mjs
+
+verify: source-size-check fmt-check check lint test docs
 
 ci: verify
 

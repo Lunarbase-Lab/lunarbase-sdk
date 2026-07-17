@@ -13,14 +13,17 @@ imports.
 │   │   └── src/
 │   │       ├── model.rs                # cursors, updates, config and errors
 │   │       ├── bootstrap.rs            # bounded snapshot handoff
-│   │       ├── indexer.rs              # lifecycle and quote facade
-│   │       ├── persistence.rs          # Redis/in-memory checkpoints
+│   │       ├── indexer.rs              # public lifecycle facade
+│   │       ├── indexer/                # engine, client, tasks and checkpoints
+│   │       ├── persistence.rs          # persistence facade
+│   │       ├── persistence/            # Redis/in-memory stores and fencing
 │   │       ├── source.rs               # common source/backend contracts
 │   │       ├── execution/
 │   │       │   ├── engine.rs           # ExecutionEventReader boundary
 │   │       │   └── monad.rs            # universal Monad execution engine
 │   │       ├── transport/
-│   │       │   ├── rpc.rs              # canonical Ethereum JSON-RPC
+│   │       │   ├── rpc.rs              # canonical RPC facade
+│   │       │   ├── rpc/                # client, backend, snapshot and codec
 │   │       │   └── ws.rs               # bounded generic WebSocket source
 │   │       ├── protocol/               # Core ABI and binary codecs
 │   │       └── state/                  # ordering and single-writer reducer
@@ -30,7 +33,10 @@ imports.
 │   ├── lunarbase-client/               # compatibility facade
 │   ├── lunarbase-indexer/              # executable composition + HTTP API
 │   │   └── src/
-│   │       ├── runtime.rs              # active/standby writer supervisor
+│   │       ├── runtime.rs              # runtime facade
+│   │       ├── runtime/                # handle, factory, lease and supervisor
+│   │       ├── config.rs               # configuration facade
+│   │       ├── config/                 # types, validation and parsing
 │   │       ├── metrics.rs              # Prometheus counters/histograms
 │   │       ├── alerts.rs               # webhook + panic supervision
 │   │       └── api/                    # health, metrics, quote HTTP API
@@ -41,7 +47,8 @@ imports.
 │   │   └── src/
 │   │       ├── model.ts
 │   │       ├── bootstrap.ts
-│   │       ├── indexer.ts
+│   │       ├── indexer.ts              # public lifecycle exports
+│   │       ├── indexer/                # engine and connected client
 │   │       ├── persistence.ts
 │   │       ├── source.ts
 │   │       ├── execution/              # reader contract + Monad engine
@@ -58,6 +65,11 @@ imports.
 ├── config/                             # network and production templates
 └── solidity-reference/                 # Foundry differential reference
 ```
+
+Source files under `crates/`, `packages/`, and `scripts/` are limited to 500
+lines. `make source-size-check` enforces this boundary in `make verify`, so a
+growing context must be split by responsibility before it becomes difficult
+to review.
 
 ## Dependency direction
 
