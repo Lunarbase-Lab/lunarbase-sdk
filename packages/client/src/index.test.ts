@@ -15,6 +15,7 @@ import {
   JsonRpcHttpClient,
   keccak256Hex,
   MonadExecutionNormalizer,
+  MonadExecutionEventsSource,
   MonadSidecarBackend,
   ProvisionalOverlay,
   QuoteReducer,
@@ -494,4 +495,13 @@ test("Monad sidecar backend preserves sparse seqnos and turns parser gaps into G
   const gap = await iterator.next();
   assert.equal(gap.value?.kind, "Gap");
   await iterator.return?.();
+
+  const source = new MonadExecutionEventsSource(backend);
+  const sourceIterator = source.subscribe({ address: core, topics: [] })[Symbol.asyncIterator]();
+  assert.equal((await sourceIterator.next()).value?.kind, "Head");
+  const sourceLog = await sourceIterator.next();
+  assert.equal(sourceLog.value?.kind, "Log");
+  if (sourceLog.value?.kind === "Log") assert.equal(sourceLog.value.log.cursor.sourceSequence, 1004n);
+  assert.equal((await sourceIterator.next()).value?.kind, "Gap");
+  await sourceIterator.return?.();
 });

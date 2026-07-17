@@ -1,7 +1,11 @@
 {
   "name": "@lunarbase/math",
   "version": "0.1.0",
+  "description": "Bit-exact LunarBase quote math for TypeScript",
+  "license": "MIT OR Apache-2.0",
   "type": "module",
+  "files": ["dist", "!dist/**/*.test.*"],
+  "publishConfig": {"access": "public"},
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -9,7 +13,7 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node ../../scripts/clean-dist.mjs dist && tsc -p tsconfig.json",
     "test": "node --test dist/index.test.js"
   }
 }

@@ -1,0 +1,88 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish crates and npm packages
+        required: true
+        default: false
+        type: boolean
+
+jobs:
+  binaries:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            network: base
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            network: monad
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            network: arbitrum
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            network: base
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            network: monad
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            network: arbitrum
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --locked --release -p lunarbase-indexer --no-default-features --features "${{ matrix.network }}" --target "${{ matrix.target }}"
+      - run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/lunarbase-indexer" \
+            "dist/lunarbase-indexer-${{ matrix.network }}-${{ matrix.target }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lunarbase-indexer-${{ matrix.network }}-${{ matrix.target }}
+          path: dist/*
+
+  publish:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: make verify
+      - name: Publish Rust crates in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          publish_crate() {
+            for attempt in 1 2 3 4 5; do
+              cargo publish --locked -p "$1" && return 0
+              sleep $((attempt * 20))
+            done
+            return 1
+          }
+          publish_crate lunarbase-math
+          publish_crate lunarbase-client-core
+          publish_crate lunarbase-client-base
+          publish_crate lunarbase-client-monad
+          publish_crate lunarbase-client-arbitrum
+          publish_crate lunarbase-client
+      - name: Publish npm packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: pnpm -r --filter "./packages/**" publish --access public --no-git-checks

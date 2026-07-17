@@ -1,0 +1,31 @@
+[package]
+name = "lunarbase-client-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Language-level LunarBase runtime, reducer, execution engine, and transport boundary"
+
+[features]
+default = []
+monad = []
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+async-stream.workspace = true
+futures-core.workspace = true
+futures-util.workspace = true
+lunarbase-math.workspace = true
+ruint.workspace = true
+redis.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tiny-keccak.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true

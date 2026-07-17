@@ -1,9 +1,5 @@
-/** Public facade for the stateful client package. */
-export * from "./model.js";
-export * from "./sources/index.js";
-export * from "./bootstrap.js";
-export * from "./protocol/index.js";
-export * from "./persistence.js";
-export * from "./state/index.js";
-export * from "./indexer.js";
-export * from "./fixtures.js";
+/** Compatibility facade for all TypeScript runtime client packages. */
+export * from "@lunarbase/client-core";
+export * from "@lunarbase/client-base";
+export * from "@lunarbase/client-monad";
+export * from "@lunarbase/client-arbitrum";

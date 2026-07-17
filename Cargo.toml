@@ -1,8 +1,13 @@
 [workspace]
 members = [
     "crates/lunarbase-math",
+    "crates/lunarbase-client-core",
+    "crates/lunarbase-client-base",
+    "crates/lunarbase-client-monad",
+    "crates/lunarbase-client-arbitrum",
     "crates/lunarbase-client",
-    "crates/lunarbase-monad-sidecar",
+    "crates/lunarbase-indexer",
+    "crates/lunarbase-tools",
 ]
 resolver = "2"
 
@@ -11,6 +16,7 @@ edition = "2021"
 version = "0.1.0"
 license = "MIT OR Apache-2.0"
 rust-version = "1.77"
+repository = "https://github.com/Lunarbase-Lab/lunarbase-math"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -22,8 +28,12 @@ todo = "deny"
 unimplemented = "deny"
 
 [workspace.dependencies]
-lunarbase-math = { path = "crates/lunarbase-math" }
-lunarbase-client = { path = "crates/lunarbase-client" }
+lunarbase-math = { version = "0.1.0", path = "crates/lunarbase-math" }
+lunarbase-client-core = { version = "0.1.0", path = "crates/lunarbase-client-core" }
+lunarbase-client-base = { version = "0.1.0", path = "crates/lunarbase-client-base" }
+lunarbase-client-monad = { version = "0.1.0", path = "crates/lunarbase-client-monad" }
+lunarbase-client-arbitrum = { version = "0.1.0", path = "crates/lunarbase-client-arbitrum" }
+lunarbase-client = { version = "0.1.0", path = "crates/lunarbase-client" }
 ruint = { version = "1.19", features = ["serde"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
@@ -34,9 +44,14 @@ futures-core = "0.3"
 futures-util = "0.3"
 async-stream = "0.3"
 redis = "0.27"
-tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-tungstenite = "0.24"
 tiny-keccak = { version = "2", features = ["keccak"] }
+axum = { version = "0.7.9", features = ["ws"] }
+clap = { version = "4.5.60", features = ["derive"] }
+toml = "0.8.23"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 
 [profile.release]
 lto = true

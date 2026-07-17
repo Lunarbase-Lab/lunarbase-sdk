@@ -1,0 +1,20 @@
+[package]
+name = "lunarbase-client-base"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Base Flashblocks runtime client for LunarBase"
+
+[lints]
+workspace = true
+
+[dependencies]
+async-stream.workspace = true
+async-trait.workspace = true
+futures-util.workspace = true
+lunarbase-client-core.workspace = true
+lunarbase-math.workspace = true
+serde_json.workspace = true
+tokio-tungstenite.workspace = true

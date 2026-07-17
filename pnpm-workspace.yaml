@@ -1,3 +1,7 @@
 packages:
   - packages/math
+  - packages/client-core
+  - packages/client-base
+  - packages/client-monad
+  - packages/client-arbitrum
   - packages/client

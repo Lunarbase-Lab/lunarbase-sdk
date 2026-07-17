@@ -1,0 +1,36 @@
+services:
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    restart: unless-stopped
+    volumes:
+      - lunarbase-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 1s
+      retries: 20
+
+  indexer:
+    build:
+      context: .
+      args:
+        NETWORK_FEATURES: base
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./config/production.base.toml:/etc/lunarbase/indexer.toml:ro
+    environment:
+      RUST_LOG: lunarbase_indexer=info
+      LUNARBASE_WRITER_ID: ${HOSTNAME:-compose}-base
+      LUNARBASE_ALERT_WEBHOOK_URL: ${LUNARBASE_ALERT_WEBHOOK_URL:-}
+    ports:
+      - "8080:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    stop_grace_period: 25s
+
+volumes:
+  lunarbase-redis:

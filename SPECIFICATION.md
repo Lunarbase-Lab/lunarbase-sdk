@@ -676,8 +676,10 @@ public endpoints are rate limited.
 
 ## 19. Monad source
 
-Preferred Rust implementation: `MonadExecutionEventsSource` reading the node's shared-memory event ring on
-the same machine as the Monad execution node.
+Preferred Rust runtime: `MonadExecutionEngine` from `lunarbase-client-core`,
+parameterized by an `ExecutionEventReader`. The publishable
+`lunarbase-client-monad` crate provides the parser reader now and should add the
+native shared-memory reader for deployment beside the Monad execution node.
 
 Official setup and SDK references:
 
@@ -706,11 +708,12 @@ ordered processing, health metrics, and WebSocket subscriptions for `logs`, `new
 execution events. Its server retains no replay history: a sequence gap or close code `1013` requires a client
 resnapshot from an authoritative RPC source.
 
-Recommended TypeScript implementation: consume a local Rust sidecar exposing the normalized
-`ChainEventSource` stream over Unix-domain socket or loopback WebSocket. The sidecar can be included in this
-repository and reuse the Rust Monad adapter. Do not independently reimplement hugetlbfs/event-ring FFI in
-TypeScript for v1. A normal Monad `eth_subscribe logs/newHeads` adapter remains a portable fallback with
-higher latency.
+Recommended TypeScript implementation: use `@lunarbase/client-monad` to consume
+the local Rust parser/sidecar over Unix-domain socket or loopback WebSocket.
+The package feeds the universal TypeScript `MonadExecutionEngine`. Do not
+independently reimplement hugetlbfs/event-ring FFI in TypeScript for v1. A
+normal Monad `eth_subscribe logs/newHeads` adapter remains a portable fallback
+with higher latency.
 
 On `EventNextResult::Gap` or expired payload, emit normalized `Gap`, reset the ring reader, discard the
 provisional state, and recover through RPC snapshot/backfill. Never continue as though the stream were
@@ -846,12 +849,19 @@ lunarbase-math/
 
   crates/
     lunarbase-math/             # pure Rust U256 math and quote engine
-    lunarbase-client/           # Rust indexer, reducer, Redis, high-level client
-    lunarbase-monad-sidecar/    # optional local event-ring bridge for TS/services
+    lunarbase-client-core/      # universal Rust runtime and Monad engine
+    lunarbase-client-base/      # Base Flashblocks client
+    lunarbase-client-monad/     # parser/native Monad execution readers
+    lunarbase-client-arbitrum/  # executed Nitro client
+    lunarbase-client/           # compatibility facade
 
   packages/
     math/                       # pure TypeScript bigint math and quote engine
-    client/                     # TypeScript indexer/client and network adapters
+    client-core/                # universal TypeScript runtime
+    client-base/                # Base client
+    client-monad/               # Monad sidecar client
+    client-arbitrum/            # Arbitrum client
+    client/                     # compatibility facade
 
   schemas/
     quote-state/                # versioned Redis/checkpoint encoding schema
@@ -1119,4 +1129,3 @@ Before writing implementation code:
 4. Implement and differential-test pure math first.
 5. Do not begin three network adapters until pure Rust and TypeScript produce identical vectors.
 6. Treat this document as the compatibility baseline; record any intentional deviation in an ADR.
-

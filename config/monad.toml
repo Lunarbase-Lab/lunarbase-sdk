@@ -1,0 +1,48 @@
+# Monad uses the execution-events parser WebSocket as its realtime source.
+# Replace the deployment identity and RPC endpoint before running.
+network = "monad"
+core = "0x0000000000000000000000000000000000000001"
+deployment_block = 0
+expected_runtime_code_hash = "0x0000000000000000000000000000000000000000000000000000000000000000"
+http_rpc_url = "http://127.0.0.1:8545"
+realtime_url = "ws://127.0.0.1:8080/ws/subscriptions"
+snapshot_tag = "finalized"
+bind = "127.0.0.1:8080"
+explicit_lane_assets = []
+eager_routers = []
+
+[runtime]
+buffer_capacity = 4096
+reconnect_delay_milliseconds = 1000
+
+[redis]
+enabled = false
+url = "redis://127.0.0.1/"
+io_timeout_milliseconds = 2000
+stream_max_len = 10000
+dedup_ttl_seconds = 86400
+checkpoint_interval_updates = 100
+
+[writer_lease]
+enabled = false
+owner = ""
+ttl_milliseconds = 15000
+renew_interval_milliseconds = 5000
+retry_interval_milliseconds = 2000
+
+[transport]
+max_frame_bytes = 524288
+reorder_capacity = 4096
+require_evm_parent_context = true
+
+[shutdown]
+timeout_seconds = 15
+
+[alerts]
+enabled = true
+# Prefer the LUNARBASE_ALERT_WEBHOOK_URL environment variable for secrets.
+webhook_url = ""
+poll_interval_seconds = 5
+not_ready_after_seconds = 30
+repeat_interval_seconds = 300
+request_timeout_seconds = 5

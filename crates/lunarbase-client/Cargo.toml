@@ -4,23 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Network-independent LunarBase quote indexer and source boundary"
+repository.workspace = true
+description = "Compatibility facade for all LunarBase Rust runtime clients"
 
 [lints]
 workspace = true
 
 [dependencies]
-async-trait.workspace = true
-async-stream.workspace = true
-futures-core.workspace = true
-futures-util.workspace = true
-lunarbase-math.workspace = true
-ruint.workspace = true
-redis.workspace = true
-reqwest.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-tiny-keccak.workspace = true
-thiserror.workspace = true
-tokio.workspace = true
-tokio-tungstenite.workspace = true
+lunarbase-client-arbitrum.workspace = true
+lunarbase-client-base.workspace = true
+lunarbase-client-core.workspace = true
+lunarbase-client-monad.workspace = true
