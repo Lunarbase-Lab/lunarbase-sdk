@@ -230,7 +230,7 @@ fn convert_event(
                 || (!filter.topics.is_empty()
                     && topics
                         .first()
-                        .map_or(true, |topic| !filter.topics.contains(topic)))
+                        .is_none_or(|topic| !filter.topics.contains(topic)))
             {
                 return None;
             }
