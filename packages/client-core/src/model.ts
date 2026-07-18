@@ -1,5 +1,6 @@
 /** Provider-independent model shared by every TypeScript network client. */
 import type { Address, LaneState, QuoteOutcome, QuoteRequest, QuoteState, Word } from "@lunarbase/math";
+import type { Hex } from "ox/Hex";
 
 /** Current JSON checkpoint schema. */
 export const SCHEMA_VERSION = 3;
@@ -40,7 +41,7 @@ export interface ChainCursor {
   chainId: bigint;
   blockNumber: bigint;
   executionBlockNumber: bigint;
-  blockHash?: string;
+  blockHash?: Hex;
   transactionIndex?: bigint;
   logIndex?: bigint;
   sourceSequence?: bigint;
@@ -51,8 +52,8 @@ export interface ChainCursor {
 /** Provider-neutral Core log. */
 export interface ContractLog {
   address: Address;
-  topics: readonly Word[];
-  data: string;
+  topics: readonly Hex[];
+  data: Hex;
   removed: boolean;
   cursor: ChainCursor;
 }
@@ -60,7 +61,7 @@ export interface ContractLog {
 /** Core address and accepted event signatures. */
 export interface ContractFilter {
   address: Address;
-  topics: readonly Word[];
+  topics: readonly Hex[];
 }
 
 /** Inclusive canonical recovery range. */
@@ -85,7 +86,7 @@ export interface DeploymentConfig {
   router: Address;
   expectWhitelisted: boolean;
   deploymentBlock: bigint;
-  expectedRuntimeCodeHash: string;
+  expectedRuntimeCodeHash: Hex;
   contractCompatibilityVersion: string;
   httpRpcUrl: string;
   realtimeSource: string;
@@ -96,14 +97,14 @@ export interface DeploymentConfig {
 export interface BootstrapSnapshot {
   state: QuoteState;
   cursor: ChainCursor;
-  runtimeCodeHash: string;
+  runtimeCodeHash: Hex;
 }
 
 /** Versioned restart state bound to one deployment and configured router. */
 export interface Checkpoint {
   schemaVersion: number;
   mathCompatibilityVersion: string;
-  expectedRuntimeCodeHash: string;
+  expectedRuntimeCodeHash: Hex;
   chainId: bigint;
   core: Address;
   router: Address;

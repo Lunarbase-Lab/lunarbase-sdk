@@ -1,5 +1,5 @@
 use clap::Parser;
-use lunarbase_tools::support::load::{run, LoadArguments};
+use lunarbase_tools::support::load::{LoadArguments, run};
 
 #[tokio::main]
 async fn main() {

@@ -10,7 +10,7 @@ use crate::slot0::{
 };
 use crate::{
     Address, LaneState, MathError, QuoteError, QuoteMode, QuoteOutcome, QuoteRequest, QuoteResult,
-    QuoteState, UnavailableReason, U256,
+    QuoteState, U256, UnavailableReason,
 };
 
 fn lane_or_reason(

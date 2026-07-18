@@ -12,6 +12,8 @@ publish = false
 workspace = true
 
 [dependencies]
+alloy-primitives.workspace = true
+alloy-sol-types.workspace = true
 axum.workspace = true
 clap.workspace = true
 futures-util.workspace = true

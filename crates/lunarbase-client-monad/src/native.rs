@@ -60,7 +60,7 @@ impl MonadEventRingSource {
     ) -> Result<Self, SourceError> {
         config.validate()?;
         let canonical = RpcHttpBackend::new(
-            RpcHttpClient::new(rpc_endpoint),
+            RpcHttpClient::new(rpc_endpoint).map_err(SourceError::from)?,
             Network::Monad,
             config.chain_id,
             "finalized",

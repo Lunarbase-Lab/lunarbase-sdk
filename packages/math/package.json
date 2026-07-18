@@ -11,6 +11,9 @@
   "type": "module",
   "files": ["dist", "!dist/**/*.test.*"],
   "publishConfig": {"access": "public"},
+  "dependencies": {
+    "ox": "0.14.30"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

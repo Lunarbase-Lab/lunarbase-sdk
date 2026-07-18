@@ -12,6 +12,7 @@ import {
   encodeLaneSlot0,
   fullMulDivDown,
   mulDivDown256,
+  parseAddress,
   quote,
   solidityExactInAmount,
   applyLaneUpdateSlot0,
@@ -19,6 +20,7 @@ import {
   solidityExactOutAmount,
   solidityExactOutAmountForRequest,
   type LaneState,
+  type Address,
   type QuoteState,
 } from "./index.js";
 
@@ -59,7 +61,7 @@ interface GoldenVector {
   expectedError?: "Overflow";
 }
 
-const address = (last: string) => `0x${last.padStart(40, "0")}`;
+const address = (last: string): Address => parseAddress(`0x${last.padStart(40, "0")}`);
 
 test("slot0 round-trips boundaries and reserved bits", () => {
   const fields = {
@@ -143,10 +145,10 @@ test("shared golden vectors match TypeScript engine", () => {
     readFileSync(new URL("../../../fixtures/quote-vectors.json", import.meta.url), "utf8"),
   ) as { vectors: GoldenVector[] };
   for (const vector of fixture.vectors) {
-    const cash = vector.cash as string;
-    const assetIn = vector.assetIn as string;
-    const assetOut = vector.assetOut as string;
-    const lanes = new Map<string, LaneState>();
+    const cash = parseAddress(vector.cash);
+    const assetIn = parseAddress(vector.assetIn);
+    const assetOut = parseAddress(vector.assetOut);
+    const lanes = new Map<Address, LaneState>();
     for (const [asset, lane] of [
       [assetIn, vector.laneIn],
       [assetOut, vector.laneOut],

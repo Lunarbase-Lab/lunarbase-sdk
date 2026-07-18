@@ -1,7 +1,7 @@
 //! Best-effort v3 Redis checkpoint acceleration.
 
 use lunarbase_client_core::{ChainCursor, Checkpoint, Commitment, DeploymentConfig};
-use lunarbase_math::{Address, FeeProfile, LaneState, QuoteState, B256, U256};
+use lunarbase_math::{Address, B256, FeeProfile, LaneState, QuoteState, U256};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, str::FromStr, time::Duration};
 use thiserror::Error;
@@ -316,16 +316,7 @@ fn parse_u256(value: &str) -> Result<U256, CheckpointError> {
 }
 
 fn parse_hash(value: &str) -> Result<B256, CheckpointError> {
-    let value = value.strip_prefix("0x").unwrap_or(value);
-    if value.len() != 64 {
-        return Err(CheckpointError::Invalid("hash is not 32 bytes".into()));
-    }
-    let mut output = [0u8; 32];
-    for (index, byte) in output.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
-            .map_err(|_| CheckpointError::Invalid("hash is not hexadecimal".into()))?;
-    }
-    Ok(B256::new(output))
+    B256::from_str(value).map_err(|error| CheckpointError::Invalid(error.to_string()))
 }
 
 fn hash_hex(value: B256) -> String {
@@ -335,7 +326,7 @@ fn hash_hex(value: B256) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lunarbase_client_core::{Commitment, Network, MATH_COMPATIBILITY_VERSION, SCHEMA_VERSION};
+    use lunarbase_client_core::{Commitment, MATH_COMPATIBILITY_VERSION, Network, SCHEMA_VERSION};
 
     fn address(suffix: u8) -> Address {
         let mut bytes = [0u8; 20];

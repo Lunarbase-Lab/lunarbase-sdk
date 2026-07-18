@@ -13,7 +13,8 @@
   "publishConfig": {"access": "public"},
   "dependencies": {
     "@lunarbase/client-core": "workspace:*",
-    "@lunarbase/math": "workspace:*"
+    "@lunarbase/math": "workspace:*",
+    "ox": "0.14.30"
   },
   "exports": {
     ".": {

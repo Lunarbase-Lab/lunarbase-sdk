@@ -1,7 +1,7 @@
 //! Block-tagged snapshot returned by a [`crate::ChainDataSource`].
 
 use crate::ChainCursor;
-use lunarbase_math::{QuoteState, B256};
+use lunarbase_math::{B256, QuoteState};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Fully materialized state and cursor read at one coherent block tag.

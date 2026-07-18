@@ -110,7 +110,7 @@ async fn wait_for_shutdown(mut receiver: watch::Receiver<bool>) {
 
 #[cfg(unix)]
 async fn wait_for_signal() -> Result<(), std::io::Error> {
-    use tokio::signal::unix::{signal, SignalKind};
+    use tokio::signal::unix::{SignalKind, signal};
     let mut terminate = signal(SignalKind::terminate())?;
     tokio::select! {
         result = tokio::signal::ctrl_c() => result,

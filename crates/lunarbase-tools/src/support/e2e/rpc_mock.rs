@@ -1,6 +1,6 @@
 use super::{
     environment::MockState,
-    helpers::{address_word, block_hash, word_hex, words},
+    helpers::{address_word, block_hash, word_hex},
     *,
 };
 
@@ -29,6 +29,7 @@ pub(super) async fn rpc(
             let data = request
                 .pointer("/params/0/data")
                 .and_then(Value::as_str)
+                .or_else(|| request.pointer("/params/0/input").and_then(Value::as_str))
                 .unwrap_or_default();
             json!(eth_call_result(data, state.slot0))
         }
@@ -39,15 +40,14 @@ pub(super) async fn rpc(
 }
 
 fn discovery_logs(request: &Value, block: u64) -> Value {
-    let requested_topic = request
-        .pointer("/params/0/topics/0")
-        .and_then(Value::as_str);
+    let requested_topics = request.pointer("/params/0/topics/0");
     let added = word_hex(TOPIC_LANE_ADDED);
-    let removed = word_hex(TOPIC_LANE_REMOVED);
-    if requested_topic == Some(removed.as_str()) || requested_topic.is_none() {
-        return json!([]);
-    }
-    if requested_topic != Some(added.as_str()) {
+    let includes_added = match requested_topics {
+        Some(Value::String(topic)) => topic == &added,
+        Some(Value::Array(topics)) => topics.iter().any(|topic| topic.as_str() == Some(&added)),
+        _ => false,
+    };
+    if !includes_added {
         return json!([]);
     }
     json!([{
@@ -64,19 +64,40 @@ fn discovery_logs(request: &Value, block: u64) -> Value {
 }
 
 fn eth_call_result(data: &str, slot0: U256) -> String {
-    match data.get(..10).unwrap_or_default() {
-        "0x961be391" => address_word(CASH),
-        "0x93b6ab27" => words(&[U256::ONE]),
-        "0xd1bacd10" => words(&[slot0, U256::ONE, U256::ZERO, U256::ZERO, U256::ZERO]),
-        "0xd66bd524" => words(&[
-            U256::ZERO,
-            U256::ZERO,
-            U256::ZERO,
-            U256::ZERO,
-            U256::from(1_000_000),
-        ]),
-        "0x9b19251a" => words(&[U256::ONE]),
-        "0xaa5f434c" => words(&[U256::ZERO, U256::ZERO]),
-        _ => words(&[U256::ZERO]),
-    }
+    let call = data.parse::<Bytes>().unwrap_or_default();
+    let selector = call.get(..4).unwrap_or_default();
+    let cash = CASH.parse::<Address>().expect("valid cash address");
+    let encoded = if selector == core::cashCall::SELECTOR {
+        core::cashCall::abi_encode_returns(&cash)
+    } else if selector == core::blacklistFeeMultiplierCall::SELECTOR {
+        core::blacklistFeeMultiplierCall::abi_encode_returns(&U256::ONE)
+    } else if selector == core::laneCall::SELECTOR {
+        core::laneCall::abi_encode_returns(&core::laneReturn {
+            slot0: B256::from(slot0.to_be_bytes::<32>()),
+            exists: true,
+            paused: false,
+            blockDelay: 0,
+            slippageKBps: 0,
+        })
+    } else if selector == core::reservesCall::SELECTOR {
+        core::reservesCall::abi_encode_returns(&core::reservesReturn {
+            assetReserve: 0,
+            treasuryFees: 0,
+            partnerFees: 0,
+            escrowedAssets: 0,
+            totalPrincipalAmount: 1_000_000,
+        })
+    } else if selector == core::whitelistCall::SELECTOR {
+        core::whitelistCall::abi_encode_returns(&true)
+    } else if selector == core::partnersCall::SELECTOR {
+        core::partnersCall::abi_encode_returns(&core::partnersReturn {
+            cumFees: 0,
+            fee: 0,
+            latestWithdrawTimestamp: 0,
+            operator: Address::ZERO,
+        })
+    } else {
+        U256::ZERO.abi_encode()
+    };
+    Bytes::from(encoded).to_string()
 }

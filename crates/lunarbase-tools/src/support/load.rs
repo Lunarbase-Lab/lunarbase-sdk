@@ -3,7 +3,7 @@
 use clap::Parser;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use thiserror::Error;

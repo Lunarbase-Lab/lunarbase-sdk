@@ -1,4 +1,6 @@
 use super::*;
+use alloy_primitives::U64;
+use std::str::FromStr;
 
 pub(super) async fn rpc_block_number(
     http: &reqwest::Client,
@@ -20,7 +22,8 @@ pub(super) async fn rpc_block_number(
         .get("result")
         .and_then(Value::as_str)
         .ok_or_else(|| MonadError::Validation("eth_blockNumber result is missing".into()))?;
-    u64::from_str_radix(value.trim_start_matches("0x"), 16)
+    U64::from_str(value)
+        .map(|value| value.to::<u64>())
         .map_err(|error| MonadError::Validation(error.to_string()))
 }
 
@@ -75,16 +78,7 @@ pub(super) fn parse_u64(value: Option<&Value>) -> Option<u64> {
 }
 
 pub(super) fn parse_u256_hex(value: &str) -> Option<U256> {
-    let value = value.trim_start_matches("0x");
-    if value.is_empty() || value.len() > 64 {
-        return None;
-    }
-    let padded = format!("{value:0>64}");
-    let mut bytes = [0u8; 32];
-    for (index, byte) in bytes.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&padded[index * 2..index * 2 + 2], 16).ok()?;
-    }
-    Some(U256::from_be_bytes(bytes))
+    U256::from_str(value).ok()
 }
 
 pub(super) const fn commitment_rank(commitment: &str) -> u8 {

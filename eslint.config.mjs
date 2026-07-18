@@ -8,7 +8,7 @@ export default tseslint.config(
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    files: ["packages/**/*.ts"],
+    files: ["packages/**/*.ts", "examples/typescript/**/*.ts"],
     rules: {
       "eqeqeq": ["error", "always"],
       "no-debugger": "error",

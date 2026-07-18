@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM rust:1.90-trixie AS builder
+FROM rust:1.95-trixie AS builder
 
 ARG NETWORK_FEATURES=base
 RUN apt-get update \

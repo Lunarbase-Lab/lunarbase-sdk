@@ -2,17 +2,17 @@
 
 use crate::metrics::Metrics;
 use axum::{
+    Json, Router,
     extract::State,
-    http::{header, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
 };
 use lunarbase_client_core::{
     ChainCursor, ClientBatchQuote, ClientQuote, Commitment, ConnectedQuoteClient, IndexerError,
 };
 use lunarbase_math::{
-    Address, QuoteMode, QuoteOutcome, QuoteRequest, QuoteResult, UnavailableReason, B256, U256,
+    Address, B256, QuoteMode, QuoteOutcome, QuoteRequest, QuoteResult, U256, UnavailableReason,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -326,11 +326,7 @@ fn api_error(status: StatusCode, detail: String) -> Response {
 }
 
 fn parse_u256(value: &str) -> Result<U256, ApiInputError> {
-    if let Some(hex) = value.strip_prefix("0x") {
-        U256::from_str_radix(hex, 16).map_err(|error| ApiInputError::Invalid(error.to_string()))
-    } else {
-        U256::from_str(value).map_err(|error| ApiInputError::Invalid(error.to_string()))
-    }
+    U256::from_str(value).map_err(|error| ApiInputError::Invalid(error.to_string()))
 }
 
 fn address_hex(value: Address) -> String {

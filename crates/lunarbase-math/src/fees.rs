@@ -1,6 +1,6 @@
 use crate::arithmetic::{
-    ceil_div, checked_add, checked_sub, full_mul_div_down, full_mul_div_up, mul_div_down_256, BPS,
-    MAX_SLIPPAGE_BPS, SLIPPAGE_SCALE, WAD,
+    BPS, MAX_SLIPPAGE_BPS, SLIPPAGE_SCALE, WAD, ceil_div, checked_add, checked_sub,
+    full_mul_div_down, full_mul_div_up, mul_div_down_256,
 };
 use crate::{MathError, U256};
 

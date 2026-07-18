@@ -1,15 +1,11 @@
-use super::client::{
-    SELECTOR_BLACKLIST_FEE_MULTIPLIER, SELECTOR_CASH, SELECTOR_LANE, SELECTOR_PARTNERS,
-    SELECTOR_RESERVES, SELECTOR_WHITELIST,
-};
-use super::codec::{
-    checked_u128, checked_u32, decode_address_word, decode_bool, decode_word, decode_words,
-    keccak256, selector_address, selector_two_addresses,
-};
 use super::RpcHttpClient;
-use crate::protocol::abi::{lane_discovery_topics, TOPIC_LANE_ADDED, TOPIC_LANE_REMOVED};
-use crate::{BackfillRequest, BootstrapSnapshot, Commitment, DeploymentConfig, SourceError};
-use lunarbase_math::{Address, LaneState, QuoteState, B256};
+use crate::protocol::abi::{core, decode_core_event, lane_discovery_topics};
+use crate::{
+    BackfillRequest, BootstrapSnapshot, Commitment, DeploymentConfig, QuoteEvent, SourceError,
+};
+use alloy_primitives::{Bytes, keccak256};
+use alloy_sol_types::SolCall;
+use lunarbase_math::{Address, B256, BPS, LaneState, QuoteState, U256};
 use std::{collections::BTreeSet, sync::Arc};
 
 #[derive(Clone)]
@@ -32,9 +28,7 @@ impl RpcSnapshotProvider {
     pub fn rpc(&self) -> &RpcHttpClient {
         &self.rpc
     }
-}
 
-impl RpcSnapshotProvider {
     /// Reads a coherent quote snapshot for the configured router profile.
     pub async fn snapshot(
         &self,
@@ -66,42 +60,26 @@ impl RpcSnapshotProvider {
         }
 
         let assets = self
-            .resolve_lane_assets(config, &config.explicit_lane_assets, cursor.block_number)
+            .resolve_lane_assets(config, cursor.block_number)
             .await?;
-        let cash = decode_address_word(
-            &self
-                .rpc
-                .call_at(config.core, SELECTOR_CASH.into(), &self.snapshot_tag)
-                .await?,
-        )?;
-        let whitelist = decode_bool(decode_word(
-            &self
-                .rpc
-                .call_at(
-                    config.core,
-                    selector_address(SELECTOR_WHITELIST, config.router),
-                    &self.snapshot_tag,
-                )
-                .await?,
-            0,
-        )?)?;
+        let cash = self.read(config.core, core::cashCall {}).await?;
+        let whitelist = self
+            .read(
+                config.core,
+                core::whitelistCall {
+                    account: config.router,
+                },
+            )
+            .await?;
         if whitelist != config.expect_whitelisted {
             return Err(SourceError::Unavailable(format!(
                 "configured router whitelist status mismatch: expected {}, got {}",
                 config.expect_whitelisted, whitelist
             )));
         }
-        let blacklist_fee_multiplier = decode_word(
-            &self
-                .rpc
-                .call_at(
-                    config.core,
-                    SELECTOR_BLACKLIST_FEE_MULTIPLIER.into(),
-                    &self.snapshot_tag,
-                )
-                .await?,
-            0,
-        )?;
+        let blacklist_fee_multiplier = self
+            .read(config.core, core::blacklistFeeMultiplierCall {})
+            .await?;
         let mut state = QuoteState {
             cash,
             ..Default::default()
@@ -110,47 +88,19 @@ impl RpcSnapshotProvider {
         state.fee_profile.blacklist_fee_multiplier = blacklist_fee_multiplier;
 
         for asset in &assets {
-            let lane_words = decode_words(
-                &self
-                    .rpc
-                    .call_at(
-                        config.core,
-                        selector_address(SELECTOR_LANE, *asset),
-                        &self.snapshot_tag,
-                    )
-                    .await?,
-                5,
+            let (lane, reserves) = tokio::try_join!(
+                self.read(config.core, core::laneCall { asset: *asset }),
+                self.read(config.core, core::reservesCall { asset: *asset }),
             )?;
-            let reserve_words = decode_words(
-                &self
-                    .rpc
-                    .call_at(
-                        config.core,
-                        selector_address(SELECTOR_RESERVES, *asset),
-                        &self.snapshot_tag,
-                    )
-                    .await?,
-                5,
-            )?;
-            let block_delay = u8::try_from(lane_words[3]).map_err(|_| {
-                SourceError::Unavailable("lane blockDelay does not fit uint8".into())
-            })?;
-            let slippage_k_bps = u32::try_from(lane_words[4]).map_err(|_| {
-                SourceError::Unavailable("lane slippageKBps does not fit uint32".into())
-            })?;
-            let principal = u128::try_from(checked_u128(reserve_words[4], "totalPrincipalAmount")?)
-                .map_err(|_| {
-                    SourceError::Unavailable("totalPrincipalAmount does not fit uint128".into())
-                })?;
             state.lanes.insert(
                 *asset,
                 LaneState::new(
-                    lane_words[0],
-                    principal,
-                    slippage_k_bps,
-                    block_delay,
-                    decode_bool(lane_words[1])?,
-                    decode_bool(lane_words[2])?,
+                    U256::from_be_slice(lane.slot0.as_slice()),
+                    reserves.totalPrincipalAmount,
+                    lane.slippageKBps,
+                    lane.blockDelay,
+                    lane.exists,
+                    lane.paused,
                 ),
             );
         }
@@ -159,22 +109,20 @@ impl RpcSnapshotProvider {
         if !partner_assets.contains(&cash) {
             partner_assets.push(cash);
         }
-        for asset in &partner_assets {
-            let fee = decode_word(
-                &self
-                    .rpc
-                    .call_at(
-                        config.core,
-                        selector_two_addresses(SELECTOR_PARTNERS, config.router, *asset),
-                        &self.snapshot_tag,
-                    )
-                    .await?,
-                1,
-            )?;
-            state
-                .fee_profile
-                .partner_fee_bps
-                .insert(*asset, checked_u32(fee, "partner fee")?);
+        for asset in partner_assets {
+            let partner = self
+                .read(
+                    config.core,
+                    core::partnersCall {
+                        router: config.router,
+                        asset,
+                    },
+                )
+                .await?;
+            if U256::from(partner.fee) > BPS {
+                return Err(SourceError::Unavailable("partner fee exceeds BPS".into()));
+            }
+            state.fee_profile.partner_fee_bps.insert(asset, partner.fee);
         }
         Ok(BootstrapSnapshot {
             state,
@@ -182,55 +130,65 @@ impl RpcSnapshotProvider {
             runtime_code_hash,
         })
     }
-}
 
-impl RpcSnapshotProvider {
+    async fn read<C: SolCall>(&self, core: Address, call: C) -> Result<C::Return, SourceError> {
+        let response = self
+            .rpc
+            .call_at(
+                core,
+                Bytes::from(call.abi_encode()),
+                self.snapshot_tag.as_ref(),
+            )
+            .await?;
+        C::abi_decode_returns_validate(&response).map_err(|error| {
+            SourceError::Unavailable(format!("invalid Core ABI response: {error}"))
+        })
+    }
+
     async fn resolve_lane_assets(
         &self,
         config: &DeploymentConfig,
-        explicit: &[Address],
         snapshot_block: u64,
     ) -> Result<Vec<Address>, SourceError> {
-        let mut history = Vec::new();
-        for topic in lane_discovery_topics() {
-            let request = BackfillRequest {
-                from_block: config.deployment_block,
-                to_block: snapshot_block,
-                filter: crate::ContractFilter {
-                    address: config.core,
-                    topics: vec![topic],
-                },
-            };
-            history.extend(
-                self.rpc
-                    .get_logs(&request, config.chain_id, Commitment::Canonical)
-                    .await?,
-            );
-        }
+        let request = BackfillRequest {
+            from_block: config.deployment_block,
+            to_block: snapshot_block,
+            filter: crate::ContractFilter {
+                address: config.core,
+                topics: lane_discovery_topics().to_vec(),
+            },
+        };
+        let mut history = self
+            .rpc
+            .get_logs(&request, config.chain_id, Commitment::Canonical)
+            .await?;
         history.sort_by_key(|log| log.cursor.event_order());
         let mut discovered = BTreeSet::new();
         for log in history {
-            let Some(topic0) = log.topics.first().copied() else {
-                continue;
-            };
-            let Some(asset_word) = log.topics.get(1).copied() else {
-                continue;
-            };
-            let asset = decode_address_word(&format!("{asset_word:#x}"))?;
-            if topic0 == TOPIC_LANE_ADDED {
-                discovered.insert(asset);
-            } else if topic0 == TOPIC_LANE_REMOVED {
-                discovered.remove(&asset);
+            match decode_core_event(&log)
+                .map_err(|error| SourceError::Unavailable(error.to_string()))?
+            {
+                Some(QuoteEvent::LaneAdded { asset }) => {
+                    discovered.insert(asset);
+                }
+                Some(QuoteEvent::LaneRemoved { asset }) => {
+                    discovered.remove(&asset);
+                }
+                _ => {}
             }
         }
-        if explicit.is_empty() {
+        if config.explicit_lane_assets.is_empty() {
             return Ok(discovered.into_iter().collect());
         }
-        if explicit.iter().any(|asset| !discovered.contains(asset)) {
+        if config
+            .explicit_lane_assets
+            .iter()
+            .any(|asset| !discovered.contains(asset))
+        {
             return Err(SourceError::Unavailable(
                 "explicit lane asset was not active in deployment history".into(),
             ));
         }
-        Ok(explicit.to_vec())
+        Ok(config.explicit_lane_assets.clone())
     }
 }

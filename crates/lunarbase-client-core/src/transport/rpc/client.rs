@@ -1,32 +1,19 @@
-use super::codec::{
-    hex_u64, parse_hex_bytes, parse_hex_u64, parse_optional_hash, parse_rpc_log, word_hex,
-};
+use super::codec::{normalize_rpc_log, parse_rpc_head};
 use crate::{BackfillRequest, ChainCursor, Commitment, ContractLog, SourceError};
+use alloy_eips::{BlockId, BlockNumberOrTag};
+use alloy_primitives::Bytes;
+use alloy_provider::{Provider, ProviderBuilder, RootProvider};
+use alloy_rpc_types_eth::{Filter, TransactionRequest};
 use lunarbase_math::Address;
-use reqwest::Client;
-use serde_json::{json, Value};
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-};
+use serde_json::Value;
+use std::{str::FromStr, sync::Arc};
 use thiserror::Error;
 
-pub(super) const SELECTOR_CASH: &str = "0x961be391";
-pub(super) const SELECTOR_LANE: &str = "0xd1bacd10";
-pub(super) const SELECTOR_RESERVES: &str = "0xd66bd524";
-pub(super) const SELECTOR_WHITELIST: &str = "0x9b19251a";
-pub(super) const SELECTOR_BLACKLIST_FEE_MULTIPLIER: &str = "0x93b6ab27";
-pub(super) const SELECTOR_PARTNERS: &str = "0xaa5f434c";
-
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
-/// Failure returned by the HTTP JSON-RPC boundary.
+/// Failure returned by the Alloy HTTP JSON-RPC boundary.
 pub enum RpcError {
-    #[error("HTTP RPC request failed: {0}")]
-    Http(String),
-    #[error("RPC response JSON is invalid: {0}")]
-    Json(String),
-    #[error("RPC returned error {code}: {message}")]
-    Remote { code: i64, message: String },
+    #[error("RPC transport failed: {0}")]
+    Transport(String),
     #[error("RPC response is invalid: {0}")]
     Invalid(String),
 }
@@ -38,22 +25,31 @@ impl From<RpcError> for SourceError {
 }
 
 #[derive(Clone)]
-/// Minimal pooled HTTP JSON-RPC client.
+/// Read-only Alloy provider with no transaction fillers or retry layers.
 pub struct RpcHttpClient {
     endpoint: Arc<str>,
-    client: Client,
-    next_id: Arc<AtomicU64>,
+    provider: RootProvider,
 }
 
 impl RpcHttpClient {
-    /// Creates a JSON-RPC client with a shared HTTP connection pool and
-    /// monotonic request ids.
-    pub fn new(endpoint: impl Into<String>) -> Self {
-        Self {
-            endpoint: Arc::from(endpoint.into()),
-            client: Client::new(),
-            next_id: Arc::new(AtomicU64::new(1)),
+    /// Creates a read-only HTTP provider after validating the endpoint URL.
+    ///
+    /// [`ProviderBuilder::default`] is intentional: unlike `new()`, it installs
+    /// no gas, nonce, or chain-id transaction fillers.
+    pub fn new(endpoint: impl Into<String>) -> Result<Self, RpcError> {
+        let endpoint = endpoint.into();
+        let url = url::Url::parse(&endpoint)
+            .map_err(|error| RpcError::Invalid(format!("invalid HTTP RPC URL: {error}")))?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(RpcError::Invalid(
+                "HTTP RPC URL must use http or https".into(),
+            ));
         }
+        let provider = ProviderBuilder::default().connect_http(url);
+        Ok(Self {
+            endpoint: Arc::from(endpoint),
+            provider,
+        })
     }
 
     /// Returns the configured JSON-RPC endpoint.
@@ -61,149 +57,109 @@ impl RpcHttpClient {
         &self.endpoint
     }
 
-    /// Executes one JSON-RPC request and converts remote/HTTP/shape failures
-    /// into [`RpcError`].
-    pub async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let response = self
-            .client
-            .post(self.endpoint.as_ref())
-            .json(&json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "method": method,
-                "params": params,
-            }))
-            .send()
+    /// Reads chain ID only when explicitly requested.
+    pub async fn chain_id(&self) -> Result<u64, RpcError> {
+        self.provider
+            .get_chain_id()
             .await
-            .map_err(|error| RpcError::Http(error.to_string()))?;
-        let status = response.status();
-        let value: Value = response
-            .json()
-            .await
-            .map_err(|error| RpcError::Json(error.to_string()))?;
-        if !status.is_success() {
-            return Err(RpcError::Http(format!("HTTP status {status}: {value}")));
-        }
-        if let Some(error) = value.get("error") {
-            return Err(RpcError::Remote {
-                code: error.get("code").and_then(Value::as_i64).unwrap_or(-1),
-                message: error
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown RPC error")
-                    .into(),
-            });
-        }
-        value
-            .get("result")
-            .cloned()
-            .ok_or_else(|| RpcError::Invalid("missing JSON-RPC result".into()))
+            .map_err(|error| RpcError::Transport(error.to_string()))
     }
 
-    /// Calls `eth_call` at an explicit block tag and returns raw hex bytes.
+    /// Executes one `eth_call` at an explicit block and returns ABI bytes.
     pub async fn call_at(
         &self,
         to: Address,
-        data: String,
+        data: Bytes,
         block_tag: &str,
-    ) -> Result<String, RpcError> {
-        let result = self
-            .call(
-                "eth_call",
-                json!([{"to": format!("{to:#x}"), "data": data}, block_tag]),
-            )
-            .await?;
-        result
-            .as_str()
-            .map(str::to_owned)
-            .ok_or_else(|| RpcError::Invalid("eth_call result is not a hex string".into()))
+    ) -> Result<Bytes, RpcError> {
+        let transaction = TransactionRequest::default().to(to).input(data.into());
+        self.provider
+            .call(transaction)
+            .block(parse_block_id(block_tag)?)
+            .await
+            .map_err(|error| RpcError::Transport(error.to_string()))
     }
 
-    /// Fetches contract runtime bytecode at a block tag for code-hash checks.
-    pub async fn get_code(&self, address: Address, block_tag: &str) -> Result<Vec<u8>, RpcError> {
-        let result = self
-            .call("eth_getCode", json!([format!("{address:#x}"), block_tag]))
-            .await?;
-        parse_hex_bytes(
-            result.as_str().ok_or_else(|| {
-                RpcError::Invalid("eth_getCode result is not a hex string".into())
-            })?,
-        )
+    /// Fetches contract runtime bytecode at one explicit block.
+    pub async fn get_code(&self, address: Address, block_tag: &str) -> Result<Bytes, RpcError> {
+        self.provider
+            .get_code_at(address)
+            .block_id(parse_block_id(block_tag)?)
+            .await
+            .map_err(|error| RpcError::Transport(error.to_string()))
     }
 
-    /// Converts an RPC block header into the normalized snapshot cursor.
+    /// Converts one explicit block request into the normalized snapshot cursor.
     pub async fn block_cursor(
         &self,
         block_tag: &str,
         chain_id: u64,
         commitment: Commitment,
     ) -> Result<ChainCursor, RpcError> {
-        let result = self
-            .call("eth_getBlockByNumber", json!([block_tag, false]))
-            .await?
-            .as_object()
-            .cloned()
-            .ok_or_else(|| RpcError::Invalid("block result is null or not an object".into()))?;
-        let block_number = parse_hex_u64(result.get("number"), "block.number")?;
-        let execution_block_number = result
-            .get("l1BlockNumber")
-            .map(|value| parse_hex_u64(Some(value), "block.l1BlockNumber"))
-            .transpose()?
-            .unwrap_or(block_number);
+        let tag = parse_block_number_or_tag(block_tag)?;
+        let value: Value = self
+            .provider
+            .client()
+            .request("eth_getBlockByNumber", (tag, false))
+            .await
+            .map_err(|error| RpcError::Transport(error.to_string()))?;
+        let head = parse_rpc_head(&value)?;
         Ok(ChainCursor {
             chain_id,
-            block_number,
-            execution_block_number,
-            block_hash: parse_optional_hash(result.get("hash"), "block.hash")?,
+            block_number: head.number,
+            execution_block_number: head.l1_block_number.unwrap_or(head.number),
+            block_hash: head.hash,
             transaction_index: None,
             log_index: None,
-            // Nitro exposes the EVM-visible parent-chain block in this
-            // Arbitrum extension. Other networks simply omit the field.
             source_sequence: None,
             source_sub_index: None,
             commitment,
         })
     }
 
-    /// Fetches and decodes canonical logs for an inclusive block range.
+    /// Fetches canonical logs with topic0 OR semantics.
     pub async fn get_logs(
         &self,
         request: &BackfillRequest,
         chain_id: u64,
         commitment: Commitment,
     ) -> Result<Vec<ContractLog>, RpcError> {
-        let mut filter = serde_json::Map::new();
-        filter.insert(
-            "address".into(),
-            Value::String(format!("{:#x}", request.filter.address)),
-        );
-        filter.insert(
-            "fromBlock".into(),
-            Value::String(hex_u64(request.from_block)),
-        );
-        filter.insert("toBlock".into(), Value::String(hex_u64(request.to_block)));
-        if !request.filter.topics.is_empty() {
-            filter.insert(
-                "topics".into(),
-                Value::Array(
-                    request
-                        .filter
-                        .topics
-                        .iter()
-                        .map(|topic| Value::String(word_hex(*topic)))
-                        .collect(),
-                ),
-            );
-        }
-        let result = self
-            .call("eth_getLogs", Value::Array(vec![Value::Object(filter)]))
-            .await?;
-        let logs = result
-            .as_array()
-            .ok_or_else(|| RpcError::Invalid("eth_getLogs result is not an array".into()))?;
-        logs.iter()
-            .map(|log| parse_rpc_log(log, chain_id, commitment))
+        let filter = backfill_filter(request);
+        self.provider
+            .get_logs(&filter)
+            .await
+            .map_err(|error| RpcError::Transport(error.to_string()))?
+            .into_iter()
+            .map(|log| normalize_rpc_log(log, chain_id, commitment))
             .collect()
     }
+
+    #[cfg(test)]
+    pub(super) fn from_provider(provider: RootProvider) -> Self {
+        Self {
+            endpoint: Arc::from("mock://alloy"),
+            provider,
+        }
+    }
+}
+
+pub(super) fn backfill_filter(request: &BackfillRequest) -> Filter {
+    let filter = Filter::new()
+        .address(request.filter.address)
+        .from_block(request.from_block)
+        .to_block(request.to_block);
+    if request.filter.topics.is_empty() {
+        filter
+    } else {
+        filter.event_signature(request.filter.topics.clone())
+    }
+}
+
+fn parse_block_number_or_tag(value: &str) -> Result<BlockNumberOrTag, RpcError> {
+    BlockNumberOrTag::from_str(value)
+        .map_err(|error| RpcError::Invalid(format!("invalid block tag: {error}")))
+}
+
+fn parse_block_id(value: &str) -> Result<BlockId, RpcError> {
+    parse_block_number_or_tag(value).map(Into::into)
 }

@@ -1,5 +1,6 @@
 /** Synchronous in-memory quote engine around the ordered reducer. */
 import type { QuoteRequest } from "@lunarbase/math";
+import * as Hex from "ox/Hex";
 import { decodeCoreEvent } from "../protocol/abi.js";
 import { QuoteReducer } from "../state/reducer.js";
 import { Commitment, IndexerError, MATH_COMPATIBILITY_VERSION } from "../model.js";
@@ -138,9 +139,9 @@ export class QuoteIndexer {
     return cursor;
   }
 
-  private verifyCodeHash(actual: string): void {
+  private verifyCodeHash(actual: BootstrapSnapshot["runtimeCodeHash"]): void {
     const expected = this.deployment.expectedRuntimeCodeHash;
-    if (expected !== "" && !/^0x0+$/.test(expected) && actual.toLowerCase() !== expected.toLowerCase())
+    if (Hex.toBigInt(expected) !== 0n && actual !== expected)
       throw new IndexerError("CODE_HASH_MISMATCH", "snapshot code hash mismatch");
   }
 }

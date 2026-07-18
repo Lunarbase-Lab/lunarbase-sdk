@@ -1,29 +1,77 @@
-//! Core ABI topic constants and strict event decoding.
+//! Pinned Core ABI and strict Alloy event decoding.
 
 use crate::{ContractLog, LogDecodeError, QuoteEvent};
-use alloy_primitives::b256;
-use lunarbase_math::{Address, B256, U256};
+use alloy_sol_types::SolEvent;
+use lunarbase_math::{B256, U256};
 
-pub const TOPIC_LANE_ADDED: B256 =
-    b256!("1c61848d54083be4bfb8a26449add9f919cf1efd4ca608005f7f3f6aa0cef958");
-pub const TOPIC_LANE_REMOVED: B256 =
-    b256!("daa054a7d9aa74d7b3ee43f36a9a292169f22fbf60106608accc3161633fba98");
-const TOPIC_LANE_UPDATED: B256 =
-    b256!("4c5259bbfc22dbcf1f2d79e1e95c193e979499cc1b29f4b9f38d972cb383bd7a");
-const TOPIC_SLIPPAGE_K_SET: B256 =
-    b256!("284eddda3b70079855640ccd104ec7b972a8a3f8a46b157278ad1a26812cbdf8");
-const TOPIC_PARTNER_INFO_SET: B256 =
-    b256!("5155dfcae951816ec9ea329d96736edf3278b9d1cbe75191c70f004efe67a377");
-const TOPIC_PARTNER_FEE_SET: B256 =
-    b256!("785135eb22f3bdb08e949e200b6e47291b10a11aa8d27879046da64dff565b85");
-const TOPIC_WHITELIST_SET: B256 =
-    b256!("0aa5ec5ffdc7f6f9c4d0dded489d7450297155cb2f71cb771e02427f7dff4f51");
-const TOPIC_BLACKLIST_MULTIPLIER_SET: B256 =
-    b256!("a15057886e6ebcdf47294bcb091d686031124d1041cafe00740e93667bacd186");
-const TOPIC_DEPOSIT_EXECUTED: B256 =
-    b256!("9fb4891ffe3e11f428f3f10fa362b7938a364beebc215a2ec1db56a8d05ba20f");
-const TOPIC_WITHDRAWAL_EXECUTED: B256 =
-    b256!("722ca578dc087cbf283dc08891a94ba45b7119723568feda14da8f4c9c35d251");
+/// Generated function and event types shared by bootstrap and replay.
+pub mod core {
+    use alloy_sol_types::sol;
+
+    sol! {
+        function cash() external view returns (address cashAddress);
+        function lane(address asset)
+            external
+            view
+            returns (bytes32 slot0, bool exists, bool paused, uint8 blockDelay, uint32 slippageKBps);
+        function reserves(address asset)
+            external
+            view
+            returns (
+                uint128 assetReserve,
+                uint128 treasuryFees,
+                uint128 partnerFees,
+                uint128 escrowedAssets,
+                uint128 totalPrincipalAmount
+            );
+        function whitelist(address account) external view returns (bool whitelisted);
+        function blacklistFeeMultiplier() external view returns (uint256 multiplier);
+        function partners(address router, address asset)
+            external
+            view
+            returns (uint128 cumFees, uint32 fee, uint32 latestWithdrawTimestamp, address operator);
+
+        event LaneAdded(address indexed asset);
+        event LaneRemoved(address indexed asset);
+        event LaneUpdated(address indexed asset, bytes32 slot0);
+        event SlippageKSet(address indexed asset, uint32 previousK, uint32 newK);
+        event PartnerInfoSet(
+            address indexed router,
+            address indexed asset,
+            uint32 fee,
+            address indexed operator
+        );
+        event PartnerFeeSet(address indexed router, address indexed asset, uint32 fee);
+        event WhitelistSet(address indexed account, bool whitelisted);
+        event BlacklistFeeMultiplierSet(uint256 multiplier);
+        event DepositExecuted(
+            uint256 indexed id,
+            address indexed lpAuthority,
+            address indexed asset,
+            uint128 principalAmount
+        );
+        event WithdrawalExecuted(
+            uint256 indexed id,
+            address indexed lpAuthority,
+            address indexed asset,
+            uint128 principalAmount,
+            uint256 principalOut,
+            uint256 penaltyAmount,
+            address principalReceiver
+        );
+    }
+}
+
+pub const TOPIC_LANE_ADDED: B256 = core::LaneAdded::SIGNATURE_HASH;
+pub const TOPIC_LANE_REMOVED: B256 = core::LaneRemoved::SIGNATURE_HASH;
+const TOPIC_LANE_UPDATED: B256 = core::LaneUpdated::SIGNATURE_HASH;
+const TOPIC_SLIPPAGE_K_SET: B256 = core::SlippageKSet::SIGNATURE_HASH;
+const TOPIC_PARTNER_INFO_SET: B256 = core::PartnerInfoSet::SIGNATURE_HASH;
+const TOPIC_PARTNER_FEE_SET: B256 = core::PartnerFeeSet::SIGNATURE_HASH;
+const TOPIC_WHITELIST_SET: B256 = core::WhitelistSet::SIGNATURE_HASH;
+const TOPIC_BLACKLIST_MULTIPLIER_SET: B256 = core::BlacklistFeeMultiplierSet::SIGNATURE_HASH;
+const TOPIC_DEPOSIT_EXECUTED: B256 = core::DepositExecuted::SIGNATURE_HASH;
+const TOPIC_WITHDRAWAL_EXECUTED: B256 = core::WithdrawalExecuted::SIGNATURE_HASH;
 
 /// Returns the `LaneAdded` and `LaneRemoved` topic0 values used for discovery.
 pub fn lane_discovery_topics() -> [B256; 2] {
@@ -31,9 +79,6 @@ pub fn lane_discovery_topics() -> [B256; 2] {
 }
 
 /// Returns every quote-critical Core topic accepted by the reducer.
-///
-/// `SwapExecuted` is deliberately excluded because quotes derive their state
-/// from lane, fee-profile, deposit, and withdrawal transitions.
 pub fn quote_critical_topics() -> [B256; 10] {
     [
         TOPIC_LANE_ADDED,
@@ -48,129 +93,92 @@ pub fn quote_critical_topics() -> [B256; 10] {
         TOPIC_WITHDRAWAL_EXECUTED,
     ]
 }
-fn topic_address(topic: B256) -> Result<Address, LogDecodeError> {
-    let bytes = topic.as_slice();
-    if bytes[..12].iter().any(|byte| *byte != 0) {
-        return Err(LogDecodeError::InvalidAddress);
+
+fn expect_shape(log: &ContractLog, topics: usize, data_words: usize) -> Result<(), LogDecodeError> {
+    if log.topics.len() != topics {
+        return Err(LogDecodeError::InvalidTopicCount);
     }
-    Ok(Address::from_slice(&bytes[12..]))
-}
-
-fn data_word(data: &[u8], index: usize) -> Result<U256, LogDecodeError> {
-    let start = index
-        .checked_mul(32)
-        .ok_or(LogDecodeError::InvalidDataLength)?;
-    let word = data
-        .get(start..start + 32)
-        .ok_or(LogDecodeError::InvalidDataLength)?;
-    Ok(U256::from_be_bytes::<32>(
-        word.try_into().expect("32-byte ABI word"),
-    ))
-}
-
-fn expect_data_words(data: &[u8], count: usize) -> Result<(), LogDecodeError> {
-    if data.len() != count * 32 {
+    if log.data.len() != data_words * 32 {
         return Err(LogDecodeError::InvalidDataLength);
     }
     Ok(())
 }
 
-fn expect_topics(topics: &[B256], count: usize) -> Result<(), LogDecodeError> {
-    if topics.len() != count {
-        return Err(LogDecodeError::InvalidTopicCount);
-    }
-    Ok(())
+fn decode<E: SolEvent>(log: &ContractLog, error: LogDecodeError) -> Result<E, LogDecodeError> {
+    E::decode_raw_log_validate(log.topics.iter().copied(), &log.data).map_err(|_| error)
 }
 
-fn decode_bool(word: U256) -> Result<bool, LogDecodeError> {
-    match word {
-        U256::ZERO => Ok(false),
-        U256::ONE => Ok(true),
-        _ => Err(LogDecodeError::InvalidBoolean),
-    }
-}
-
-/// Decode the quote-critical events from the pinned Core ABI. Unknown events
-/// return `Ok(None)` so callers can share one Core log subscription with other
-/// modules. The returned event deliberately drops non-quote metadata such as
-/// partner operator and position ids.
+/// Decodes quote-critical events with generated Alloy ABI types.
 ///
-/// # Errors
-///
-/// Returns a typed error for missing topic zero, wrong indexed-topic count,
-/// malformed ABI data, non-padded addresses, or invalid booleans.
+/// Unknown events return `Ok(None)`. Known events require exact topic and data
+/// arity before Alloy validates indexed addresses, booleans, and integer widths.
 pub fn decode_core_event(log: &ContractLog) -> Result<Option<QuoteEvent>, LogDecodeError> {
     let topic0 = *log.topics.first().ok_or(LogDecodeError::MissingTopic0)?;
-    let topics = &log.topics;
-    let data = &log.data;
     let event = if topic0 == TOPIC_LANE_ADDED {
-        expect_topics(topics, 2)?;
-        expect_data_words(data, 0)?;
-        Some(QuoteEvent::LaneAdded {
-            asset: topic_address(topics[1])?,
-        })
+        expect_shape(log, 2, 0)?;
+        let event = decode::<core::LaneAdded>(log, LogDecodeError::InvalidAddress)?;
+        Some(QuoteEvent::LaneAdded { asset: event.asset })
     } else if topic0 == TOPIC_LANE_REMOVED {
-        expect_topics(topics, 2)?;
-        expect_data_words(data, 0)?;
-        Some(QuoteEvent::LaneRemoved {
-            asset: topic_address(topics[1])?,
-        })
+        expect_shape(log, 2, 0)?;
+        let event = decode::<core::LaneRemoved>(log, LogDecodeError::InvalidAddress)?;
+        Some(QuoteEvent::LaneRemoved { asset: event.asset })
     } else if topic0 == TOPIC_LANE_UPDATED {
-        expect_topics(topics, 2)?;
-        expect_data_words(data, 1)?;
+        expect_shape(log, 2, 1)?;
+        let event = decode::<core::LaneUpdated>(log, LogDecodeError::InvalidDataLength)?;
         Some(QuoteEvent::LaneUpdated {
-            asset: topic_address(topics[1])?,
-            slot0: data_word(data, 0)?,
+            asset: event.asset,
+            slot0: U256::from_be_slice(event.slot0.as_slice()),
         })
     } else if topic0 == TOPIC_SLIPPAGE_K_SET {
-        expect_topics(topics, 2)?;
-        expect_data_words(data, 2)?;
+        expect_shape(log, 2, 2)?;
+        let event = decode::<core::SlippageKSet>(log, LogDecodeError::InvalidDataLength)?;
         Some(QuoteEvent::SlippageKSet {
-            asset: topic_address(topics[1])?,
-            new_k: data_word(data, 1)?,
+            asset: event.asset,
+            new_k: U256::from(event.newK),
         })
     } else if topic0 == TOPIC_PARTNER_INFO_SET {
-        expect_topics(topics, 4)?;
-        expect_data_words(data, 1)?;
+        expect_shape(log, 4, 1)?;
+        let event = decode::<core::PartnerInfoSet>(log, LogDecodeError::InvalidDataLength)?;
         Some(QuoteEvent::PartnerInfoSet {
-            router: topic_address(topics[1])?,
-            asset: topic_address(topics[2])?,
-            fee: data_word(data, 0)?,
+            router: event.router,
+            asset: event.asset,
+            fee: U256::from(event.fee),
         })
     } else if topic0 == TOPIC_PARTNER_FEE_SET {
-        expect_topics(topics, 3)?;
-        expect_data_words(data, 1)?;
+        expect_shape(log, 3, 1)?;
+        let event = decode::<core::PartnerFeeSet>(log, LogDecodeError::InvalidDataLength)?;
         Some(QuoteEvent::PartnerFeeSet {
-            router: topic_address(topics[1])?,
-            asset: topic_address(topics[2])?,
-            fee: data_word(data, 0)?,
+            router: event.router,
+            asset: event.asset,
+            fee: U256::from(event.fee),
         })
     } else if topic0 == TOPIC_WHITELIST_SET {
-        expect_topics(topics, 2)?;
-        expect_data_words(data, 1)?;
+        expect_shape(log, 2, 1)?;
+        let event = decode::<core::WhitelistSet>(log, LogDecodeError::InvalidBoolean)?;
         Some(QuoteEvent::WhitelistSet {
-            router: topic_address(topics[1])?,
-            whitelisted: decode_bool(data_word(data, 0)?)?,
+            router: event.account,
+            whitelisted: event.whitelisted,
         })
     } else if topic0 == TOPIC_BLACKLIST_MULTIPLIER_SET {
-        expect_topics(topics, 1)?;
-        expect_data_words(data, 1)?;
+        expect_shape(log, 1, 1)?;
+        let event =
+            decode::<core::BlacklistFeeMultiplierSet>(log, LogDecodeError::InvalidDataLength)?;
         Some(QuoteEvent::BlacklistFeeMultiplierSet {
-            multiplier: data_word(data, 0)?,
+            multiplier: event.multiplier,
         })
     } else if topic0 == TOPIC_DEPOSIT_EXECUTED {
-        expect_topics(topics, 4)?;
-        expect_data_words(data, 1)?;
+        expect_shape(log, 4, 1)?;
+        let event = decode::<core::DepositExecuted>(log, LogDecodeError::InvalidDataLength)?;
         Some(QuoteEvent::DepositExecuted {
-            asset: topic_address(topics[3])?,
-            principal: data_word(data, 0)?,
+            asset: event.asset,
+            principal: U256::from(event.principalAmount),
         })
     } else if topic0 == TOPIC_WITHDRAWAL_EXECUTED {
-        expect_topics(topics, 4)?;
-        expect_data_words(data, 4)?;
+        expect_shape(log, 4, 4)?;
+        let event = decode::<core::WithdrawalExecuted>(log, LogDecodeError::InvalidDataLength)?;
         Some(QuoteEvent::WithdrawalExecuted {
-            asset: topic_address(topics[3])?,
-            principal: data_word(data, 0)?,
+            asset: event.asset,
+            principal: U256::from(event.principalAmount),
         })
     } else {
         None
@@ -182,9 +190,10 @@ pub fn decode_core_event(log: &ContractLog) -> Result<Option<QuoteEvent>, LogDec
 mod tests {
     use super::*;
     use crate::{ChainCursor, Commitment};
+    use lunarbase_math::Address;
 
     #[test]
-    fn position_topics_match_the_pinned_solidity_abi() {
+    fn generated_topics_match_the_pinned_solidity_abi() {
         assert_eq!(
             format!("{TOPIC_DEPOSIT_EXECUTED:#x}"),
             "0x9fb4891ffe3e11f428f3f10fa362b7938a364beebc215a2ec1db56a8d05ba20f"

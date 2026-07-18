@@ -6,7 +6,7 @@ use futures_util::StreamExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tokio::sync::{broadcast, mpsc, watch, Notify};
+use tokio::sync::{Notify, broadcast, mpsc, watch};
 use tokio::time::sleep;
 
 pub(super) struct ReducerRuntime {

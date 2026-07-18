@@ -8,7 +8,9 @@
 
 use crate::source::{ChainDataSource, SourceStream};
 use crate::state::ordering::CursorReorderBuffer;
-use crate::transport::rpc::{parse_rpc_log, RpcError, RpcHttpBackend, RpcHttpClient};
+use crate::transport::rpc::{
+    RpcError, RpcHttpBackend, RpcHttpClient, parse_rpc_head, parse_rpc_log,
+};
 use crate::{
     BackfillRequest, BootstrapSnapshot, ChainCursor, ChainUpdate, Checkpoint, Commitment,
     ContractFilter, DeploymentConfig, Network, RpcSnapshotProvider, SourceError,
@@ -16,7 +18,7 @@ use crate::{
 use async_stream::stream;
 use futures_util::{SinkExt, StreamExt};
 use lunarbase_math::B256;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
@@ -378,13 +380,13 @@ fn subscription_request(id: u64, filter: &ContractFilter, kind: &str) -> String 
     if !filter.topics.is_empty() {
         options.insert(
             "topics".into(),
-            Value::Array(
+            Value::Array(vec![Value::Array(
                 filter
                     .topics
                     .iter()
-                    .map(|topic| Value::String(word_hex(*topic)))
+                    .map(|topic| Value::String(format!("{topic:#x}")))
                     .collect(),
-            ),
+            )]),
         );
     }
     json!({
@@ -397,29 +399,20 @@ fn subscription_request(id: u64, filter: &ContractFilter, kind: &str) -> String 
 }
 
 fn parse_ws_head(value: &Value, chain_id: u64) -> Result<WsHead, RpcError> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| RpcError::Invalid("newHeads result is not an object".into()))?;
-    let block_number = parse_hex_u64_value(object.get("number"), "head.number")?;
-    let block_hash = parse_optional_hash_value(object.get("hash"), "head.hash")?;
-    let parent_hash = parse_optional_hash_value(object.get("parentHash"), "head.parentHash")?;
-    let evm_parent_block = object
-        .get("l1BlockNumber")
-        .map(|value| parse_hex_u64_value(Some(value), "head.l1BlockNumber"))
-        .transpose()?;
+    let head = parse_rpc_head(value)?;
     Ok(WsHead {
         cursor: ChainCursor {
             chain_id,
-            block_number,
-            execution_block_number: evm_parent_block.unwrap_or(block_number),
-            block_hash,
+            block_number: head.number,
+            execution_block_number: head.l1_block_number.unwrap_or(head.number),
+            block_hash: head.hash,
             transaction_index: None,
             log_index: None,
             source_sequence: None,
             source_sub_index: None,
             commitment: Commitment::Realtime,
         },
-        parent_hash,
+        parent_hash: head.parent_hash,
     })
 }
 
@@ -450,43 +443,6 @@ where
         })),
         _ => Ok(None),
     }
-}
-
-fn parse_hex_u64_value(value: Option<&Value>, field: &str) -> Result<u64, RpcError> {
-    let value = value
-        .and_then(Value::as_str)
-        .ok_or_else(|| RpcError::Invalid(format!("{field} is not a hex string")))?;
-    let value = value
-        .strip_prefix("0x")
-        .ok_or_else(|| RpcError::Invalid(format!("{field} is missing 0x prefix")))?;
-    u64::from_str_radix(value, 16).map_err(|_| RpcError::Invalid(format!("{field} is invalid")))
-}
-
-fn parse_optional_hash_value(value: Option<&Value>, field: &str) -> Result<Option<B256>, RpcError> {
-    match value {
-        None | Some(Value::Null) => Ok(None),
-        Some(value) => {
-            let text = value
-                .as_str()
-                .ok_or_else(|| RpcError::Invalid(format!("{field} is not a string")))?;
-            let text = text
-                .strip_prefix("0x")
-                .ok_or_else(|| RpcError::Invalid(format!("{field} is missing 0x prefix")))?;
-            if text.len() != 64 {
-                return Err(RpcError::Invalid(format!("{field} is not 32 bytes")));
-            }
-            let mut output = [0u8; 32];
-            for (index, byte) in output.iter_mut().enumerate() {
-                *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16)
-                    .map_err(|_| RpcError::Invalid(format!("{field} is invalid hex")))?;
-            }
-            Ok(Some(B256::new(output)))
-        }
-    }
-}
-
-fn word_hex(value: B256) -> String {
-    format!("{value:#x}")
 }
 
 #[cfg(test)]

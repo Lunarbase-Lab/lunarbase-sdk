@@ -1,8 +1,8 @@
 use super::{ClientBatchQuote, ClientQuote, IndexerError, IndexerHealth};
 use crate::{
-    decode_core_event, BootstrapSnapshot, ChainCursor, ChainUpdate, Checkpoint, Commitment,
-    ContractLog, DeploymentConfig, QuoteEvent, QuoteReducer, ReducerError,
-    MATH_COMPATIBILITY_VERSION,
+    BootstrapSnapshot, ChainCursor, ChainUpdate, Checkpoint, Commitment, ContractLog,
+    DeploymentConfig, MATH_COMPATIBILITY_VERSION, QuoteEvent, QuoteReducer, ReducerError,
+    decode_core_event,
 };
 use lunarbase_math::{QuoteOutcome, QuoteRequest, QuoteState};
 
@@ -114,11 +114,11 @@ impl QuoteIndexer {
                     self.reducer.mark_not_ready();
                     return Err(ReducerError::RemovedLog.into());
                 }
-                if let Some(event) = decoder(&log) {
-                    if let Err(error) = self.reducer.apply(log.cursor, event) {
-                        self.reducer.mark_not_ready();
-                        return Err(error.into());
-                    }
+                if let Some(event) = decoder(&log)
+                    && let Err(error) = self.reducer.apply(log.cursor, event)
+                {
+                    self.reducer.mark_not_ready();
+                    return Err(error.into());
                 }
             }
             ChainUpdate::Head(cursor) => {

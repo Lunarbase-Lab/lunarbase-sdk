@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { extname, join, relative } from "node:path";
 
-const ROOTS = ["crates", "packages", "scripts"];
+const ROOTS = ["crates", "packages", "examples", "scripts"];
 const SOURCE_EXTENSIONS = new Set([".rs", ".ts", ".mjs"]);
 const IGNORED_DIRECTORIES = new Set(["dist", "node_modules", "target"]);
 const MAX_LINES = 500;

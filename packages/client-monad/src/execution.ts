@@ -1,12 +1,13 @@
 /** Monad parser execution-event model and normalization. */
-import type { Address, Word } from "@lunarbase/math";
+import type { Address } from "@lunarbase/math";
 import type { ChainCursor, ChainUpdate, Commitment, ContractFilter } from "@lunarbase/client-core";
+import type { Hex } from "ox/Hex";
 
 /** Block lifecycle record emitted by the parser. */
 export interface ExecutionHead {
   readonly sequence: bigint;
   readonly blockNumber: bigint;
-  readonly blockHash?: string;
+  readonly blockHash?: Hex;
   readonly commitment: Commitment;
 }
 
@@ -15,12 +16,12 @@ export interface ExecutionLog {
   readonly sequence: bigint;
   readonly sourceSubIndex: bigint;
   readonly blockNumber: bigint;
-  readonly blockHash?: string;
+  readonly blockHash?: Hex;
   readonly transactionIndex: bigint;
   readonly logIndex: bigint;
   readonly address: Address;
-  readonly topics: readonly Word[];
-  readonly data: string;
+  readonly topics: readonly Hex[];
+  readonly data: Hex;
   readonly commitment: Commitment;
 }
 

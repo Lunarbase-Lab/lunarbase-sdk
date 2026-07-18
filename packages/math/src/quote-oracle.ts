@@ -2,12 +2,15 @@ import {
   encodeLaneSlot0,
   createLaneState,
   quote,
+  parseAddress,
   solidityExactInAmount,
   solidityExactOutAmountForRequest,
   type LaneState,
+  type Address,
   type QuoteRequest,
   type QuoteState,
 } from "./index.js";
+import * as Hex from "ox/Hex";
 
 declare const process: { argv: string[]; stdout: { write(value: string): void } };
 declare const Bun: { file(path: string): { text(): Promise<string> } };
@@ -57,20 +60,23 @@ const lane = (input: LaneVector): LaneState =>
     input.paused,
   );
 function build(vector: Vector): { state: QuoteState; request: QuoteRequest; executionBlockNumber: bigint } {
+  const cash = parseAddress(vector.cash);
+  const assetIn = parseAddress(vector.assetIn);
+  const assetOut = parseAddress(vector.assetOut);
   const state = {
-    cash: vector.cash,
-    lanes: new Map<string, LaneState>(),
+    cash,
+    lanes: new Map<Address, LaneState>(),
     feeProfile: {
       whitelisted: vector.whitelisted,
       blacklistFeeMultiplier: value(vector.blacklistFeeMultiplier),
-      partnerFeeBps: new Map<string, number>(),
+      partnerFeeBps: new Map<Address, number>(),
     },
   };
-  const feeAsset = vector.mode === "ExactIn" ? vector.assetOut : vector.assetIn;
+  const feeAsset = vector.mode === "ExactIn" ? assetOut : assetIn;
   state.feeProfile.partnerFeeBps.set(feeAsset, Number(vector.partnerFeeBps));
   for (const [asset, input] of [
-    [vector.assetIn, vector.laneIn],
-    [vector.assetOut, vector.laneOut],
+    [assetIn, vector.laneIn],
+    [assetOut, vector.laneOut],
   ] as const)
     if (input) {
       state.lanes.set(asset, lane(input));
@@ -78,24 +84,15 @@ function build(vector: Vector): { state: QuoteState; request: QuoteRequest; exec
   return {
     state,
     request: {
-      assetIn: vector.assetIn,
-      assetOut: vector.assetOut,
+      assetIn,
+      assetOut,
       amount: value(vector.amount),
       mode: vector.mode,
     },
     executionBlockNumber: value(vector.executionBlockNumber),
   };
 }
-function word(valueToWrite: bigint): Uint8Array {
-  const output = new Uint8Array(32);
-  let valueToShift = valueToWrite;
-  for (let index = 31; index >= 0; index -= 1) {
-    output[index] = Number(valueToShift & 0xffn);
-    valueToShift >>= 8n;
-  }
-  return output;
-}
-function output(vector: Vector): Uint8Array {
+function output(vector: Vector): Hex.Hex {
   const built = build(vector);
   let words: bigint[];
   try {
@@ -123,15 +120,11 @@ function output(vector: Vector): Uint8Array {
   } catch {
     words = [2n, 0n, 0n, 0n, 0n, 0n, 0n];
   }
-  const bytes = new Uint8Array(words.length * 32);
-  words.forEach((item, index) => bytes.set(word(item), index * 32));
-  return bytes;
+  return Hex.concat(...words.map((item) => Hex.fromNumber(item, { size: 32 })));
 }
 
 const args = process.argv;
 const file = args[args.indexOf("--file") + 1];
 const index = Number(args[args.indexOf("--index") + 1]);
 const fixture = JSON.parse(await Bun.file(file).text()) as { vectors: Vector[] };
-process.stdout.write(
-  `hex:${[...output(fixture.vectors[index])].map((item) => item.toString(16).padStart(2, "0")).join("")}`,
-);
+process.stdout.write(`hex:${output(fixture.vectors[index]).slice(2)}`);

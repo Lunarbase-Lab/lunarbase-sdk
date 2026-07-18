@@ -18,7 +18,7 @@ fn builds_standard_logs_subscription() {
     assert_eq!(value["method"], "eth_subscribe");
     assert_eq!(value["params"][0], "logs");
     assert_eq!(value["params"][1]["address"], format!("{address:#x}"));
-    assert_eq!(value["params"][1]["topics"][0], format!("0x{:064x}", 1));
+    assert_eq!(value["params"][1]["topics"][0][0], format!("0x{:064x}", 1));
 }
 
 #[test]

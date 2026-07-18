@@ -2,8 +2,8 @@
 
 use clap::Parser;
 use lunarbase_client_core::{
-    quote_critical_topics, ClientConnectConfig, ContractFilter, DeploymentConfig, Network,
-    MATH_COMPATIBILITY_VERSION,
+    ClientConnectConfig, ContractFilter, DeploymentConfig, MATH_COMPATIBILITY_VERSION, Network,
+    quote_critical_topics,
 };
 use lunarbase_math::{Address, B256};
 use serde::Deserialize;
@@ -160,20 +160,10 @@ fn parse_address(value: &str, field: &'static str) -> Result<Address, ConfigErro
 }
 
 fn parse_hash(value: &str, field: &'static str) -> Result<B256, ConfigError> {
-    let value = value.strip_prefix("0x").unwrap_or(value);
-    if value.len() != 64 {
-        return invalid(field, "expected 32-byte hex");
-    }
-    let mut output = [0u8; 32];
-    for (index, byte) in output.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).map_err(|_| {
-            ConfigError::Invalid {
-                field,
-                detail: "invalid hex".into(),
-            }
-        })?;
-    }
-    Ok(B256::new(output))
+    B256::from_str(value).map_err(|error| ConfigError::Invalid {
+        field,
+        detail: error.to_string(),
+    })
 }
 
 fn invalid<T>(field: &'static str, detail: &str) -> Result<T, ConfigError> {

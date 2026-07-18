@@ -1,5 +1,5 @@
 use clap::Parser;
-use lunarbase_tools::support::monad::{run, MonadArguments};
+use lunarbase_tools::support::monad::{MonadArguments, run};
 
 #[tokio::main]
 async fn main() {

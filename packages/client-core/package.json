@@ -12,7 +12,9 @@
   "files": ["dist", "!dist/**/*.test.*"],
   "publishConfig": {"access": "public"},
   "dependencies": {
-    "@lunarbase/math": "workspace:*"
+    "@lunarbase/math": "workspace:*",
+    "ox": "0.14.30",
+    "viem": "2.55.2"
   },
   "exports": {
     ".": {

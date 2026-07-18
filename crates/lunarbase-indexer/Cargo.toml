@@ -27,7 +27,6 @@ lunarbase-client-base = { workspace = true, optional = true }
 lunarbase-client-core.workspace = true
 lunarbase-client-monad = { workspace = true, optional = true }
 lunarbase-math.workspace = true
-reqwest.workspace = true
 redis.workspace = true
 serde.workspace = true
 serde_json.workspace = true

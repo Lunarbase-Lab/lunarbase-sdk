@@ -1,9 +1,8 @@
-/target/
-/dist/
-/node_modules/
-/\.pnpm-store/
-packages/*/dist/
-packages/*/node_modules/
-solidity-reference/target/
+**/build/
+**/target/
+**/node_modules/
+**/dist/
+.pnpm-store/
 *.tsbuildinfo
 .DS_Store
+.env

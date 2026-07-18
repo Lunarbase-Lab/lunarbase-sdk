@@ -1,5 +1,5 @@
 use clap::Parser;
-use lunarbase_tools::support::e2e::{run, E2eArguments};
+use lunarbase_tools::support::e2e::{E2eArguments, run};
 
 #[tokio::main]
 async fn main() {

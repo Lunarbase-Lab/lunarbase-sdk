@@ -1,7 +1,7 @@
 //! Ordered single-writer quote-state reducer.
 
 use crate::{
-    ChainCursor, Checkpoint, DeploymentConfig, QuoteEvent, MATH_COMPATIBILITY_VERSION,
+    ChainCursor, Checkpoint, DeploymentConfig, MATH_COMPATIBILITY_VERSION, QuoteEvent,
     SCHEMA_VERSION,
 };
 use lunarbase_math::{Address, QuoteState};

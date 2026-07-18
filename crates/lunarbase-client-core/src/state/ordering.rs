@@ -201,12 +201,16 @@ mod tests {
         buffer
             .push(ChainUpdate::Head(cursor(1, None, None)))
             .unwrap();
-        assert!(buffer
-            .push(ChainUpdate::Head(cursor(2, None, None)))
-            .is_err());
+        assert!(
+            buffer
+                .push(ChainUpdate::Head(cursor(2, None, None)))
+                .is_err()
+        );
         assert!(buffer.is_poisoned());
-        assert!(buffer
-            .push(ChainUpdate::Head(cursor(3, None, None)))
-            .is_err());
+        assert!(
+            buffer
+                .push(ChainUpdate::Head(cursor(3, None, None)))
+                .is_err()
+        );
     }
 }

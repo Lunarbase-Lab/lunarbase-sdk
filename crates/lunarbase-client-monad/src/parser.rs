@@ -8,12 +8,13 @@ use lunarbase_client_core::{
     SourceError, SourceStream,
 };
 use lunarbase_math::Address;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use url::Url;
 
 use crate::execution::{ExecutionEvent, ExecutionEventStream, MonadExecutionNormalizer};
-use crate::protocol::{decode_parser_message, ParserMessage};
+use crate::protocol::{ParserMessage, decode_parser_message};
 
 /// Resource and identity settings for the local Monad parser connection.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -38,9 +39,12 @@ impl Default for MonadParserConfig {
 impl MonadParserConfig {
     /// Validates parser endpoint, chain id, and frame-memory bounds.
     pub fn validate(&self) -> Result<(), SourceError> {
-        if !(self.ws_url.starts_with("ws://") || self.ws_url.starts_with("wss://")) {
+        let url = Url::parse(&self.ws_url).map_err(|error| {
+            SourceError::Unavailable(format!("invalid Monad parser URL: {error}"))
+        })?;
+        if !matches!(url.scheme(), "ws" | "wss") {
             return Err(SourceError::Unavailable(
-                "Monad parser URL must use ws:// or wss://".into(),
+                "Monad parser URL must use ws or wss".into(),
             ));
         }
         if self.chain_id == 0 || self.max_frame_bytes == 0 {
@@ -66,7 +70,7 @@ impl MonadParserSource {
     ) -> Result<Self, SourceError> {
         config.validate()?;
         let canonical = RpcHttpBackend::new(
-            RpcHttpClient::new(rpc_endpoint),
+            RpcHttpClient::new(rpc_endpoint).map_err(SourceError::from)?,
             Network::Monad,
             config.chain_id,
             "finalized",

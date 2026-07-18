@@ -1,5 +1,5 @@
 use super::client_types::ClientRuntimeStats;
-use super::tasks::{recover_checkpoint, reducer_loop, source_pump, ReducerRuntime};
+use super::tasks::{ReducerRuntime, recover_checkpoint, reducer_loop, source_pump};
 use super::{
     ClientBatchQuote, ClientConnectConfig, ClientQuote, ClientRuntimeEvent,
     ClientRuntimeStatsSnapshot, IndexerError, IndexerHealth, QuoteIndexer,
@@ -9,7 +9,7 @@ use lunarbase_math::{QuoteRequest, QuoteState};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, mpsc, watch, Mutex, Notify};
+use tokio::sync::{Mutex, Notify, broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
@@ -312,15 +312,15 @@ pub(super) fn publish(sender: &broadcast::Sender<ClientRuntimeEvent>, event: Cli
 impl Drop for ConnectedQuoteClient {
     fn drop(&mut self) {
         let _ = self.cancel.send(true);
-        if let Ok(stop) = self.stop.try_lock() {
-            if let Some(task) = stop.as_ref() {
-                task.abort();
-            }
+        if let Ok(stop) = self.stop.try_lock()
+            && let Some(task) = stop.as_ref()
+        {
+            task.abort();
         }
-        if let Ok(pump) = self.pump.try_lock() {
-            if let Some(task) = pump.as_ref() {
-                task.abort();
-            }
+        if let Ok(pump) = self.pump.try_lock()
+            && let Some(task) = pump.as_ref()
+        {
+            task.abort();
         }
     }
 }

@@ -8,6 +8,7 @@ import {
   type QuoteRequest,
   type QuoteState,
 } from "@lunarbase/math";
+import type { Hex } from "ox/Hex";
 import {
   Commitment,
   ConnectedQuoteClient,
@@ -29,7 +30,7 @@ const CASH = "0x0000000000000000000000000000000000000001" as Address;
 const ASSET = "0x0000000000000000000000000000000000000002" as Address;
 const ROUTER = "0x0000000000000000000000000000000000000003" as Address;
 const CORE = "0x0000000000000000000000000000000000000004" as Address;
-const HASH = `0x${"11".repeat(32)}`;
+const HASH = `0x${"11".repeat(32)}` as Hex;
 
 class MockSource implements ChainDataSource {
   readonly network = Network.Base;

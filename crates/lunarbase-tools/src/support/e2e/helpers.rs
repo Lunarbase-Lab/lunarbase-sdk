@@ -33,15 +33,8 @@ pub(super) fn free_port() -> Result<u16, E2eError> {
 }
 
 pub(super) fn address_word(address: &str) -> String {
-    format!("0x{}{}", "0".repeat(24), address.trim_start_matches("0x"))
-}
-
-pub(super) fn words(values: &[U256]) -> String {
-    let mut output = String::from("0x");
-    for value in values {
-        output.push_str(&format!("{value:064x}"));
-    }
-    output
+    let address = address.parse::<Address>().expect("valid E2E address");
+    format!("{:#x}", B256::left_padding_from(address.as_slice()))
 }
 
 pub(super) fn word_hex(value: B256) -> String {
@@ -49,5 +42,5 @@ pub(super) fn word_hex(value: B256) -> String {
 }
 
 pub(super) fn block_hash(block: u64) -> String {
-    format!("0x{block:064x}")
+    format!("{:#x}", B256::left_padding_from(&block.to_be_bytes()))
 }

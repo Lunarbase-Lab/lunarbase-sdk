@@ -3,7 +3,7 @@
 use lunarbase_client_core::{
     ChainCursor, ChainUpdate, Commitment, ContractLog, SourceError, SourceStream,
 };
-use lunarbase_math::{Address, Bytes, B256};
+use lunarbase_math::{Address, B256, Bytes};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Block lifecycle notification from the parser or native ring.

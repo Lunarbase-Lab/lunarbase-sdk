@@ -23,6 +23,7 @@ import {
   type WebSocketFactory,
   type WebSocketLike,
 } from "@lunarbase/client-core";
+import * as Hex from "ox/Hex";
 import { MonadExecutionNormalizer, type ExecutionEvent, type ExecutionEventReader } from "./execution.js";
 
 /** Bounded parser-side WebSocket resources. */
@@ -255,8 +256,7 @@ function subscriptionRequest(id: number, kind: "logs" | "all", filter?: Record<s
 
 function sidecarFilter(filter: ContractFilter): Record<string, unknown> {
   const options: Record<string, unknown> = { address: filter.address };
-  if (filter.topics.length > 0)
-    options.topics = filter.topics.map((topic) => `0x${topic.toString(16).padStart(64, "0")}`);
+  if (filter.topics.length > 0) options.topics = [filter.topics];
   return options;
 }
 
@@ -320,8 +320,8 @@ function parseU64(value: unknown, field: string): bigint {
   throw new RpcError("INVALID", `${field} is not a decimal uint64`);
 }
 
-function hexU64(value: bigint): string {
-  return `0x${value.toString(16)}`;
+function hexU64(value: bigint): Hex.Hex {
+  return Hex.fromNumber(value);
 }
 
 function decodeFrame(data: unknown): string | undefined {

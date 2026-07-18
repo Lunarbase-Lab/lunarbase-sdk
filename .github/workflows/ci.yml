@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -28,13 +28,13 @@ jobs:
         network: [base, monad, arbitrum]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo check -p lunarbase-indexer --no-default-features --features "${{ matrix.network }}" --all-targets
 
   monad-native:
     runs-on: ubuntu-24.04
-    container: rust:1.90-trixie
+    container: rust:1.95-trixie
     steps:
       - uses: actions/checkout@v4
       - run: apt-get update && apt-get install -y clang cmake libhugetlbfs-dev
@@ -64,7 +64,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y redis-server
       - run: cargo build -p lunarbase-indexer -p lunarbase-tools

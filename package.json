@@ -5,14 +5,15 @@
   "repository": "git+https://github.com/Lunarbase-Lab/lunarbase-sdk.git",
   "packageManager": "pnpm@9.15.0",
   "scripts": {
-    "build": "pnpm --filter @lunarbase/math build && pnpm --filter @lunarbase/client-core build && pnpm --filter @lunarbase/client-base build && pnpm --filter @lunarbase/client-monad build && pnpm --filter @lunarbase/client-arbitrum build",
-    "test": "node --test packages/math/dist/*.test.js packages/client-core/dist/*.test.js packages/client-core/dist/**/*.test.js packages/client-base/dist/*.test.js packages/client-monad/dist/*.test.js packages/client-arbitrum/dist/*.test.js",
-    "format": "prettier --write \"packages/**/*.ts\"",
-    "format:check": "prettier --check \"packages/**/*.ts\"",
-    "lint": "eslint packages --max-warnings=0"
+    "build": "node scripts/clean-dist.mjs packages/math/dist packages/client-core/dist packages/client-base/dist packages/client-monad/dist packages/client-arbitrum/dist examples/typescript/quote-logger/dist && tsc -p packages/math/tsconfig.json && tsc -p packages/client-core/tsconfig.json && tsc -p packages/client-base/tsconfig.json && tsc -p packages/client-monad/tsconfig.json && tsc -p packages/client-arbitrum/tsconfig.json && tsc -p examples/typescript/quote-logger/tsconfig.json",
+    "test": "node --test packages/math/dist/*.test.js packages/client-core/dist/*.test.js packages/client-core/dist/**/*.test.js packages/client-base/dist/*.test.js packages/client-monad/dist/*.test.js packages/client-arbitrum/dist/*.test.js examples/typescript/quote-logger/dist/*.test.js",
+    "format": "prettier --write \"packages/**/*.ts\" \"examples/typescript/**/*.ts\"",
+    "format:check": "prettier --check \"packages/**/*.ts\" \"examples/typescript/**/*.ts\"",
+    "lint": "eslint packages examples/typescript --max-warnings=0"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
+    "@types/node": "22.20.1",
     "eslint": "10.7.0",
     "prettier": "3.9.5",
     "typescript-eslint": "8.64.0"

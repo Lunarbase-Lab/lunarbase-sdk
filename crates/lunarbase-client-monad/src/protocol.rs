@@ -1,6 +1,6 @@
 use crate::execution::{ExecutionHead, ExecutionLog};
 use lunarbase_client_core::{Commitment, SourceError};
-use lunarbase_math::{Address, Bytes, B256};
+use lunarbase_math::{Address, B256, Bytes};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -116,13 +116,15 @@ fn parse_log(value: &Value) -> Result<ExecutionLog, ParserProtocolError> {
         .iter()
         .map(parse_b256)
         .collect::<Result<Vec<_>, _>>()?;
-    let data = parse_hex_bytes(
-        value
-            .get("data")
-            .and_then(Value::as_str)
-            .ok_or(ParserProtocolError::MissingField("result.data"))?,
-        "data",
-    )?;
+    let data = value
+        .get("data")
+        .and_then(Value::as_str)
+        .ok_or(ParserProtocolError::MissingField("result.data"))?
+        .parse::<Bytes>()
+        .map_err(|error| ParserProtocolError::InvalidField {
+            field: "data",
+            detail: error.to_string(),
+        })?;
     let log_index = required_u64(value, "logIndex")?;
     let transaction_index = required_u64(value, "transactionIndex")?;
     Ok(ExecutionLog {
@@ -155,7 +157,7 @@ fn parse_log(value: &Value) -> Result<ExecutionLog, ParserProtocolError> {
                 detail: error.to_string(),
             })?,
         topics,
-        data: Bytes::from(data),
+        data,
         commitment: Commitment::Realtime,
     })
 }
@@ -206,34 +208,12 @@ fn parse_b256(value: &Value) -> Result<B256, ParserProtocolError> {
 }
 
 fn parse_hex32(value: &str, field: &'static str) -> Result<B256, ParserProtocolError> {
-    let bytes = parse_hex_bytes(value, field)?;
-    let bytes = bytes
-        .try_into()
-        .map_err(|_| ParserProtocolError::InvalidField {
+    value
+        .parse::<B256>()
+        .map_err(|error| ParserProtocolError::InvalidField {
             field,
-            detail: "expected exactly 32 bytes".into(),
-        })?;
-    Ok(B256::new(bytes))
-}
-
-fn parse_hex_bytes(value: &str, field: &'static str) -> Result<Vec<u8>, ParserProtocolError> {
-    let value = value.strip_prefix("0x").unwrap_or(value);
-    if !value.len().is_multiple_of(2) {
-        return Err(ParserProtocolError::InvalidField {
-            field,
-            detail: "hex string has odd length".into(),
-        });
-    }
-    (0..value.len() / 2)
-        .map(|index| {
-            u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).map_err(|_| {
-                ParserProtocolError::InvalidField {
-                    field,
-                    detail: "invalid hex string".into(),
-                }
-            })
+            detail: error.to_string(),
         })
-        .collect()
 }
 
 fn required_u64(value: &Value, field: &'static str) -> Result<u64, ParserProtocolError> {

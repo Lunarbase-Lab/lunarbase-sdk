@@ -2,15 +2,15 @@
 
 use crate::*;
 use lunarbase_math::{
-    encode_lane_slot0, Address, LaneSlot0, LaneState, QuoteMode, QuoteRequest, QuoteState, B256,
-    U256, WAD,
+    Address, B256, LaneSlot0, LaneState, QuoteMode, QuoteRequest, QuoteState, U256, WAD,
+    encode_lane_slot0,
 };
 use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, Notify};
+use tokio::sync::{Notify, broadcast};
 
 const CASH: Address = Address::new([1; 20]);
 const ASSET: Address = Address::new([2; 20]);
@@ -114,10 +114,12 @@ async fn quote_and_batch_never_call_the_source() {
         .quote_many(&[request(), request(), request()])
         .unwrap();
     assert_eq!(batch.cursor, single.cursor);
-    assert!(batch
-        .outcomes
-        .iter()
-        .all(|outcome| outcome == &single.outcome));
+    assert!(
+        batch
+            .outcomes
+            .iter()
+            .all(|outcome| outcome == &single.outcome)
+    );
     assert_eq!(source_calls(&source), calls);
     client.shutdown().await;
 }

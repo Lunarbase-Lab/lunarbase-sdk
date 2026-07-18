@@ -11,7 +11,7 @@ export const U256_MAX = (1n << 256n) - 1n;
 /** Largest value representable by an unsigned 128-bit integer. */
 export const U128_MAX = (1n << 128n) - 1n;
 
-export type Address = string;
+export type { Address };
 export type Word = bigint;
 
 export class MathError extends Error {
@@ -36,6 +36,11 @@ export function assertU256(value: bigint, label = "value"): bigint {
 
 /** Canonicalizes and validates a 20-byte EVM address. */
 export function parseAddress(value: string): Address {
-  if (!/^0x[0-9a-fA-F]{40}$/.test(value)) throw new MathError("INVALID_ADDRESS", "invalid EVM address");
-  return value.toLowerCase();
+  try {
+    return EvmAddress.from(value, { checksum: false });
+  } catch {
+    throw new MathError("INVALID_ADDRESS", "invalid EVM address");
+  }
 }
+import * as EvmAddress from "ox/Address";
+import type { Address } from "ox/Address";

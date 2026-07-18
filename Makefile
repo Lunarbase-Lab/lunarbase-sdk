@@ -1,4 +1,4 @@
-# LunarBase math/client build entry point.
+# LunarBase SDK build entry point.
 #
 # The Makefile keeps the Rust workspace, TypeScript packages, documentation,
 # and cross-language verification commands discoverable from the repository
@@ -16,16 +16,17 @@ NETWORK ?= base
 CONFIG ?= config/$(NETWORK).toml
 INDEXER_FEATURES ?= $(NETWORK)
 
-# Prefer a directly installed pnpm, but support Node installations where pnpm
-# is exposed through Corepack instead of being present on PATH.
-PNPM_CMD := $(shell if command -v "$(PNPM)" >/dev/null 2>&1; then printf '%s' "$(PNPM)"; elif command -v corepack >/dev/null 2>&1; then printf '%s' "corepack pnpm@$(PNPM_VERSION)"; fi)
+# Use the workspace-pinned pnpm through Corepack when available. Falling back
+# to a direct binary keeps the Makefile usable with Node installations that do
+# not ship Corepack.
+PNPM_CMD := $(shell if command -v corepack >/dev/null 2>&1; then printf '%s' "corepack pnpm@$(PNPM_VERSION)"; elif command -v "$(PNPM)" >/dev/null 2>&1; then printf '%s' "$(PNPM)"; fi)
 
 .DEFAULT_GOAL := build
 
 .PHONY: help install build build-rust build-ts build-release build-indexer run run-indexer \
 	check check-rust check-ts fmt fmt-rust fmt-ts fmt-check fmt-check-rust fmt-check-ts lint lint-rust lint-ts \
 	test test-rust test-ts test-runtime test-process-e2e load monad-live-validate docs docs-rust ffi \
-	monad-parser-smoke docker-build docker-build-monad-native docker-up docker-down release-artifacts release-check source-size-check verify ci clean check-pnpm
+	quote-logger quote-logger-rust quote-logger-ts monad-parser-smoke docker-build docker-build-monad-native docker-up docker-down release-artifacts release-check source-size-check verify ci clean check-pnpm
 
 help:
 	@echo "LunarBase build targets:"
@@ -45,6 +46,8 @@ help:
 	@echo "  make fmt-check      Verify Rust and TypeScript formatting"
 	@echo "  make docs           Build Rust API documentation with warnings as errors"
 	@echo "  make ffi            Run Solidity differential FFI from lunarbase-contracts"
+	@echo "  make quote-logger-rust  Run the Rust realtime quote example"
+	@echo "  make quote-logger-ts    Run the TypeScript realtime quote example"
 	@echo "  make monad-parser-smoke  Connect the Rust Monad client to a local parser"
 	@echo "  make docker-up      Build and start indexer + Redis"
 	@echo "  make docker-build-monad-native  Build the x86_64 native Monad image"
@@ -90,7 +93,7 @@ fmt-rust:
 	$(CARGO) fmt --all
 
 fmt-ts: check-pnpm
-	$(PNPM_CMD) exec prettier --write "packages/**/*.ts"
+	$(PNPM_CMD) exec prettier --write "packages/**/*.ts" "examples/typescript/**/*.ts"
 
 fmt-check: fmt-check-rust fmt-check-ts
 
@@ -98,7 +101,7 @@ fmt-check-rust:
 	$(CARGO) fmt --all -- --check
 
 fmt-check-ts: check-pnpm
-	$(PNPM_CMD) exec prettier --check "packages/**/*.ts"
+	$(PNPM_CMD) exec prettier --check "packages/**/*.ts" "examples/typescript/**/*.ts"
 
 lint: lint-rust lint-ts
 
@@ -106,7 +109,7 @@ lint-rust:
 	$(CARGO) clippy --workspace --all-targets -- -D warnings
 
 lint-ts: check-pnpm
-	$(PNPM_CMD) exec eslint packages --max-warnings=0
+	$(PNPM_CMD) exec eslint packages examples/typescript --max-warnings=0
 
 test: test-rust test-ts
 
@@ -146,6 +149,15 @@ docs-rust:
 ffi:
 	$(MAKE) -C "$(CONTRACTS_DIR)" differential-ffi
 
+quote-logger: quote-logger-rust
+
+quote-logger-rust:
+	$(CARGO) run -p lunarbase-quote-logger
+
+quote-logger-ts: check-pnpm
+	$(PNPM_CMD) --filter @lunarbase/example-quote-logger build
+	$(PNPM_CMD) --filter @lunarbase/example-quote-logger start
+
 monad-parser-smoke:
 	$(CARGO) run -p lunarbase-client-monad --example monad-parser-smoke
 
@@ -176,7 +188,11 @@ release-check: build-ts
 	$(CARGO) package --offline --list -p lunarbase-client-monad --allow-dirty
 	$(CARGO) package --offline --list -p lunarbase-client-arbitrum --allow-dirty
 	$(NODE) scripts/check-release-dist.mjs
-	$(PNPM_CMD) -r --filter "./packages/**" pack --pack-destination dist
+	$(PNPM_CMD) --dir packages/math pack --pack-destination "$(CURDIR)/dist"
+	$(PNPM_CMD) --dir packages/client-core pack --pack-destination "$(CURDIR)/dist"
+	$(PNPM_CMD) --dir packages/client-base pack --pack-destination "$(CURDIR)/dist"
+	$(PNPM_CMD) --dir packages/client-monad pack --pack-destination "$(CURDIR)/dist"
+	$(PNPM_CMD) --dir packages/client-arbitrum pack --pack-destination "$(CURDIR)/dist"
 
 source-size-check:
 	$(NODE) scripts/check-source-lines.mjs
@@ -187,7 +203,7 @@ ci: verify
 
 clean: check-pnpm
 	$(CARGO) clean
-	$(PNPM_CMD) exec tsc -b packages/math/tsconfig.json packages/client-core/tsconfig.json packages/client-base/tsconfig.json packages/client-monad/tsconfig.json packages/client-arbitrum/tsconfig.json --clean
+	$(PNPM_CMD) exec tsc -b packages/math/tsconfig.json packages/client-core/tsconfig.json packages/client-base/tsconfig.json packages/client-monad/tsconfig.json packages/client-arbitrum/tsconfig.json examples/typescript/quote-logger/tsconfig.json --clean
 
 check-pnpm:
 	@if [ -n "$(PNPM_CMD)" ]; then :; else \

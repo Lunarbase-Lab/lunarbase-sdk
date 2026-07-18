@@ -3,7 +3,7 @@
 /// Re-exporting the primitives from the math crate keeps downstream LunarBase
 /// APIs on one concrete type while avoiding a second address/hash
 /// implementation.
-pub use alloy_primitives::{Address, Bytes, B256, U256, U512};
+pub use alloy_primitives::{Address, B256, Bytes, U256, U512};
 
 #[derive(Clone, Debug, Eq, thiserror::Error, PartialEq)]
 /// Typed failure at a Solidity-compatible arithmetic or input-width boundary.

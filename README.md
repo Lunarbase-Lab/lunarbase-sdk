@@ -69,7 +69,7 @@ fee profile, and recovery rules are specific to LunarBase quoting.
 
 ### Workspace
 
-Prerequisites: stable Rust, Node.js 22+, Corepack or pnpm, and Foundry for the
+Prerequisites: stable Rust 1.95+, Node.js 22+, Corepack or pnpm, and Foundry for the
 cross-language FFI suite.
 
 ```bash
@@ -108,6 +108,12 @@ pnpm add @lunarbase/math @lunarbase/client-core @lunarbase/client-base
 Use `@lunarbase/client-monad` or `@lunarbase/client-arbitrum` only for
 experimental validation. Package-specific imports and examples are documented
 in each package README.
+
+### Runnable client examples
+
+The [`examples`](examples/README.md) directory contains equivalent Rust and
+TypeScript realtime quote loggers. After creating the language-specific
+`.env`, run `make quote-logger-rust` or `make quote-logger-ts`.
 
 ### Runnable indexer
 

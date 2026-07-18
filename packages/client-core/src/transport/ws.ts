@@ -10,6 +10,7 @@ import type {
   DeploymentConfig,
   Network,
 } from "../model.js";
+import type { Hex } from "ox/Hex";
 import { Commitment as CommitmentValue } from "../model.js";
 import { CursorReorderBuffer } from "../state/ordering.js";
 import {
@@ -152,7 +153,7 @@ export class WsRpcBackend implements ChainDataSource {
       let logsSubscription: string | undefined;
       let headsSubscription: string | undefined;
       let lastHead: ChainCursor | undefined;
-      let lastParentHash: string | undefined;
+      let lastParentHash: Hex | undefined;
       let sourceSequence = 0n;
       let reorder = new CursorReorderBuffer(config.reorderCapacity);
 
@@ -222,7 +223,7 @@ export class WsRpcBackend implements ChainDataSource {
         }
 
         if (subscription === headsSubscription) {
-          let parsed: { cursor: ChainCursor; parentHash?: string };
+          let parsed: { cursor: ChainCursor; parentHash?: Hex };
           try {
             parsed = parseHead(params.result, this.chainId);
           } catch (error) {
@@ -288,12 +289,11 @@ function validateConfig(config: WsRpcConfig): WsRpcConfig {
 
 function subscriptionRequest(id: number, filter: ContractFilter, kind: "logs" | "pendingLogs"): string {
   const options: Record<string, unknown> = { address: filter.address };
-  if (filter.topics.length > 0)
-    options.topics = filter.topics.map((topic) => `0x${topic.toString(16).padStart(64, "0")}`);
+  if (filter.topics.length > 0) options.topics = [filter.topics];
   return JSON.stringify({ jsonrpc: "2.0", id, method: "eth_subscribe", params: [kind, options] });
 }
 
-function parseHead(value: unknown, chainId: bigint): { cursor: ChainCursor; parentHash?: string } {
+function parseHead(value: unknown, chainId: bigint): { cursor: ChainCursor; parentHash?: Hex } {
   if (!value || typeof value !== "object") throw new RpcError("INVALID", "newHeads result is not an object");
   const object = value as Record<string, unknown>;
   const blockHash = object.hash === null || object.hash === undefined ? undefined : parseHash(object.hash, "head.hash");

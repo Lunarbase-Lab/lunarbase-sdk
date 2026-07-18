@@ -7,6 +7,7 @@ mod snapshot;
 
 pub use backend::RpcHttpBackend;
 pub use client::{RpcError, RpcHttpClient};
+pub(crate) use codec::parse_rpc_head;
 pub use codec::parse_rpc_log;
 pub use snapshot::RpcSnapshotProvider;
 

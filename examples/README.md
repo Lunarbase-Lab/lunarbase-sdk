@@ -1,5 +1,37 @@
 # Runtime wiring examples
 
+The examples are grouped by language and implement the same realtime quote
+logger:
+
+- [`rust/quote-logger`](rust/quote-logger/README.md) is a binary crate built on
+  `lunarbase-client-core`.
+- [`typescript/quote-logger`](typescript/quote-logger/README.md) is a private
+  pnpm workspace package built on `@lunarbase/client-core`.
+
+Both load `RPC_URL` and `CORE_ADDRESS` from `.env`, bootstrap state through
+RPC, subscribe to WebSocket updates, and log exact-input quotes in both
+directions for every active lane. Each interval uses one `quoteMany` snapshot.
+
+## Rust
+
+```sh
+cp examples/rust/quote-logger/.env.example examples/rust/quote-logger/.env
+make quote-logger-rust
+```
+
+## TypeScript
+
+```sh
+cp examples/typescript/quote-logger/.env.example \
+  examples/typescript/quote-logger/.env
+make quote-logger-ts
+```
+
+The legacy `make quote-logger` alias continues to run the Rust example.
+
+See each example's README for optional router, WebSocket, deployment-block,
+network, quote-amount, and logging configuration.
+
 The pure math packages remain transport-free. A production service wires the
 client boundary to an HTTP RPC snapshot provider, one realtime backend, and an
 optional Redis checkpoint store.

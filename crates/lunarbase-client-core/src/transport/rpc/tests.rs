@@ -1,33 +1,78 @@
-use super::client::SELECTOR_LANE;
-use super::codec::{decode_words, keccak256, selector_address};
-use lunarbase_math::{Address, B256};
+use super::RpcHttpClient;
+use super::client::backfill_filter;
+use crate::protocol::abi::{core, quote_critical_topics};
+use crate::{BackfillRequest, Commitment, ContractFilter};
+use alloy_primitives::Bytes;
+use alloy_provider::{ProviderBuilder, transport::mock::Asserter};
+use alloy_sol_types::SolCall;
+use lunarbase_math::Address;
 
 #[test]
-fn encodes_abi_address_arguments_as_padded_words() {
-    let address = "0x0000000000000000000000000000000000000001"
-        .parse::<Address>()
+fn generated_core_selectors_match_the_pinned_abi() {
+    assert_eq!(core::cashCall::SELECTOR, [0x96, 0x1b, 0xe3, 0x91]);
+    assert_eq!(core::laneCall::SELECTOR, [0xd1, 0xba, 0xcd, 0x10]);
+    assert_eq!(core::reservesCall::SELECTOR, [0xd6, 0x6b, 0xd5, 0x24]);
+}
+
+#[test]
+fn alloy_filter_serializes_topics_as_topic0_or_values() {
+    let request = request();
+    let value = serde_json::to_value(backfill_filter(&request)).unwrap();
+    assert_eq!(
+        value["topics"][0].as_array().map(Vec::len),
+        Some(quote_critical_topics().len())
+    );
+}
+
+#[tokio::test]
+async fn read_only_provider_makes_no_hidden_or_retry_requests() {
+    let asserter = Asserter::new();
+    let provider = ProviderBuilder::default().connect_mocked_client(asserter.clone());
+    let client = RpcHttpClient::from_provider(provider);
+
+    assert!(
+        asserter.read_q().is_empty(),
+        "construction touched transport"
+    );
+    asserter.push_success(&Bytes::from_static(&[0x60, 0x00]));
+    asserter.push_failure_msg("must remain queued");
+    assert_eq!(
+        client
+            .get_code(Address::new([1_u8; 20]), "latest")
+            .await
+            .unwrap(),
+        Bytes::from_static(&[0x60, 0x00])
+    );
+    assert_eq!(
+        asserter.read_q().len(),
+        1,
+        "one read consumed more than one RPC response"
+    );
+}
+
+#[tokio::test]
+async fn backfill_consumes_exactly_one_rpc_response() {
+    let asserter = Asserter::new();
+    let provider = ProviderBuilder::default().connect_mocked_client(asserter.clone());
+    let client = RpcHttpClient::from_provider(provider);
+    asserter.push_success(&Vec::<alloy_rpc_types_eth::Log>::new());
+    asserter.push_failure_msg("must remain queued");
+
+    let logs = client
+        .get_logs(&request(), 8453, Commitment::Canonical)
+        .await
         .unwrap();
-    assert_eq!(
-        selector_address(SELECTOR_LANE, address),
-        "0xd1bacd10".to_owned() + &"0".repeat(63) + "1"
-    );
+    assert!(logs.is_empty());
+    assert_eq!(asserter.read_q().len(), 1);
 }
 
-#[test]
-fn decodes_five_reserve_words_and_rejects_wrong_width() {
-    let data = format!("0x{}", "00".repeat(32 * 5));
-    assert_eq!(decode_words(&data, 5).unwrap().len(), 5);
-    assert!(decode_words(&data, 4).is_err());
-}
-
-#[test]
-fn hashes_runtime_code_with_keccak256() {
-    assert_eq!(
-        keccak256(b""),
-        B256::new([
-            0xc5, 0xd2, 0x46, 0x01, 0x86, 0xf7, 0x23, 0x3c, 0x92, 0x7e, 0x7d, 0xb2, 0xdc, 0xc7,
-            0x03, 0xc0, 0xe5, 0x00, 0xb6, 0x53, 0xca, 0x82, 0x27, 0x3b, 0x7b, 0xfa, 0xd8, 0x04,
-            0x5d, 0x85, 0xa4, 0x70,
-        ])
-    );
+fn request() -> BackfillRequest {
+    BackfillRequest {
+        from_block: 10,
+        to_block: 20,
+        filter: ContractFilter {
+            address: Address::new([1_u8; 20]),
+            topics: quote_critical_topics().to_vec(),
+        },
+    }
 }

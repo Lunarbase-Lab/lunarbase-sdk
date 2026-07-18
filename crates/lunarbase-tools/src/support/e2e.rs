@@ -1,18 +1,19 @@
 //! Self-contained process-level E2E harness for the real indexer binary.
 
+use alloy_sol_types::{SolCall, SolValue};
 use axum::extract::State;
 use axum::routing::post;
 use axum::{Json, Router};
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
-use lunarbase_client_core::{TOPIC_LANE_ADDED, TOPIC_LANE_REMOVED};
-use lunarbase_math::{encode_lane_slot0, Address, LaneSlot0, B256, U256, WAD};
-use serde_json::{json, Value};
+use lunarbase_client_core::{TOPIC_LANE_ADDED, core};
+use lunarbase_math::{Address, B256, Bytes, LaneSlot0, U256, WAD, encode_lane_slot0};
+use serde_json::{Value, json};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::net::{TcpListener, TcpStream};
