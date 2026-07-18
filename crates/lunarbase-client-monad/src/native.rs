@@ -164,10 +164,10 @@ fn read_ring(
             EventPayloadResult::Ready(event) => event,
         };
         let normalized = convert_event(event, info, block_number, &filter, &mut block_log_index);
-        if let Some(event) = normalized {
-            if sender.blocking_send(Ok(event)).is_err() {
-                return;
-            }
+        if let Some(event) = normalized
+            && sender.blocking_send(Ok(event)).is_err()
+        {
+            return;
         }
     }
 }
