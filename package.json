@@ -1,7 +1,8 @@
 {
-  "name": "@lunarbase/math-workspace",
+  "name": "@lunarbase/sdk-workspace",
   "private": true,
   "version": "0.2.0",
+  "repository": "git+https://github.com/Lunarbase-Lab/lunarbase-sdk.git",
   "packageManager": "pnpm@9.15.0",
   "scripts": {
     "build": "pnpm --filter @lunarbase/math build && pnpm --filter @lunarbase/client-core build && pnpm --filter @lunarbase/client-base build && pnpm --filter @lunarbase/client-monad build && pnpm --filter @lunarbase/client-arbitrum build",

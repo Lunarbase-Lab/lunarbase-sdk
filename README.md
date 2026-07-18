@@ -1,5 +1,9 @@
 # LunarBase SDK
 
+The `lunarbase-sdk` repository is the complete LunarBase integration
+monorepository. `lunarbase-math` and `@lunarbase/math` remain the focused
+pure-math packages within the SDK.
+
 LunarBase SDK `0.2.0` provides bit-exact off-chain quote math, embeddable
 realtime clients, and a runnable Rust indexer.
 

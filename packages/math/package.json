@@ -3,6 +3,11 @@
   "version": "0.2.0",
   "description": "Bit-exact LunarBase quote math for TypeScript",
   "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Lunarbase-Lab/lunarbase-sdk.git",
+    "directory": "packages/math"
+  },
   "type": "module",
   "files": ["dist", "!dist/**/*.test.*"],
   "publishConfig": {"access": "public"},

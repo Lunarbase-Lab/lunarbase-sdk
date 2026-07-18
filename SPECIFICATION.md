@@ -11,7 +11,7 @@ cross-language fixtures.
 
 ## 1. Goal
 
-Build one repository at `/Users/ando/Documents/work/lunar_base/lunarbase-math` containing:
+Build one `lunarbase-sdk` repository containing:
 
 1. A pure Rust quoting library.
 2. A pure TypeScript quoting library.
