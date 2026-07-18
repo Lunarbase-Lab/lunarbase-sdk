@@ -1,239 +1,143 @@
+<div align="center">
+  <p><strong>◐ LUNARBASE</strong></p>
+  <p>
+    <a href="https://github.com/Lunarbase-Lab/lunarbase-sdk">Repository</a>
+    ·
+    <a href="https://spdx.org/licenses/MIT.html">MIT</a>
+    ·
+    <a href="https://spdx.org/licenses/Apache-2.0.html">Apache-2.0</a>
+  </p>
+</div>
+
 # LunarBase SDK
 
-The `lunarbase-sdk` repository is the complete LunarBase integration
-monorepository. `lunarbase-math` and `@lunarbase/math` remain the focused
-pure-math packages within the SDK.
+Repository: `lunarbase-sdk`
 
-LunarBase SDK `0.2.0` provides bit-exact off-chain quote math, embeddable
-realtime clients, and a runnable Rust indexer.
+## About
 
-The quote hot path is deliberately small:
+LunarBase SDK is the integration monorepository for bit-exact off-chain quote
+math, embeddable realtime clients, network data-source adapters, and the
+production-oriented Rust indexer.
+
+The hot path is intentionally small:
 
 ```text
 realtime stream → normalize → ordered reducer → in-memory state → quote/quoteMany
 ```
 
-RPC is used only for bootstrap and canonical recovery. Redis is optional and
-stores one full restart checkpoint. Neither dependency is touched while a
-quote is calculated.
+RPC and optional Redis checkpointing are limited to bootstrap and canonical
+recovery. Quote calculation performs no RPC, Redis access, state serialization,
+or full-state clone.
 
-## Packages
-
-Pure math:
-
-- `lunarbase-math` — Rust `alloy-primitives` `U256/U512` quote
-  implementation; it also re-exports the canonical `Address`, `B256`, and
-  `Bytes` types used by every Rust package.
-- `@lunarbase/math` — TypeScript `bigint` implementation.
-
-Embeddable clients:
-
-- `lunarbase-client-core` / `@lunarbase/client-core` — common source contract,
-  ordered reducer, in-memory runtime, and generic RPC/WS transport.
-- `lunarbase-client-base` / `@lunarbase/client-base` — Base
-  `pendingLogs + newHeads`.
-- `lunarbase-client-monad` / `@lunarbase/client-monad` — Monad parser WS; Rust
-  additionally supports the native execution-event ring on Linux.
-- `lunarbase-client-arbitrum` / `@lunarbase/client-arbitrum` — executed Nitro
-  logs and EVM execution-block context.
-
-Runnable component:
-
-- `lunarbase-indexer` — Rust HTTP service with optional Redis checkpointing,
-  Prometheus metrics, and graceful shutdown.
-
-There are no aggregate facade packages. Consumers depend only on core plus the
-network adapter they actually use.
-
-## Release status
-
-| Component | Status |
-| --- | --- |
-| Pure Rust/TypeScript math | parity-gated |
-| Common clients | ready for integration testing |
-| Base adapter | release candidate; stable after deployment live smoke |
-| Monad adapter | experimental until native-node soak |
-| Arbitrum adapter | experimental until Nitro-node validation |
-
-The math compatibility baseline is pinned to
+The current SDK version is `0.2.0`. Its math compatibility baseline is
 `lunarbase-contracts@24db47b866e8150a0d91cffd80efe49df85179b5:math-v1`.
 Canonical Solidity/Rust/TypeScript differential tests live in
 `lunarbase-contracts`.
 
-## Build and verify
+## Packages
 
-Prerequisites are stable Rust, Node.js 22+, pnpm, and Foundry for FFI tests.
-The Makefile falls back to Corepack when `pnpm` is not installed directly.
+| Layer                      | Rust                                                                      | TypeScript                                                         | Status              |
+| -------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------ | ------------------- |
+| Pure quote math            | [`lunarbase-math`](crates/lunarbase-math/README.md)                       | [`@lunarbase/math`](packages/math/README.md)                       | parity-gated        |
+| Common reducer and runtime | [`lunarbase-client-core`](crates/lunarbase-client-core/README.md)         | [`@lunarbase/client-core`](packages/client-core/README.md)         | integration-ready   |
+| Base adapter               | [`lunarbase-client-base`](crates/lunarbase-client-base/README.md)         | [`@lunarbase/client-base`](packages/client-base/README.md)         | release candidate   |
+| Monad adapter              | [`lunarbase-client-monad`](crates/lunarbase-client-monad/README.md)       | [`@lunarbase/client-monad`](packages/client-monad/README.md)       | experimental        |
+| Arbitrum adapter           | [`lunarbase-client-arbitrum`](crates/lunarbase-client-arbitrum/README.md) | [`@lunarbase/client-arbitrum`](packages/client-arbitrum/README.md) | experimental        |
+| Runnable indexer           | [`lunarbase-indexer`](crates/lunarbase-indexer/README.md)                 | —                                                                  | Base is the default |
+| Validation tooling         | [`lunarbase-tools`](crates/lunarbase-tools/README.md)                     | —                                                                  | internal            |
+
+There are no aggregate facade packages. Integrators depend only on the pure
+math, common client, and network adapter they use. Monad and Arbitrum packages
+must remain behind an explicit experimental gate until their node-level live
+validation is complete.
+
+## Who this repository is for
+
+- LunarBase partners embedding realtime off-chain quoting into an existing
+  Rust or TypeScript service.
+- Integrators that need a ready-to-run HTTP indexer with health, readiness, and
+  Prometheus endpoints.
+- Network-adapter authors connecting a new ordered data stream to the common
+  reducer.
+- LunarBase maintainers verifying bit-for-bit parity against the pinned
+  Solidity implementation.
+
+The repository is not a generic EVM indexer. Its state model, event reducer,
+fee profile, and recovery rules are specific to LunarBase quoting.
+
+## Quick installation
+
+### Workspace
+
+Prerequisites: stable Rust, Node.js 22+, Corepack or pnpm, and Foundry for the
+cross-language FFI suite.
 
 ```bash
-make build
-make test
+git clone git@github.com:Lunarbase-Lab/lunarbase-sdk.git
+cd lunarbase-sdk
+corepack pnpm install --frozen-lockfile
 make verify
 ```
 
-Useful focused commands:
+Use `make help` for focused build, test, process E2E, load, FFI, Docker, and
+Monad validation commands.
 
-```bash
-make test-runtime
-make test-process-e2e
-make load
-make ffi
-make monad-live-validate
+### Rust libraries
+
+Until crates are published, pin the repository revision and select only the
+packages needed by the application:
+
+```toml
+[dependencies]
+lunarbase-math = { git = "https://github.com/Lunarbase-Lab/lunarbase-sdk.git", rev = "<approved-revision>" }
+lunarbase-client-core = { git = "https://github.com/Lunarbase-Lab/lunarbase-sdk.git", rev = "<approved-revision>" }
+lunarbase-client-base = { git = "https://github.com/Lunarbase-Lab/lunarbase-sdk.git", rev = "<approved-revision>" }
 ```
 
-`make source-size-check` enforces the 500-line source-file limit.
+See the linked crate README files above for constructors, features, and
+runtime guarantees.
 
-## Run the indexer
+### TypeScript libraries
 
-Edit `config/base.toml`, especially `core`, `router`, code hash, and endpoints,
-then run:
+After the `0.2.0` packages are published to the configured npm registry:
+
+```bash
+pnpm add @lunarbase/math @lunarbase/client-core @lunarbase/client-base
+```
+
+Use `@lunarbase/client-monad` or `@lunarbase/client-arbitrum` only for
+experimental validation. Package-specific imports and examples are documented
+in each package README.
+
+### Runnable indexer
+
+Configure `config/base.toml`, especially the Core address, router, code hash,
+RPC, and realtime endpoints, then run:
 
 ```bash
 make run
 ```
 
-Equivalent explicit command:
+Base is the default feature. The service exposes `POST /v1/quote`,
+`POST /v1/quotes`, `GET /healthz`, `GET /readyz`, and `GET /metrics`. See the
+[`lunarbase-indexer` guide](crates/lunarbase-indexer/README.md) and
+[`PRODUCTION_RUNBOOK.md`](PRODUCTION_RUNBOOK.md) before deployment.
 
-```bash
-cargo run -p lunarbase-indexer \
-  --no-default-features --features base \
-  -- --config config/base.toml
-```
+---
 
-Base is the default feature. Experimental adapters can be built with
-`NETWORK=monad` or `NETWORK=arbitrum`. A native Monad deployment beside the
-node uses the Linux x86_64-only `monad-native` feature. Build its production
-image with `make docker-build-monad-native`; the explicit platform also makes
-the command work from an Apple Silicon development machine.
-
-Docker Compose starts the Base indexer and optional Redis acceleration:
-
-```bash
-make docker-up
-```
-
-Every process independently indexes and serves quotes. Run multiple replicas
-behind a load balancer without a writer lease or leader election.
-
-## HTTP API
-
-`POST /v1/quote`:
-
-```json
-{
-  "assetIn": "0x0000000000000000000000000000000000000001",
-  "assetOut": "0x0000000000000000000000000000000000000002",
-  "amount": "1000000000000000000",
-  "mode": "exactIn"
-}
-```
-
-The configured router, execution block, commitment, and freshness policy are
-runtime-owned. A successful response contains the exact cursor and execution
-block used:
-
-```json
-{
-  "cursor": {
-    "chainId": 8453,
-    "blockNumber": 123,
-    "executionBlockNumber": 123,
-    "blockHash": "0x...",
-    "commitment": "realtime",
-    "sourceSequence": null
-  },
-  "executionBlockNumber": 123,
-  "result": {
-    "status": "available",
-    "amountIn": "1000000000000000000",
-    "amountOut": "998000000000000000",
-    "feeAsset": "0x...",
-    "feeAmount": "2000000000000000",
-    "partnerFee": "0",
-    "treasuryFee": "2000000000000000"
-  }
-}
-```
-
-`POST /v1/quotes` accepts either an array or `{ "requests": [...] }`, with a
-maximum of 256 requests. Every result in the response is computed while
-holding one shared state snapshot and therefore has one cursor.
-
-Operational endpoints:
-
-- `GET /healthz` — process liveness.
-- `GET /readyz` — quote readiness and cursor.
-- `GET /metrics` — Prometheus exposition.
-
-A gap, reorg, removed log, queue overflow, invalid code hash, or failed state
-transition makes quote endpoints return `503` until canonical recovery
-completes.
-
-## Embedding
-
-TypeScript Base:
-
-```ts
-import { connectBase } from "@lunarbase/client-base";
-
-const client = await connectBase(config, optionalCheckpoint);
-const quote = client.quote(request);
-const batch = client.quoteMany(requests);
-await client.shutdown();
-```
-
-Rust clients expose matching high-level network constructors such as
-`lunarbase_client_base::connect_base`. The lower-level core constructor accepts
-a custom `ChainDataSource`:
-
-```rust
-let client = ConnectedQuoteClient::connect(config, source, checkpoint).await?;
-let quote = client.quote(&request)?;
-let batch = client.quote_many(&requests)?;
-client.shutdown().await;
-```
-
-Client-core does not depend on Redis. Applications may persist the explicit
-versioned checkpoint returned by `checkpoint()` using their own storage.
-
-## Redis fallback
-
-Redis belongs only to `lunarbase-indexer`. It uses one key:
-
-```text
-lunarbase:v3:{chainId}:{core}:{router}
-```
-
-The value is a versioned JSON DTO containing the complete quote state and has
-no TTL. Writes are atomic full-value `SET`s. There are no Streams, leases,
-dedup keys, fencing tokens, or standby roles.
-
-At startup the checkpoint is accepted only when schema/math version, code
-hash, deployment identity, router profile, and canonical block hash match.
-Failure or unavailability falls back to an RPC snapshot. Redis errors never
-revoke readiness of an already running process.
-
-## Observability and alerts
-
-Structured logs are emitted through `tracing`. `/metrics` includes readiness,
-head/execution block, lag, commitment, queue utilization, reconnect/gap/recovery
-counters, quote count/errors/latency, and checkpoint success/failure.
-
-Alert delivery is intentionally external. Example Prometheus rules are in
-`config/prometheus-alerts.yml`; route them through your existing Alertmanager.
-
-## Performance invariants
-
-- Rust hot state uses a short synchronous `RwLock`; quotes take a shared guard
-  and do not clone state.
-- TypeScript computes synchronously in one event-loop turn and does not expose
-  mutable state maps.
-- `Lane.slot0` remains one `U256`; mask/shift accessors avoid an extra bitfield
-  dependency.
-- Boundary views use native widths (`u128/u64/u32/u8/bool`) and convert to
-  `U256` only at packing or arithmetic boundaries.
-- Rust ABI words use Alloy `U256`, hashes/topics use `B256`, and byte payloads
-  use clone-cheap `Bytes`; the workspace does not maintain parallel EVM
-  primitive or Keccak implementations.
-- Queues and reorder buffers are bounded. Overflow fails closed and triggers a
-  complete canonical recovery.
+<div align="center">
+  <p>
+    <a href="ARCHITECTURE.md">Architecture</a>
+    ·
+    <a href="SPECIFICATION.md">Specification</a>
+    ·
+    <a href="PRODUCTION_RUNBOOK.md">Production runbook</a>
+  </p>
+  <p>
+    Licensed under
+    <a href="https://spdx.org/licenses/MIT.html">MIT</a>
+    or
+    <a href="https://spdx.org/licenses/Apache-2.0.html">Apache-2.0</a>.
+  </p>
+  <p>© LunarBase Lab</p>
+</div>
