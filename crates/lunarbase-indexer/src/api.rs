@@ -12,7 +12,7 @@ use lunarbase_client_core::{
     ChainCursor, ClientBatchQuote, ClientQuote, Commitment, ConnectedQuoteClient, IndexerError,
 };
 use lunarbase_math::{
-    Address, QuoteMode, QuoteOutcome, QuoteRequest, QuoteResult, UnavailableReason, U256,
+    Address, QuoteMode, QuoteOutcome, QuoteRequest, QuoteResult, UnavailableReason, B256, U256,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -281,7 +281,7 @@ fn available(result: QuoteResult) -> ApiQuoteOutcome {
     ApiQuoteOutcome::Available {
         amount_in: result.amount_in.to_string(),
         amount_out: result.amount_out.to_string(),
-        fee_asset: result.fee_asset.to_string(),
+        fee_asset: address_hex(result.fee_asset),
         fee_amount: result.fee_amount.to_string(),
         partner_fee: result.partner_fee.to_string(),
         treasury_fee: result.treasury_fee.to_string(),
@@ -292,11 +292,11 @@ fn unavailable(reason: UnavailableReason) -> ApiQuoteOutcome {
     let (reason, asset) = match reason {
         UnavailableReason::ZeroAmount => ("zeroAmount", None),
         UnavailableReason::EqualAssets => ("equalAssets", None),
-        UnavailableReason::MissingLane(asset) => ("missingLane", Some(asset.to_string())),
-        UnavailableReason::PausedLane(asset) => ("pausedLane", Some(asset.to_string())),
-        UnavailableReason::DelayedLane(asset) => ("delayedLane", Some(asset.to_string())),
-        UnavailableReason::ZeroPrice(asset) => ("zeroPrice", Some(asset.to_string())),
-        UnavailableReason::ZeroPrincipal(asset) => ("zeroPrincipal", Some(asset.to_string())),
+        UnavailableReason::MissingLane(asset) => ("missingLane", Some(address_hex(asset))),
+        UnavailableReason::PausedLane(asset) => ("pausedLane", Some(address_hex(asset))),
+        UnavailableReason::DelayedLane(asset) => ("delayedLane", Some(address_hex(asset))),
+        UnavailableReason::ZeroPrice(asset) => ("zeroPrice", Some(address_hex(asset))),
+        UnavailableReason::ZeroPrincipal(asset) => ("zeroPrincipal", Some(address_hex(asset))),
         UnavailableReason::ZeroAnchor => ("zeroAnchor", None),
         UnavailableReason::SpreadConsumesAnchor => ("spreadConsumesAnchor", None),
     };
@@ -333,12 +333,12 @@ fn parse_u256(value: &str) -> Result<U256, ApiInputError> {
     }
 }
 
-fn hash_hex(value: [u8; 32]) -> String {
-    let mut result = String::from("0x");
-    for byte in value {
-        result.push_str(&format!("{byte:02x}"));
-    }
-    result
+fn address_hex(value: Address) -> String {
+    format!("{value:#x}")
+}
+
+fn hash_hex(value: B256) -> String {
+    format!("{value:#x}")
 }
 
 #[cfg(test)]

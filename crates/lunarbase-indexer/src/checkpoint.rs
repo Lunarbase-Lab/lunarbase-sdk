@@ -1,7 +1,7 @@
 //! Best-effort v3 Redis checkpoint acceleration.
 
 use lunarbase_client_core::{ChainCursor, Checkpoint, Commitment, DeploymentConfig};
-use lunarbase_math::{Address, FeeProfile, LaneState, QuoteState, U256};
+use lunarbase_math::{Address, FeeProfile, LaneState, QuoteState, B256, U256};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, str::FromStr, time::Duration};
 use thiserror::Error;
@@ -34,7 +34,7 @@ impl RedisCheckpointStore {
         Self {
             url: url.into(),
             key: format!(
-                "lunarbase:v3:{}:{}:{}",
+                "lunarbase:v3:{}:{:#x}:{:#x}",
                 deployment.chain_id, deployment.core, deployment.router
             ),
         }
@@ -163,7 +163,7 @@ impl From<&Checkpoint> for CheckpointDto {
             .lanes
             .iter()
             .map(|(asset, lane)| LaneDto {
-                asset: asset.to_string(),
+                asset: address_hex(*asset),
                 slot0: lane.slot0.to_string(),
                 total_principal_amount: lane.total_principal_amount,
                 slippage_k_bps: lane.slippage_k_bps,
@@ -179,7 +179,7 @@ impl From<&Checkpoint> for CheckpointDto {
             .partner_fee_bps
             .iter()
             .map(|(asset, fee_bps)| PartnerFeeDto {
-                asset: asset.to_string(),
+                asset: address_hex(*asset),
                 fee_bps: *fee_bps,
             })
             .collect::<Vec<_>>();
@@ -189,11 +189,11 @@ impl From<&Checkpoint> for CheckpointDto {
             math_compatibility_version: checkpoint.math_compatibility_version.clone(),
             expected_runtime_code_hash: hash_hex(checkpoint.expected_runtime_code_hash),
             chain_id: checkpoint.chain_id,
-            core: checkpoint.core.to_string(),
-            router: checkpoint.router.to_string(),
+            core: address_hex(checkpoint.core),
+            router: address_hex(checkpoint.router),
             cursor: CursorDto::from(&checkpoint.cursor),
             state: StateDto {
-                cash: checkpoint.state.cash.to_string(),
+                cash: address_hex(checkpoint.state.cash),
                 lanes,
                 fee_profile: FeeProfileDto {
                     whitelisted: checkpoint.state.fee_profile.whitelisted,
@@ -307,11 +307,15 @@ fn parse_address(value: &str) -> Result<Address, CheckpointError> {
     Address::from_str(value).map_err(|error| CheckpointError::Invalid(error.to_string()))
 }
 
+fn address_hex(value: Address) -> String {
+    format!("{value:#x}")
+}
+
 fn parse_u256(value: &str) -> Result<U256, CheckpointError> {
     U256::from_str(value).map_err(|error| CheckpointError::Invalid(error.to_string()))
 }
 
-fn parse_hash(value: &str) -> Result<[u8; 32], CheckpointError> {
+fn parse_hash(value: &str) -> Result<B256, CheckpointError> {
     let value = value.strip_prefix("0x").unwrap_or(value);
     if value.len() != 64 {
         return Err(CheckpointError::Invalid("hash is not 32 bytes".into()));
@@ -321,15 +325,11 @@ fn parse_hash(value: &str) -> Result<[u8; 32], CheckpointError> {
         *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
             .map_err(|_| CheckpointError::Invalid("hash is not hexadecimal".into()))?;
     }
-    Ok(output)
+    Ok(B256::new(output))
 }
 
-fn hash_hex(value: [u8; 32]) -> String {
-    let mut result = String::from("0x");
-    for byte in value {
-        result.push_str(&format!("{byte:02x}"));
-    }
-    result
+fn hash_hex(value: B256) -> String {
+    format!("{value:#x}")
 }
 
 #[cfg(test)]
@@ -340,7 +340,7 @@ mod tests {
     fn address(suffix: u8) -> Address {
         let mut bytes = [0u8; 20];
         bytes[19] = suffix;
-        Address(bytes)
+        Address::new(bytes)
     }
 
     fn deployment() -> DeploymentConfig {
@@ -351,7 +351,7 @@ mod tests {
             router: address(2),
             expect_whitelisted: true,
             deployment_block: 10,
-            expected_runtime_code_hash: [3; 32],
+            expected_runtime_code_hash: B256::new([3; 32]),
             contract_compatibility_version: MATH_COMPATIBILITY_VERSION.into(),
             http_rpc_url: "http://rpc".into(),
             realtime_source: "ws://stream".into(),
@@ -372,7 +372,7 @@ mod tests {
         Checkpoint {
             schema_version: SCHEMA_VERSION,
             math_compatibility_version: MATH_COMPATIBILITY_VERSION.into(),
-            expected_runtime_code_hash: [3; 32],
+            expected_runtime_code_hash: B256::new([3; 32]),
             chain_id: 8453,
             core: address(1),
             router: address(2),
@@ -380,7 +380,7 @@ mod tests {
                 8453,
                 100,
                 99,
-                Some([7; 32]),
+                Some(B256::new([7; 32])),
                 Commitment::Canonical,
             ),
             state,

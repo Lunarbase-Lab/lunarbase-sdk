@@ -5,7 +5,7 @@ use lunarbase_client_core::{
     ContractFilter, ContractLog, DeploymentConfig, Network, RpcHttpBackend, RpcHttpClient,
     RpcSnapshotProvider, SourceError, SourceStream,
 };
-use lunarbase_math::{Address, U256};
+use lunarbase_math::{Address, B256};
 use monad_event_ring::{
     DecodedEventRing, EventDescriptorInfo, EventNextResult, EventPayloadResult, EventRingPath,
 };
@@ -193,7 +193,7 @@ fn convert_event(
         ExecEvent::BlockEnd(end) => Some(head(
             sequence,
             block_number?,
-            Some(end.eth_block_hash.bytes),
+            Some(B256::new(end.eth_block_hash.bytes)),
             Commitment::Realtime,
         )),
         ExecEvent::BlockQC(qc) => Some(head(
@@ -224,7 +224,7 @@ fn convert_event(
             topic_bytes,
             data_bytes,
         } => {
-            let address = Address(txn_log.address.bytes);
+            let address = Address::new(txn_log.address.bytes);
             let topics = decode_topics(&topic_bytes);
             if address != filter.address
                 || (!filter.topics.is_empty()
@@ -245,7 +245,7 @@ fn convert_event(
                 log_index,
                 address,
                 topics,
-                data: data_bytes.into_vec(),
+                data: data_bytes.into_vec().into(),
                 commitment: Commitment::Realtime,
             }))
         }
@@ -253,17 +253,14 @@ fn convert_event(
     }
 }
 
-fn decode_topics(bytes: &[u8]) -> Vec<U256> {
-    bytes
-        .chunks_exact(32)
-        .map(|chunk| U256::from_be_bytes::<32>(chunk.try_into().expect("exact topic word")))
-        .collect()
+fn decode_topics(bytes: &[u8]) -> Vec<B256> {
+    bytes.chunks_exact(32).map(B256::from_slice).collect()
 }
 
 fn head(
     sequence: u64,
     block_number: u64,
-    block_hash: Option<[u8; 32]>,
+    block_hash: Option<B256>,
     commitment: Commitment,
 ) -> ExecutionEvent {
     ExecutionEvent::Head(ExecutionHead {

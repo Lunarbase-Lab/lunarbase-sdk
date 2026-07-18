@@ -48,12 +48,12 @@ fn u256(value: &str) -> U256 {
 }
 
 fn address(value: &str) -> Address {
-    Address::from_hex(value).unwrap_or_else(|_| panic!("invalid address `{value}`"))
+    Address::from_str(value).unwrap_or_else(|_| panic!("invalid address `{value}`"))
 }
 
 fn address_word(value: Address) -> U256 {
     let mut bytes = [0u8; 32];
-    bytes[12..].copy_from_slice(&value.0);
+    bytes[12..].copy_from_slice(value.as_slice());
     U256::from_be_bytes::<32>(bytes)
 }
 

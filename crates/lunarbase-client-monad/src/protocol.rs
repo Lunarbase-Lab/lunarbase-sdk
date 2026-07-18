@@ -1,6 +1,6 @@
 use crate::execution::{ExecutionHead, ExecutionLog};
 use lunarbase_client_core::{Commitment, SourceError};
-use lunarbase_math::{Address, U256};
+use lunarbase_math::{Address, Bytes, B256};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -114,7 +114,7 @@ fn parse_log(value: &Value) -> Result<ExecutionLog, ParserProtocolError> {
         .and_then(Value::as_array)
         .ok_or(ParserProtocolError::MissingField("result.topics"))?
         .iter()
-        .map(parse_u256)
+        .map(parse_b256)
         .collect::<Result<Vec<_>, _>>()?;
     let data = parse_hex_bytes(
         value
@@ -145,18 +145,17 @@ fn parse_log(value: &Value) -> Result<ExecutionLog, ParserProtocolError> {
             field: "logIndex",
             detail: "does not fit u32".into(),
         })?,
-        address: Address::from_hex(
-            value
-                .get("address")
-                .and_then(Value::as_str)
-                .ok_or(ParserProtocolError::MissingField("result.address"))?,
-        )
-        .map_err(|error| ParserProtocolError::InvalidField {
-            field: "address",
-            detail: error.to_string(),
-        })?,
+        address: value
+            .get("address")
+            .and_then(Value::as_str)
+            .ok_or(ParserProtocolError::MissingField("result.address"))?
+            .parse::<Address>()
+            .map_err(|error| ParserProtocolError::InvalidField {
+                field: "address",
+                detail: error.to_string(),
+            })?,
         topics,
-        data,
+        data: Bytes::from(data),
         commitment: Commitment::Realtime,
     })
 }
@@ -174,7 +173,7 @@ fn parse_commitment(value: Option<&Value>) -> Result<Commitment, ParserProtocolE
     }
 }
 
-fn parse_block_tag_hash(value: &Value) -> Result<Option<[u8; 32]>, ParserProtocolError> {
+fn parse_block_tag_hash(value: &Value) -> Result<Option<B256>, ParserProtocolError> {
     let block_tag = value
         .get("header")
         .and_then(|header| header.get("blockTag"))
@@ -185,7 +184,7 @@ fn parse_block_tag_hash(value: &Value) -> Result<Option<[u8; 32]>, ParserProtoco
 fn parse_optional_hex32(
     value: Option<&Value>,
     field: &'static str,
-) -> Result<Option<[u8; 32]>, ParserProtocolError> {
+) -> Result<Option<B256>, ParserProtocolError> {
     match value {
         None | Some(Value::Null) => Ok(None),
         Some(value) => Ok(Some(parse_hex32(
@@ -198,23 +197,23 @@ fn parse_optional_hex32(
     }
 }
 
-fn parse_u256(value: &Value) -> Result<U256, ParserProtocolError> {
+fn parse_b256(value: &Value) -> Result<B256, ParserProtocolError> {
     let string = value.as_str().ok_or(ParserProtocolError::InvalidField {
         field: "topics",
         detail: "expected 32-byte hex string".into(),
     })?;
-    let bytes = parse_hex32(string, "topics")?;
-    Ok(U256::from_be_bytes::<32>(bytes))
+    parse_hex32(string, "topics")
 }
 
-fn parse_hex32(value: &str, field: &'static str) -> Result<[u8; 32], ParserProtocolError> {
+fn parse_hex32(value: &str, field: &'static str) -> Result<B256, ParserProtocolError> {
     let bytes = parse_hex_bytes(value, field)?;
-    bytes
+    let bytes = bytes
         .try_into()
         .map_err(|_| ParserProtocolError::InvalidField {
             field,
             detail: "expected exactly 32 bytes".into(),
-        })
+        })?;
+    Ok(B256::new(bytes))
 }
 
 fn parse_hex_bytes(value: &str, field: &'static str) -> Result<Vec<u8>, ParserProtocolError> {
@@ -281,7 +280,7 @@ mod tests {
         assert_eq!(head.commitment, Commitment::Finalized);
         assert_eq!(head.sequence, 123);
         assert_eq!(head.block_number, 456);
-        assert_eq!(head.block_hash, Some([0xabu8; 32]));
+        assert_eq!(head.block_hash, Some(B256::new([0xabu8; 32])));
     }
 
     #[test]
@@ -308,8 +307,11 @@ mod tests {
         assert_eq!(log.source_sub_index, 5);
         assert_eq!(log.transaction_index, 2);
         assert_eq!(log.log_index, 5);
-        assert_eq!(log.data, vec![1, 2]);
-        assert_eq!(log.topics, vec![U256::ONE]);
+        assert_eq!(log.data.as_ref(), [1, 2]);
+        assert_eq!(
+            log.topics,
+            vec![B256::new(lunarbase_math::U256::ONE.to_be_bytes::<32>())]
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@ use lunarbase_client_core::{
     quote_critical_topics, ClientConnectConfig, ContractFilter, DeploymentConfig, Network,
     MATH_COMPATIBILITY_VERSION,
 };
-use lunarbase_math::Address;
+use lunarbase_math::{Address, B256};
 use serde::Deserialize;
 use std::{net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
 use thiserror::Error;
@@ -159,7 +159,7 @@ fn parse_address(value: &str, field: &'static str) -> Result<Address, ConfigErro
     })
 }
 
-fn parse_hash(value: &str, field: &'static str) -> Result<[u8; 32], ConfigError> {
+fn parse_hash(value: &str, field: &'static str) -> Result<B256, ConfigError> {
     let value = value.strip_prefix("0x").unwrap_or(value);
     if value.len() != 64 {
         return invalid(field, "expected 32-byte hex");
@@ -173,7 +173,7 @@ fn parse_hash(value: &str, field: &'static str) -> Result<[u8; 32], ConfigError>
             }
         })?;
     }
-    Ok(output)
+    Ok(B256::new(output))
 }
 
 fn invalid<T>(field: &'static str, detail: &str) -> Result<T, ConfigError> {

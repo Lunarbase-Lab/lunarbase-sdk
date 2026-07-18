@@ -3,14 +3,14 @@
 use lunarbase_client_core::{
     ChainCursor, ChainUpdate, Commitment, ContractLog, SourceError, SourceStream,
 };
-use lunarbase_math::{Address, U256};
+use lunarbase_math::{Address, Bytes, B256};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Block lifecycle notification from the parser or native ring.
 pub struct ExecutionHead {
     pub sequence: u64,
     pub block_number: u64,
-    pub block_hash: Option<[u8; 32]>,
+    pub block_hash: Option<B256>,
     pub commitment: Commitment,
 }
 
@@ -20,12 +20,12 @@ pub struct ExecutionLog {
     pub sequence: u64,
     pub source_sub_index: u32,
     pub block_number: u64,
-    pub block_hash: Option<[u8; 32]>,
+    pub block_hash: Option<B256>,
     pub transaction_index: u32,
     pub log_index: u32,
     pub address: Address,
-    pub topics: Vec<U256>,
-    pub data: Vec<u8>,
+    pub topics: Vec<B256>,
+    pub data: Bytes,
     pub commitment: Commitment,
 }
 

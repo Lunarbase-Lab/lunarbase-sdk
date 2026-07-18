@@ -11,15 +11,14 @@ description = "Network-independent LunarBase reducer and realtime client runtime
 workspace = true
 
 [dependencies]
+alloy-primitives.workspace = true
 async-stream.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
 lunarbase-math.workspace = true
-ruint.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tiny-keccak.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true

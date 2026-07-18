@@ -103,8 +103,11 @@ pub(super) async fn assert_checkpoint(redis_url: &str) -> Result<(), E2eError> {
     let url = redis_url.to_owned();
     let key = format!(
         "lunarbase:v3:8453:{}:{}",
-        Address::from_hex(CORE).map_err(|error| E2eError::Scenario(error.to_string()))?,
-        Address::from_hex(ROUTER).map_err(|error| E2eError::Scenario(error.to_string()))?,
+        CORE.parse::<Address>()
+            .map_err(|error| E2eError::Scenario(error.to_string()))?,
+        ROUTER
+            .parse::<Address>()
+            .map_err(|error| E2eError::Scenario(error.to_string()))?,
     );
     let (exists, ttl) =
         tokio::task::spawn_blocking(move || -> Result<(bool, i64), redis::RedisError> {

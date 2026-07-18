@@ -111,7 +111,7 @@ impl RpcHttpClient {
         let result = self
             .call(
                 "eth_call",
-                json!([{"to": to.to_hex(), "data": data}, block_tag]),
+                json!([{"to": format!("{to:#x}"), "data": data}, block_tag]),
             )
             .await?;
         result
@@ -123,7 +123,7 @@ impl RpcHttpClient {
     /// Fetches contract runtime bytecode at a block tag for code-hash checks.
     pub async fn get_code(&self, address: Address, block_tag: &str) -> Result<Vec<u8>, RpcError> {
         let result = self
-            .call("eth_getCode", json!([address.to_hex(), block_tag]))
+            .call("eth_getCode", json!([format!("{address:#x}"), block_tag]))
             .await?;
         parse_hex_bytes(
             result.as_str().ok_or_else(|| {
@@ -176,7 +176,7 @@ impl RpcHttpClient {
         let mut filter = serde_json::Map::new();
         filter.insert(
             "address".into(),
-            Value::String(request.filter.address.to_hex()),
+            Value::String(format!("{:#x}", request.filter.address)),
         );
         filter.insert(
             "fromBlock".into(),

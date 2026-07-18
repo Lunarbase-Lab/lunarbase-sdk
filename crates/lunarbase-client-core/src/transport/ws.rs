@@ -15,7 +15,7 @@ use crate::{
 };
 use async_stream::stream;
 use futures_util::{SinkExt, StreamExt};
-use lunarbase_math::U256;
+use lunarbase_math::B256;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -351,7 +351,7 @@ impl ChainDataSource for WsRpcBackend {
 #[derive(Clone, Debug)]
 struct WsHead {
     cursor: ChainCursor,
-    parent_hash: Option<[u8; 32]>,
+    parent_hash: Option<B256>,
 }
 
 fn head_discontinuity(previous: &WsHead, next: &WsHead, progressive: bool) -> bool {
@@ -371,7 +371,10 @@ fn head_discontinuity(previous: &WsHead, next: &WsHead, progressive: bool) -> bo
 
 fn subscription_request(id: u64, filter: &ContractFilter, kind: &str) -> String {
     let mut options = serde_json::Map::new();
-    options.insert("address".into(), Value::String(filter.address.to_hex()));
+    options.insert(
+        "address".into(),
+        Value::String(format!("{:#x}", filter.address)),
+    );
     if !filter.topics.is_empty() {
         options.insert(
             "topics".into(),
@@ -459,10 +462,7 @@ fn parse_hex_u64_value(value: Option<&Value>, field: &str) -> Result<u64, RpcErr
     u64::from_str_radix(value, 16).map_err(|_| RpcError::Invalid(format!("{field} is invalid")))
 }
 
-fn parse_optional_hash_value(
-    value: Option<&Value>,
-    field: &str,
-) -> Result<Option<[u8; 32]>, RpcError> {
+fn parse_optional_hash_value(value: Option<&Value>, field: &str) -> Result<Option<B256>, RpcError> {
     match value {
         None | Some(Value::Null) => Ok(None),
         Some(value) => {
@@ -480,18 +480,13 @@ fn parse_optional_hash_value(
                 *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16)
                     .map_err(|_| RpcError::Invalid(format!("{field} is invalid hex")))?;
             }
-            Ok(Some(output))
+            Ok(Some(B256::new(output)))
         }
     }
 }
 
-fn word_hex(value: U256) -> String {
-    let mut result = String::with_capacity(66);
-    result.push_str("0x");
-    for byte in value.to_be_bytes::<32>() {
-        result.push_str(&format!("{byte:02x}"));
-    }
-    result
+fn word_hex(value: B256) -> String {
+    format!("{value:#x}")
 }
 
 #[cfg(test)]

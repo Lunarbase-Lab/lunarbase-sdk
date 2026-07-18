@@ -238,7 +238,7 @@ fn subscription_request(
     let params = match core_filter {
         Some((core, filter)) => {
             let mut options = serde_json::Map::new();
-            options.insert("address".into(), Value::String(core.to_hex()));
+            options.insert("address".into(), Value::String(format!("{core:#x}")));
             if !filter.topics.is_empty() {
                 options.insert(
                     "topics".into(),
@@ -258,8 +258,8 @@ fn subscription_request(
     json!({"jsonrpc":"2.0", "id":id, "method":"subscribe", "params":params}).to_string()
 }
 
-fn word_hex(value: lunarbase_math::U256) -> String {
-    format!("0x{value:064x}")
+fn word_hex(value: lunarbase_math::B256) -> String {
+    format!("{value:#x}")
 }
 
 #[cfg(test)]
@@ -268,7 +268,9 @@ mod tests {
 
     #[test]
     fn subscription_request_matches_parser_shape() {
-        let address = Address::from_hex("0x0000000000000000000000000000000000000001").unwrap();
+        let address = "0x0000000000000000000000000000000000000001"
+            .parse::<Address>()
+            .unwrap();
         let message = subscription_request(
             1,
             "logs",
@@ -276,7 +278,9 @@ mod tests {
                 &address,
                 &ContractFilter {
                     address,
-                    topics: vec![lunarbase_math::U256::ONE],
+                    topics: vec![lunarbase_math::B256::new(
+                        lunarbase_math::U256::ONE.to_be_bytes::<32>(),
+                    )],
                 },
             )),
         );

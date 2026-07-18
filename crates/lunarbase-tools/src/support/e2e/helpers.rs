@@ -44,8 +44,8 @@ pub(super) fn words(values: &[U256]) -> String {
     output
 }
 
-pub(super) fn word_hex(value: U256) -> String {
-    format!("0x{value:064x}")
+pub(super) fn word_hex(value: B256) -> String {
+    format!("{value:#x}")
 }
 
 pub(super) fn block_hash(block: u64) -> String {

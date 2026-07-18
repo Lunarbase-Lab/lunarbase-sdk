@@ -2,8 +2,8 @@
 
 use crate::*;
 use lunarbase_math::{
-    encode_lane_slot0, Address, LaneSlot0, LaneState, QuoteMode, QuoteRequest, QuoteState, U256,
-    WAD,
+    encode_lane_slot0, Address, LaneSlot0, LaneState, QuoteMode, QuoteRequest, QuoteState, B256,
+    U256, WAD,
 };
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -12,10 +12,10 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, Notify};
 
-const CASH: Address = Address([1; 20]);
-const ASSET: Address = Address([2; 20]);
-const ROUTER: Address = Address([3; 20]);
-const CORE: Address = Address([4; 20]);
+const CASH: Address = Address::new([1; 20]);
+const ASSET: Address = Address::new([2; 20]);
+const ROUTER: Address = Address::new([3; 20]);
+const CORE: Address = Address::new([4; 20]);
 
 struct MockSource {
     snapshot_calls: AtomicUsize,
@@ -195,7 +195,7 @@ fn realtime_source_sequence_allows_progressive_hashes_at_one_height() {
     first.source_sequence = Some(1);
     reducer.bootstrap(first);
     let mut second = cursor(101, Commitment::Realtime);
-    second.block_hash = Some([2; 32]);
+    second.block_hash = Some(B256::new([2; 32]));
     second.source_sequence = Some(2);
 
     reducer.observe_head(second.clone()).unwrap();
@@ -211,7 +211,7 @@ fn config() -> ClientConnectConfig {
             router: ROUTER,
             expect_whitelisted: true,
             deployment_block: 1,
-            expected_runtime_code_hash: [7; 32],
+            expected_runtime_code_hash: B256::new([7; 32]),
             contract_compatibility_version: MATH_COMPATIBILITY_VERSION.into(),
             http_rpc_url: "http://unused".into(),
             realtime_source: "ws://unused".into(),
@@ -242,7 +242,7 @@ fn snapshot(block: u64) -> BootstrapSnapshot {
     BootstrapSnapshot {
         state,
         cursor: cursor(block, Commitment::Finalized),
-        runtime_code_hash: [7; 32],
+        runtime_code_hash: B256::new([7; 32]),
     }
 }
 
@@ -251,7 +251,7 @@ fn cursor(block: u64, commitment: Commitment) -> ChainCursor {
         chain_id: 8453,
         block_number: block,
         execution_block_number: block,
-        block_hash: Some([1; 32]),
+        block_hash: Some(B256::new([1; 32])),
         transaction_index: None,
         log_index: None,
         source_sequence: None,

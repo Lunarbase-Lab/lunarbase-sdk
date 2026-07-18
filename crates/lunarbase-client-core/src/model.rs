@@ -1,6 +1,6 @@
 //! Provider-independent runtime model shared by every network adapter.
 
-use lunarbase_math::{Address, QuoteState, U256};
+use lunarbase_math::{Address, Bytes, QuoteState, B256, U256};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -48,7 +48,7 @@ pub struct ChainCursor {
     pub chain_id: u64,
     pub block_number: u64,
     pub execution_block_number: u64,
-    pub block_hash: Option<[u8; 32]>,
+    pub block_hash: Option<B256>,
     pub transaction_index: Option<u32>,
     pub log_index: Option<u32>,
     pub source_sequence: Option<u64>,
@@ -62,7 +62,7 @@ impl ChainCursor {
     pub fn block(
         chain_id: u64,
         block_number: u64,
-        block_hash: Option<[u8; 32]>,
+        block_hash: Option<B256>,
         commitment: Commitment,
     ) -> Self {
         Self::execution_block(chain_id, block_number, block_number, block_hash, commitment)
@@ -73,7 +73,7 @@ impl ChainCursor {
         chain_id: u64,
         block_number: u64,
         execution_block_number: u64,
-        block_hash: Option<[u8; 32]>,
+        block_hash: Option<B256>,
         commitment: Commitment,
     ) -> Self {
         Self {
@@ -109,8 +109,8 @@ impl ChainCursor {
 /// Normalized EVM contract log independent of its transport.
 pub struct ContractLog {
     pub address: Address,
-    pub topics: Vec<U256>,
-    pub data: Vec<u8>,
+    pub topics: Vec<B256>,
+    pub data: Bytes,
     pub removed: bool,
     pub cursor: ChainCursor,
 }
@@ -134,7 +134,7 @@ pub enum ChainUpdate {
 /// Address/topic filter applied before event decoding.
 pub struct ContractFilter {
     pub address: Address,
-    pub topics: Vec<U256>,
+    pub topics: Vec<B256>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -180,7 +180,7 @@ pub struct DeploymentConfig {
     pub router: Address,
     pub expect_whitelisted: bool,
     pub deployment_block: u64,
-    pub expected_runtime_code_hash: [u8; 32],
+    pub expected_runtime_code_hash: B256,
     pub contract_compatibility_version: String,
     pub http_rpc_url: String,
     pub realtime_source: String,
@@ -215,7 +215,7 @@ impl DeploymentConfig {
 pub struct Checkpoint {
     pub schema_version: u16,
     pub math_compatibility_version: String,
-    pub expected_runtime_code_hash: [u8; 32],
+    pub expected_runtime_code_hash: B256,
     pub chain_id: u64,
     pub core: Address,
     pub router: Address,

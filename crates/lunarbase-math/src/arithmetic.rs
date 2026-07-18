@@ -1,4 +1,4 @@
-use crate::{MathError, U256};
+use crate::{MathError, U256, U512};
 
 pub const WAD: U256 = U256::from_limbs([1_000_000_000_000_000_000, 0, 0, 0]);
 pub const BPS: U256 = U256::from_limbs([1_000_000, 0, 0, 0]);
@@ -46,7 +46,7 @@ pub fn full_mul_div_down(x: U256, y: U256, denominator: U256) -> Result<U256, Ma
         return Err(MathError::DivisionByZero);
     }
     let product = x.widening_mul::<256, 4, 512, 8>(y);
-    let quotient = product / ruint::aliases::U512::from(denominator);
+    let quotient = product / U512::from(denominator);
     U256::checked_from_limbs_slice(quotient.as_limbs()).ok_or(MathError::Overflow)
 }
 /// Computes `ceil(x * y / denominator)` using a full 512-bit intermediate.
@@ -65,12 +65,10 @@ pub fn full_mul_div_up(x: U256, y: U256, denominator: U256) -> Result<U256, Math
         return Err(MathError::DivisionByZero);
     }
     let product = x.widening_mul::<256, 4, 512, 8>(y);
-    let denominator_512 = ruint::aliases::U512::from(denominator);
+    let denominator_512 = U512::from(denominator);
     let (quotient, remainder) = product.div_rem(denominator_512);
-    let quotient = if remainder != ruint::aliases::U512::ZERO {
-        quotient
-            .checked_add(ruint::aliases::U512::ONE)
-            .ok_or(MathError::Overflow)?
+    let quotient = if remainder != U512::ZERO {
+        quotient.checked_add(U512::ONE).ok_or(MathError::Overflow)?
     } else {
         quotient
     };

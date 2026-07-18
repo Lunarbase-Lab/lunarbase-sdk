@@ -4,12 +4,12 @@ use super::client::{
 };
 use super::codec::{
     checked_u128, checked_u32, decode_address_word, decode_bool, decode_word, decode_words,
-    hex_encode, keccak256, selector_address, selector_two_addresses,
+    keccak256, selector_address, selector_two_addresses,
 };
 use super::RpcHttpClient;
 use crate::protocol::abi::{lane_discovery_topics, TOPIC_LANE_ADDED, TOPIC_LANE_REMOVED};
 use crate::{BackfillRequest, BootstrapSnapshot, Commitment, DeploymentConfig, SourceError};
-use lunarbase_math::{Address, LaneState, QuoteState};
+use lunarbase_math::{Address, LaneState, QuoteState, B256};
 use std::{collections::BTreeSet, sync::Arc};
 
 #[derive(Clone)]
@@ -57,7 +57,7 @@ impl RpcSnapshotProvider {
         }
         let code = self.rpc.get_code(config.core, &self.snapshot_tag).await?;
         let runtime_code_hash = keccak256(&code);
-        if config.expected_runtime_code_hash != [0; 32]
+        if config.expected_runtime_code_hash != B256::ZERO
             && runtime_code_hash != config.expected_runtime_code_hash
         {
             return Err(SourceError::Unavailable(
@@ -216,10 +216,7 @@ impl RpcSnapshotProvider {
             let Some(asset_word) = log.topics.get(1).copied() else {
                 continue;
             };
-            let asset = decode_address_word(&format!(
-                "0x{}",
-                hex_encode(&asset_word.to_be_bytes::<32>())
-            ))?;
+            let asset = decode_address_word(&format!("{asset_word:#x}"))?;
             if topic0 == TOPIC_LANE_ADDED {
                 discovered.insert(asset);
             } else if topic0 == TOPIC_LANE_REMOVED {

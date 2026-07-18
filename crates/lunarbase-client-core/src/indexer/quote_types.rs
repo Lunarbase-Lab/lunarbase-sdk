@@ -1,5 +1,5 @@
 use crate::{ChainCursor, Commitment};
-use lunarbase_math::QuoteOutcome;
+use lunarbase_math::{QuoteOutcome, B256};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// One quote plus the exact state cursor used for evaluation.
@@ -7,7 +7,7 @@ pub struct ClientQuote {
     pub outcome: QuoteOutcome,
     pub cursor: ChainCursor,
     pub execution_block_number: u64,
-    pub contract_code_hash: [u8; 32],
+    pub contract_code_hash: B256,
     pub math_compatibility_version: String,
 }
 
@@ -17,7 +17,7 @@ pub struct ClientBatchQuote {
     pub outcomes: Vec<QuoteOutcome>,
     pub cursor: ChainCursor,
     pub execution_block_number: u64,
-    pub contract_code_hash: [u8; 32],
+    pub contract_code_hash: B256,
     pub math_compatibility_version: String,
 }
 
@@ -28,6 +28,6 @@ pub struct IndexerHealth {
     pub commitment: Commitment,
     pub cursor: Option<ChainCursor>,
     pub execution_block_number: Option<u64>,
-    pub code_hash: [u8; 32],
+    pub code_hash: B256,
     pub math_compatibility_version: String,
 }

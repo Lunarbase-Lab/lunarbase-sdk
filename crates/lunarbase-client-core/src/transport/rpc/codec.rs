@@ -1,8 +1,8 @@
 use super::RpcError;
 use crate::{ChainCursor, Commitment, ContractLog, SourceError};
-use lunarbase_math::{Address, U256};
+use alloy_primitives::keccak256 as alloy_keccak256;
+use lunarbase_math::{Address, B256, U256};
 use serde_json::Value;
-use tiny_keccak::{Hasher, Keccak};
 
 /// Decodes one standard Ethereum JSON-RPC log into the normalized model.
 pub fn parse_rpc_log(
@@ -22,16 +22,15 @@ pub fn parse_rpc_log(
             let value = value
                 .as_str()
                 .ok_or_else(|| RpcError::Invalid("log topic is not a string".into()))?;
-            decode_word(value, 0)
+            parse_hash(value, "log.topic")
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let address = Address::from_hex(
-        object
-            .get("address")
-            .and_then(Value::as_str)
-            .ok_or_else(|| RpcError::Invalid("log address is missing".into()))?,
-    )
-    .map_err(|error| RpcError::Invalid(error.to_string()))?;
+    let address = object
+        .get("address")
+        .and_then(Value::as_str)
+        .ok_or_else(|| RpcError::Invalid("log address is missing".into()))?
+        .parse::<Address>()
+        .map_err(|error| RpcError::Invalid(error.to_string()))?;
     let data = object
         .get("data")
         .and_then(Value::as_str)
@@ -40,7 +39,7 @@ pub fn parse_rpc_log(
     Ok(ContractLog {
         address,
         topics,
-        data: parse_hex_bytes(data)?,
+        data: parse_hex_bytes(data)?.into(),
         removed: object
             .get("removed")
             .and_then(Value::as_bool)
@@ -69,16 +68,20 @@ pub fn parse_rpc_log(
 }
 
 pub(super) fn selector_address(selector: &str, address: Address) -> String {
-    format!("{selector}{}{}", "0".repeat(24), &address.to_hex()[2..])
+    format!(
+        "{selector}{}{}",
+        "0".repeat(24),
+        hex_encode(address.as_slice())
+    )
 }
 
 pub(super) fn selector_two_addresses(selector: &str, first: Address, second: Address) -> String {
     format!(
         "{selector}{}{}{}{}",
         "0".repeat(24),
-        &first.to_hex()[2..],
+        hex_encode(first.as_slice()),
         "0".repeat(24),
-        &second.to_hex()[2..]
+        hex_encode(second.as_slice())
     )
 }
 
@@ -106,19 +109,24 @@ pub(super) fn parse_hex_u64(value: Option<&Value>, field: &str) -> Result<u64, R
 pub(super) fn parse_optional_hash(
     value: Option<&Value>,
     field: &str,
-) -> Result<Option<[u8; 32]>, RpcError> {
+) -> Result<Option<B256>, RpcError> {
     match value {
         None | Some(Value::Null) => Ok(None),
         Some(value) => {
             let value = value
                 .as_str()
                 .ok_or_else(|| RpcError::Invalid(format!("{field} is not a string")))?;
-            let bytes = parse_hex_bytes(value)?;
-            Ok(Some(bytes.try_into().map_err(|_| {
-                RpcError::Invalid(format!("{field} is not 32 bytes"))
-            })?))
+            parse_hash(value, field).map(Some)
         }
     }
+}
+
+pub(super) fn parse_hash(value: &str, field: &str) -> Result<B256, RpcError> {
+    let bytes = parse_hex_bytes(value)?;
+    let bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| RpcError::Invalid(format!("{field} is not 32 bytes")))?;
+    Ok(B256::new(bytes))
 }
 
 pub(super) fn decode_words(value: &str, expected: usize) -> Result<Vec<U256>, RpcError> {
@@ -147,7 +155,7 @@ pub(super) fn decode_address_word(value: &str) -> Result<Address, RpcError> {
     if word[..12].iter().any(|byte| *byte != 0) {
         return Err(RpcError::Invalid("ABI address word is not padded".into()));
     }
-    Ok(Address(word[12..].try_into().expect("20-byte address")))
+    Ok(Address::from_slice(&word[12..]))
 }
 
 pub(super) fn decode_bool(value: U256) -> Result<bool, SourceError> {
@@ -175,8 +183,8 @@ pub(super) fn hex_u64(value: u64) -> String {
     format!("0x{value:x}")
 }
 
-pub(super) fn word_hex(value: U256) -> String {
-    format!("0x{}", hex_encode(&value.to_be_bytes::<32>()))
+pub(super) fn word_hex(value: B256) -> String {
+    format!("{value:#x}")
 }
 
 pub(super) fn hex_encode(bytes: &[u8]) -> String {
@@ -187,10 +195,6 @@ pub(super) fn hex_encode(bytes: &[u8]) -> String {
     result
 }
 
-pub(super) fn keccak256(bytes: &[u8]) -> [u8; 32] {
-    let mut output = [0u8; 32];
-    let mut hasher = Keccak::v256();
-    hasher.update(bytes);
-    hasher.finalize(&mut output);
-    output
+pub(super) fn keccak256(bytes: &[u8]) -> B256 {
+    alloy_keccak256(bytes)
 }

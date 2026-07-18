@@ -1,21 +1,23 @@
 use super::*;
-use lunarbase_math::Address;
+use lunarbase_math::{Address, B256, U256};
 
 #[test]
 fn builds_standard_logs_subscription() {
-    let address = Address::from_hex("0x0000000000000000000000000000000000000001").unwrap();
+    let address = "0x0000000000000000000000000000000000000001"
+        .parse::<Address>()
+        .unwrap();
     let request = subscription_request(
         1,
         &ContractFilter {
             address,
-            topics: vec![U256::ONE],
+            topics: vec![B256::new(U256::ONE.to_be_bytes::<32>())],
         },
         "logs",
     );
     let value: Value = serde_json::from_str(&request).unwrap();
     assert_eq!(value["method"], "eth_subscribe");
     assert_eq!(value["params"][0], "logs");
-    assert_eq!(value["params"][1]["address"], address.to_hex());
+    assert_eq!(value["params"][1]["address"], format!("{address:#x}"));
     assert_eq!(value["params"][1]["topics"][0], format!("0x{:064x}", 1));
 }
 
@@ -26,8 +28,8 @@ fn parses_heads_and_preserves_parent_hash() {
     let value = json!({"number":"0x2a","hash":hash,"parentHash":parent});
     let head = parse_ws_head(&value, 42161).unwrap();
     assert_eq!(head.cursor.block_number, 42);
-    assert_eq!(head.cursor.block_hash, Some([0x11; 32]));
-    assert_eq!(head.parent_hash, Some([0x22; 32]));
+    assert_eq!(head.cursor.block_hash, Some(B256::new([0x11; 32])));
+    assert_eq!(head.parent_hash, Some(B256::new([0x22; 32])));
     assert_eq!(head.cursor.commitment, Commitment::Realtime);
 }
 

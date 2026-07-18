@@ -6,7 +6,7 @@ use axum::{Json, Router};
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use lunarbase_client_core::{TOPIC_LANE_ADDED, TOPIC_LANE_REMOVED};
-use lunarbase_math::{encode_lane_slot0, Address, LaneSlot0, U256, WAD};
+use lunarbase_math::{encode_lane_slot0, Address, LaneSlot0, B256, U256, WAD};
 use serde_json::{json, Value};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};

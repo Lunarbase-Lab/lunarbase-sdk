@@ -180,7 +180,7 @@ mod tests {
         let log = ChainUpdate::Log(crate::ContractLog {
             address: lunarbase_math::Address::ZERO,
             topics: vec![],
-            data: vec![],
+            data: lunarbase_math::Bytes::new(),
             removed: false,
             cursor: cursor(10, Some(3), Some(7)),
         });

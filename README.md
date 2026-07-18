@@ -17,7 +17,9 @@ quote is calculated.
 
 Pure math:
 
-- `lunarbase-math` — Rust `U256/U512` quote implementation.
+- `lunarbase-math` — Rust `alloy-primitives` `U256/U512` quote
+  implementation; it also re-exports the canonical `Address`, `B256`, and
+  `Bytes` types used by every Rust package.
 - `@lunarbase/math` — TypeScript `bigint` implementation.
 
 Embeddable clients:
@@ -226,5 +228,8 @@ Alert delivery is intentionally external. Example Prometheus rules are in
   dependency.
 - Boundary views use native widths (`u128/u64/u32/u8/bool`) and convert to
   `U256` only at packing or arithmetic boundaries.
+- Rust ABI words use Alloy `U256`, hashes/topics use `B256`, and byte payloads
+  use clone-cheap `Bytes`; the workspace does not maintain parallel EVM
+  primitive or Keccak implementations.
 - Queues and reorder buffers are bounded. Overflow fails closed and triggers a
   complete canonical recovery.

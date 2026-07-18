@@ -8,7 +8,7 @@ fn n(value: u64) -> U256 {
 fn address(value: u8) -> Address {
     let mut bytes = [0u8; 20];
     bytes[19] = value;
-    Address(bytes)
+    Address::new(bytes)
 }
 
 #[test]
@@ -32,6 +32,30 @@ fn slot0_round_trips_boundaries_and_reserved_bits() {
 fn hot_lane_state_is_compact_and_raw() {
     assert!(std::mem::size_of::<LaneState>() <= 64);
     assert_eq!(lane_slot0_price(U256::MAX), (U256::ONE << 112) - U256::ONE);
+}
+
+#[test]
+fn alloy_evm_primitives_use_canonical_hex_json() {
+    let address = Address::repeat_byte(0x11);
+    let hash = B256::repeat_byte(0x22);
+    let bytes = Bytes::from(vec![0xab, 0xcd]);
+
+    assert_eq!(
+        serde_json::to_value(address).unwrap(),
+        serde_json::json!("0x1111111111111111111111111111111111111111")
+    );
+    assert_eq!(
+        format!("{address:#x}"),
+        "0x1111111111111111111111111111111111111111"
+    );
+    assert_eq!(
+        serde_json::to_value(hash).unwrap(),
+        serde_json::json!("0x2222222222222222222222222222222222222222222222222222222222222222")
+    );
+    assert_eq!(
+        serde_json::to_value(bytes).unwrap(),
+        serde_json::json!("0xabcd")
+    );
 }
 
 #[test]
@@ -204,9 +228,9 @@ fn shared_quote_vectors_match_rust_math() {
         serde_json::from_str(include_str!("../../../fixtures/quote-vectors.json"))
             .expect("valid quote vector fixture");
     for vector in fixture.vectors {
-        let cash = Address::from_hex(&vector.cash).unwrap();
-        let asset_in = Address::from_hex(&vector.asset_in).unwrap();
-        let asset_out = Address::from_hex(&vector.asset_out).unwrap();
+        let cash = Address::from_str(&vector.cash).unwrap();
+        let asset_in = Address::from_str(&vector.asset_in).unwrap();
+        let asset_out = Address::from_str(&vector.asset_out).unwrap();
         let mut state = QuoteState {
             cash,
             ..Default::default()
@@ -283,7 +307,7 @@ fn shared_quote_vectors_match_rust_math() {
             assert_eq!(actual.amount_out, golden_u256(&expected.amount_out));
             assert_eq!(
                 actual.fee_asset,
-                Address::from_hex(&expected.fee_asset).unwrap()
+                Address::from_str(&expected.fee_asset).unwrap()
             );
             assert_eq!(actual.fee_amount, golden_u256(&expected.fee_amount));
             assert_eq!(actual.partner_fee, golden_u256(&expected.partner_fee));

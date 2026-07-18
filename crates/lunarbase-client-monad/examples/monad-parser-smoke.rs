@@ -8,7 +8,7 @@ use std::env;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ws_url = env::var("LUNARBASE_MONAD_PARSER_WS")
         .unwrap_or_else(|_| "ws://127.0.0.1:8080/ws/subscriptions".into());
-    let core = Address::from_hex(&env::var("LUNARBASE_CORE")?)?;
+    let core = env::var("LUNARBASE_CORE")?.parse::<Address>()?;
     let chain_id = env::var("LUNARBASE_CHAIN_ID")
         .ok()
         .and_then(|value| value.parse().ok())

@@ -1,70 +1,32 @@
 //! Core ABI topic constants and strict event decoding.
 
 use crate::{ContractLog, LogDecodeError, QuoteEvent};
-use lunarbase_math::{Address, U256};
-pub const TOPIC_LANE_ADDED: U256 = U256::from_limbs([
-    0x5f7f3f6aa0cef958,
-    0x19cf1efd4ca60800,
-    0xbfb8a26449add9f9,
-    0x1c61848d54083be4,
-]);
-pub const TOPIC_LANE_REMOVED: U256 = U256::from_limbs([
-    0xaccc3161633fba98,
-    0x69f22fbf60106608,
-    0xb3ee43f36a9a2921,
-    0xdaa054a7d9aa74d7,
-]);
-const TOPIC_LANE_UPDATED: U256 = U256::from_limbs([
-    0xf38d972cb383bd7a,
-    0x979499cc1b29f4b9,
-    0x1f2d79e1e95c193e,
-    0x4c5259bbfc22dbcf,
-]);
-const TOPIC_SLIPPAGE_K_SET: U256 = U256::from_limbs([
-    0x78ad1a26812cbdf8,
-    0x72a8a3f8a46b1572,
-    0x55640ccd104ec7b9,
-    0x284eddda3b700798,
-]);
-const TOPIC_PARTNER_INFO_SET: U256 = U256::from_limbs([
-    0xc70f004efe67a377,
-    0x3278b9d1cbe75191,
-    0xc9ea329d96736edf,
-    0x5155dfcae951816e,
-]);
-const TOPIC_PARTNER_FEE_SET: U256 = U256::from_limbs([
-    0x046da64dff565b85,
-    0x1b10a11aa8d27879,
-    0x8e949e200b6e4729,
-    0x785135eb22f3bdb0,
-]);
-const TOPIC_WHITELIST_SET: U256 = U256::from_limbs([
-    0x1e02427f7dff4f51,
-    0x297155cb2f71cb77,
-    0xc4d0dded489d7450,
-    0x0aa5ec5ffdc7f6f9,
-]);
-const TOPIC_BLACKLIST_MULTIPLIER_SET: U256 = U256::from_limbs([
-    0x740e93667bacd186,
-    0x31124d1041cafe00,
-    0x47294bcb091d6860,
-    0xa15057886e6ebcdf,
-]);
-const TOPIC_DEPOSIT_EXECUTED: U256 = U256::from_limbs([
-    0xc1db56a8d05ba20f,
-    0x8a364beebc215a2e,
-    0x28f3f10fa362b793,
-    0x9fb4891ffe3e11f4,
-]);
-const TOPIC_WITHDRAWAL_EXECUTED: U256 = U256::from_limbs([
-    0x14da8f4c9c35d251,
-    0x5b7119723568feda,
-    0x283dc08891a94ba4,
-    0x722ca578dc087cbf,
-]);
+use alloy_primitives::b256;
+use lunarbase_math::{Address, B256, U256};
+
+pub const TOPIC_LANE_ADDED: B256 =
+    b256!("1c61848d54083be4bfb8a26449add9f919cf1efd4ca608005f7f3f6aa0cef958");
+pub const TOPIC_LANE_REMOVED: B256 =
+    b256!("daa054a7d9aa74d7b3ee43f36a9a292169f22fbf60106608accc3161633fba98");
+const TOPIC_LANE_UPDATED: B256 =
+    b256!("4c5259bbfc22dbcf1f2d79e1e95c193e979499cc1b29f4b9f38d972cb383bd7a");
+const TOPIC_SLIPPAGE_K_SET: B256 =
+    b256!("284eddda3b70079855640ccd104ec7b972a8a3f8a46b157278ad1a26812cbdf8");
+const TOPIC_PARTNER_INFO_SET: B256 =
+    b256!("5155dfcae951816ec9ea329d96736edf3278b9d1cbe75191c70f004efe67a377");
+const TOPIC_PARTNER_FEE_SET: B256 =
+    b256!("785135eb22f3bdb08e949e200b6e47291b10a11aa8d27879046da64dff565b85");
+const TOPIC_WHITELIST_SET: B256 =
+    b256!("0aa5ec5ffdc7f6f9c4d0dded489d7450297155cb2f71cb771e02427f7dff4f51");
+const TOPIC_BLACKLIST_MULTIPLIER_SET: B256 =
+    b256!("a15057886e6ebcdf47294bcb091d686031124d1041cafe00740e93667bacd186");
+const TOPIC_DEPOSIT_EXECUTED: B256 =
+    b256!("9fb4891ffe3e11f428f3f10fa362b7938a364beebc215a2ec1db56a8d05ba20f");
+const TOPIC_WITHDRAWAL_EXECUTED: B256 =
+    b256!("722ca578dc087cbf283dc08891a94ba45b7119723568feda14da8f4c9c35d251");
 
 /// Returns the `LaneAdded` and `LaneRemoved` topic0 values used for discovery.
-pub fn lane_discovery_topics() -> [U256; 2] {
+pub fn lane_discovery_topics() -> [B256; 2] {
     [TOPIC_LANE_ADDED, TOPIC_LANE_REMOVED]
 }
 
@@ -72,7 +34,7 @@ pub fn lane_discovery_topics() -> [U256; 2] {
 ///
 /// `SwapExecuted` is deliberately excluded because quotes derive their state
 /// from lane, fee-profile, deposit, and withdrawal transitions.
-pub fn quote_critical_topics() -> [U256; 10] {
+pub fn quote_critical_topics() -> [B256; 10] {
     [
         TOPIC_LANE_ADDED,
         TOPIC_LANE_REMOVED,
@@ -86,14 +48,12 @@ pub fn quote_critical_topics() -> [U256; 10] {
         TOPIC_WITHDRAWAL_EXECUTED,
     ]
 }
-fn topic_address(topic: U256) -> Result<Address, LogDecodeError> {
-    let bytes = topic.to_be_bytes::<32>();
+fn topic_address(topic: B256) -> Result<Address, LogDecodeError> {
+    let bytes = topic.as_slice();
     if bytes[..12].iter().any(|byte| *byte != 0) {
         return Err(LogDecodeError::InvalidAddress);
     }
-    Ok(Address(
-        bytes[12..].try_into().expect("20-byte address slice"),
-    ))
+    Ok(Address::from_slice(&bytes[12..]))
 }
 
 fn data_word(data: &[u8], index: usize) -> Result<U256, LogDecodeError> {
@@ -115,7 +75,7 @@ fn expect_data_words(data: &[u8], count: usize) -> Result<(), LogDecodeError> {
     Ok(())
 }
 
-fn expect_topics(topics: &[U256], count: usize) -> Result<(), LogDecodeError> {
+fn expect_topics(topics: &[B256], count: usize) -> Result<(), LogDecodeError> {
     if topics.len() != count {
         return Err(LogDecodeError::InvalidTopicCount);
     }
@@ -226,37 +186,37 @@ mod tests {
     #[test]
     fn position_topics_match_the_pinned_solidity_abi() {
         assert_eq!(
-            format!("{TOPIC_DEPOSIT_EXECUTED:#066x}"),
+            format!("{TOPIC_DEPOSIT_EXECUTED:#x}"),
             "0x9fb4891ffe3e11f428f3f10fa362b7938a364beebc215a2ec1db56a8d05ba20f"
         );
         assert_eq!(
-            format!("{TOPIC_WITHDRAWAL_EXECUTED:#066x}"),
+            format!("{TOPIC_WITHDRAWAL_EXECUTED:#x}"),
             "0x722ca578dc087cbf283dc08891a94ba45b7119723568feda14da8f4c9c35d251"
         );
     }
 
     #[test]
     fn withdrawal_accepts_the_complete_four_word_payload() {
-        let asset = Address([0x11; 20]);
+        let asset = Address::new([0x11; 20]);
         let mut asset_topic = [0_u8; 32];
-        asset_topic[12..].copy_from_slice(&asset.0);
+        asset_topic[12..].copy_from_slice(asset.as_slice());
         let mut data = vec![0_u8; 4 * 32];
         data[31] = 7;
         let log = ContractLog {
-            address: Address([0x22; 20]),
+            address: Address::new([0x22; 20]),
             topics: vec![
                 TOPIC_WITHDRAWAL_EXECUTED,
-                U256::ONE,
-                U256::from(2_u8),
-                U256::from_be_bytes(asset_topic),
+                B256::from(U256::ONE.to_be_bytes::<32>()),
+                B256::from(U256::from(2_u8).to_be_bytes::<32>()),
+                B256::from(asset_topic),
             ],
-            data,
+            data: data.into(),
             removed: false,
             cursor: ChainCursor {
                 chain_id: 1,
                 block_number: 1,
                 execution_block_number: 1,
-                block_hash: Some([0x33; 32]),
+                block_hash: Some(B256::new([0x33; 32])),
                 transaction_index: Some(0),
                 log_index: Some(0),
                 source_sequence: Some(1),

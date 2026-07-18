@@ -11,7 +11,7 @@ description = "Pure U256 LunarBase off-chain quote math"
 workspace = true
 
 [dependencies]
-ruint.workspace = true
+alloy-primitives.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

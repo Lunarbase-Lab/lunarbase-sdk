@@ -42,7 +42,7 @@ impl QuoteIndexer {
         snapshot: BootstrapSnapshot,
         mut buffered: Vec<ChainUpdate>,
     ) -> Result<(), IndexerError> {
-        if self.deployment.expected_runtime_code_hash != [0; 32]
+        if self.deployment.expected_runtime_code_hash != lunarbase_math::B256::ZERO
             && snapshot.runtime_code_hash != self.deployment.expected_runtime_code_hash
         {
             return Err(IndexerError::CodeHashMismatch);
