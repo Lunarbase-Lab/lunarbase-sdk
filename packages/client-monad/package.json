@@ -16,6 +16,9 @@
     "@lunarbase/math": "workspace:*",
     "ox": "0.14.30"
   },
+  "devDependencies": {
+    "typescript": "6.0.3"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

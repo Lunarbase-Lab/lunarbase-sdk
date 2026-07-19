@@ -12,8 +12,10 @@
   "files": ["dist", "!dist/**/*.test.*"],
   "publishConfig": {"access": "public"},
   "dependencies": {
-    "@lunarbase/client-core": "workspace:*",
-    "@lunarbase/math": "workspace:*"
+    "@lunarbase/client-core": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3"
   },
   "exports": {
     ".": {

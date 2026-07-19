@@ -11,15 +11,15 @@ importers:
       '@eslint/js':
         specifier: 10.0.1
         version: 10.0.1(eslint@10.7.0)
-      '@types/node':
-        specifier: 22.20.1
-        version: 22.20.1
       eslint:
         specifier: 10.7.0
         version: 10.7.0
       prettier:
         specifier: 3.9.5
         version: 3.9.5
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
       typescript-eslint:
         specifier: 8.64.0
         version: 8.64.0(eslint@10.7.0)(typescript@6.0.3)
@@ -41,24 +41,33 @@ importers:
       zod:
         specifier: 4.3.6
         version: 4.3.6
+    devDependencies:
+      '@types/node':
+        specifier: 22.20.1
+        version: 22.20.1
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
 
   packages/client-arbitrum:
     dependencies:
       '@lunarbase/client-core':
         specifier: workspace:*
         version: link:../client-core
-      '@lunarbase/math':
-        specifier: workspace:*
-        version: link:../math
+    devDependencies:
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
 
   packages/client-base:
     dependencies:
       '@lunarbase/client-core':
         specifier: workspace:*
         version: link:../client-core
-      '@lunarbase/math':
-        specifier: workspace:*
-        version: link:../math
+    devDependencies:
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
 
   packages/client-core:
     dependencies:
@@ -71,6 +80,10 @@ importers:
       viem:
         specifier: 2.55.2
         version: 2.55.2(typescript@6.0.3)(zod@4.3.6)
+    devDependencies:
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
 
   packages/client-monad:
     dependencies:
@@ -83,12 +96,20 @@ importers:
       ox:
         specifier: 0.14.30
         version: 0.14.30(typescript@6.0.3)(zod@4.3.6)
+    devDependencies:
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
 
   packages/math:
     dependencies:
       ox:
         specifier: 0.14.30
         version: 0.14.30(typescript@6.0.3)(zod@4.3.6)
+    devDependencies:
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
 
 packages:
 
