@@ -1,25 +1,21 @@
 //! Background source and single-writer reducer tasks for a connected client.
 
 use crate::indexer::client::publish;
-use crate::indexer::client_types::{ClientConnectConfig, ClientRuntimeStats};
+use crate::indexer::client_types::{ClientConnectConfig, ClientRuntimeStats, SharedQuoteState};
 use crate::indexer::engine::QuoteIndexer;
 use crate::indexer::errors::{ClientRuntimeEvent, IndexerError};
 use crate::model::{BackfillRequest, ChainUpdate, ContractFilter};
 use crate::source::{ChainDataSource, SourceStream};
 use crate::state::reducer::ReducerError;
 use futures_util::StreamExt;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
-use tokio::sync::{Notify, broadcast, mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::sleep;
 
-/// Shared readiness, event, and counter handles used by the reducer task.
+/// Operational event and counter handles used by the reducer task.
 pub(super) struct ReducerRuntime {
-    /// Notifies waiters whenever canonical recovery publishes ready state.
-    pub ready: Arc<Notify>,
-    /// Lock-free fast readiness check performed before taking a quote read guard.
-    pub available: Arc<AtomicBool>,
     /// Bounded broadcast channel for operational lifecycle events.
     pub events: broadcast::Sender<ClientRuntimeEvent>,
     /// Lock-free runtime counters updated by the single reducer task.
@@ -85,7 +81,7 @@ async fn consume_stream(
     sender: &mpsc::Sender<ChainUpdate>,
     cancel: &mut watch::Receiver<bool>,
     events: &broadcast::Sender<ClientRuntimeEvent>,
-    stats: &Arc<ClientRuntimeStats>,
+    stats: &ClientRuntimeStats,
 ) -> bool {
     loop {
         let item = tokio::select! {
@@ -136,23 +132,26 @@ async fn send_update(
     sender: &mpsc::Sender<ChainUpdate>,
     cancel: &mut watch::Receiver<bool>,
     update: ChainUpdate,
-    stats: &Arc<ClientRuntimeStats>,
+    stats: &ClientRuntimeStats,
 ) -> bool {
-    let sent = tokio::select! {
+    let permit = tokio::select! {
         biased;
         () = cancellation_requested(cancel) => return false,
-        result = sender.send(update) => result,
+        result = sender.reserve() => result,
     };
-    if sent.is_ok() {
-        stats.queue_depth.fetch_add(1, Ordering::Relaxed);
-        true
-    } else {
-        false
-    }
+    let Ok(permit) = permit else {
+        return false;
+    };
+
+    // Increment before publishing: `Permit::send` is synchronous, so the
+    // receiver cannot decrement the counter before this update becomes visible.
+    stats.queue_depth.fetch_add(1, Ordering::Relaxed);
+    permit.send(update);
+    true
 }
 
 pub(super) async fn reducer_loop<S>(
-    indexer: Arc<RwLock<QuoteIndexer>>,
+    shared: Arc<SharedQuoteState>,
     source: Arc<S>,
     config: ClientConnectConfig,
     mut updates: mpsc::Receiver<ChainUpdate>,
@@ -175,12 +174,13 @@ pub(super) async fn reducer_loop<S>(
             return;
         };
         runtime.stats.queue_depth.fetch_sub(1, Ordering::Relaxed);
-        let result = indexer
+        let result = shared
+            .indexer
             .write()
             .map_err(|_| IndexerError::LockPoisoned)
             .and_then(|mut indexer| indexer.apply_core_update(update));
         if let Err(error) = result {
-            runtime.available.store(false, Ordering::Release);
+            shared.available.store(false, Ordering::Release);
             runtime.stats.gaps.fetch_add(1, Ordering::Relaxed);
             publish(
                 &runtime.events,
@@ -189,7 +189,7 @@ pub(super) async fn reducer_loop<S>(
                 },
             );
             if !recover_until_ready(
-                &indexer,
+                shared.as_ref(),
                 source.as_ref(),
                 &config,
                 &mut updates,
@@ -205,7 +205,7 @@ pub(super) async fn reducer_loop<S>(
 }
 
 async fn recover_until_ready<S: ChainDataSource>(
-    indexer: &Arc<RwLock<QuoteIndexer>>,
+    shared: &SharedQuoteState,
     source: &S,
     config: &ClientConnectConfig,
     updates: &mut mpsc::Receiver<ChainUpdate>,
@@ -226,15 +226,16 @@ async fn recover_until_ready<S: ChainDataSource>(
                     runtime.stats.queue_depth.fetch_sub(1, Ordering::Relaxed);
                     buffered.push(update);
                 }
-                let result = indexer
+                let result = shared
+                    .indexer
                     .write()
                     .map_err(|_| IndexerError::LockPoisoned)
                     .and_then(|mut indexer| indexer.bootstrap_normalized(snapshot, buffered));
                 match result {
                     Ok(()) => {
                         runtime.stats.recoveries.fetch_add(1, Ordering::Relaxed);
-                        runtime.available.store(true, Ordering::Release);
-                        runtime.ready.notify_waiters();
+                        shared.available.store(true, Ordering::Release);
+                        shared.ready.notify_waiters();
                         publish(&runtime.events, ClientRuntimeEvent::RecoveryCompleted);
                         return true;
                     }
@@ -323,5 +324,36 @@ async fn sleep_or_cancel(delay: Duration, cancel: &mut watch::Receiver<bool>) ->
         biased;
         () = cancellation_requested(cancel) => true,
         () = sleep(delay) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::send_update;
+    use crate::indexer::client_types::ClientRuntimeStats;
+    use crate::model::ChainUpdate;
+    use std::sync::atomic::Ordering;
+    use tokio::sync::{mpsc, watch};
+
+    #[tokio::test]
+    async fn queue_depth_is_incremented_before_delivery() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let (_cancel_sender, mut cancel) = watch::channel(false);
+        let stats = ClientRuntimeStats::new(1);
+        let update = ChainUpdate::Gap {
+            cursor: None,
+            reason: "counter-order test".into(),
+        };
+
+        let (sent, observed_depth) =
+            tokio::join!(send_update(&sender, &mut cancel, update, &stats), async {
+                receiver.recv().await.expect("update is delivered");
+                stats.queue_depth.load(Ordering::Relaxed)
+            },);
+
+        assert!(sent);
+        assert_eq!(observed_depth, 1);
+        stats.queue_depth.fetch_sub(1, Ordering::Relaxed);
+        assert_eq!(stats.queue_depth.load(Ordering::Relaxed), 0);
     }
 }

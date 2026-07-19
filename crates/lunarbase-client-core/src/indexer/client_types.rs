@@ -1,9 +1,14 @@
-//! Connection configuration and observable runtime counters.
+//! Connection configuration and shared runtime synchronization state.
 
+use crate::indexer::engine::QuoteIndexer;
 use crate::indexer::errors::IndexerError;
 use crate::model::{ContractFilter, DeploymentConfig, SourceError};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{
+    RwLock,
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+};
 use std::time::Duration;
+use tokio::sync::Notify;
 
 #[derive(Clone, Debug)]
 /// Connection and bounded-queue settings for an embeddable client.
@@ -36,7 +41,37 @@ impl ClientConnectConfig {
 }
 
 #[derive(Debug)]
+/// Quote state and its publication gate shared by the client and reducer.
+///
+/// Each field retains its own synchronization semantics. Wrapping the
+/// structure in one `Arc` shares ownership without introducing a structure-wide
+/// lock.
+pub(super) struct SharedQuoteState {
+    /// Hot quote state protected by short shared-read and exclusive-write guards.
+    pub(super) indexer: RwLock<QuoteIndexer>,
+    /// Lock-free readiness gate checked before entering the quote read path.
+    pub(super) available: AtomicBool,
+    /// Notification used to wake commitment/readiness waiters after recovery.
+    pub(super) ready: Notify,
+}
+
+impl SharedQuoteState {
+    /// Publishes an initially ready quote indexer.
+    pub(super) fn new(indexer: QuoteIndexer) -> Self {
+        Self {
+            indexer: RwLock::new(indexer),
+            available: AtomicBool::new(true),
+            ready: Notify::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
 /// Lock-free counters shared by the source pump, reducer, and metrics reader.
+///
+/// Individual fields are atomic, but [`Self::snapshot`] is intentionally not a
+/// transactional view across all counters. This is sufficient for operational
+/// metrics and avoids a lock on the ingestion path.
 pub(super) struct ClientRuntimeStats {
     /// Number of normalized updates currently waiting for the reducer.
     pub(super) queue_depth: AtomicUsize,
@@ -53,6 +88,7 @@ pub(super) struct ClientRuntimeStats {
 }
 
 impl ClientRuntimeStats {
+    /// Creates zeroed counters for one bounded reducer queue.
     pub(super) fn new(queue_capacity: usize) -> Self {
         Self {
             queue_depth: AtomicUsize::new(0),
@@ -64,6 +100,7 @@ impl ClientRuntimeStats {
         }
     }
 
+    /// Samples each counter independently using relaxed atomic loads.
     pub(super) fn snapshot(&self) -> ClientRuntimeStatsSnapshot {
         ClientRuntimeStatsSnapshot {
             queue_depth: self.queue_depth.load(Ordering::Relaxed),

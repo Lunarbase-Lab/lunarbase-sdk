@@ -1,7 +1,7 @@
 //! Connected client lifecycle, quote access, and graceful shutdown.
 
 use crate::indexer::client_types::{
-    ClientConnectConfig, ClientRuntimeStats, ClientRuntimeStatsSnapshot,
+    ClientConnectConfig, ClientRuntimeStats, ClientRuntimeStatsSnapshot, SharedQuoteState,
 };
 use crate::indexer::engine::QuoteIndexer;
 use crate::indexer::errors::{ClientRuntimeEvent, IndexerError};
@@ -10,10 +10,10 @@ use crate::indexer::tasks::{ReducerRuntime, recover_checkpoint, reducer_loop, so
 use crate::model::{Checkpoint, Commitment, SourceError};
 use crate::source::ChainDataSource;
 use lunarbase_math::state::{QuoteRequest, QuoteState};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, Notify, broadcast, mpsc, watch};
+use tokio::sync::{Mutex, broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
@@ -22,24 +22,16 @@ const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Fully connected client with a synchronous, shared-read quote path.
 pub struct ConnectedQuoteClient {
-    /// Shared hot state; quotes take a read lock and the reducer takes a short
-    /// write lock while applying an ordered update.
-    indexer: Arc<RwLock<QuoteIndexer>>,
-    /// Notification used by bootstrap and recovery waiters when readiness is
-    /// restored.
-    ready: Arc<Notify>,
-    /// Lock-free readiness flag checked before entering the quote read path.
-    available: Arc<AtomicBool>,
+    /// Shared quote state, lock-free readiness gate, and recovery notification.
+    shared: Arc<SharedQuoteState>,
     /// Cooperative cancellation signal shared by all background tasks.
     cancel: watch::Sender<bool>,
     /// Bounded fan-out channel for operational runtime events.
     runtime_events: broadcast::Sender<ClientRuntimeEvent>,
     /// Shared lock-free counters exposed through `runtime_stats`.
     stats: Arc<ClientRuntimeStats>,
-    /// Reducer task handle retained so shutdown can await task completion.
-    stop: Mutex<Option<JoinHandle<()>>>,
-    /// Source subscription task handle retained to prevent detached work.
-    pump: Mutex<Option<JoinHandle<()>>>,
+    /// Sole ownership of both background task handles during shutdown.
+    tasks: Mutex<RuntimeTasks>,
 }
 
 impl ConnectedQuoteClient {
@@ -106,34 +98,29 @@ impl ConnectedQuoteClient {
         }
         initial.apply_handoff(buffered)?;
 
-        let indexer = Arc::new(RwLock::new(initial));
-        let ready = Arc::new(Notify::new());
-        let available = Arc::new(AtomicBool::new(true));
-        ready.notify_waiters();
-        let stop = tokio::spawn(reducer_loop(
-            indexer.clone(),
+        let shared = Arc::new(SharedQuoteState::new(initial));
+        let reducer = tokio::spawn(reducer_loop(
+            shared.clone(),
             source,
             config,
             updates_rx,
             cancel.subscribe(),
             ReducerRuntime {
-                ready: ready.clone(),
-                available: available.clone(),
                 events: runtime_events.clone(),
                 stats: stats.clone(),
             },
         ));
-        let pump = bootstrap_pump.disarm();
+        let source_pump = bootstrap_pump.disarm();
 
         Ok(Self {
-            indexer,
-            ready,
-            available,
+            shared,
             cancel,
             runtime_events,
             stats,
-            stop: Mutex::new(Some(stop)),
-            pump: Mutex::new(pump),
+            tasks: Mutex::new(RuntimeTasks {
+                reducer: Some(reducer),
+                source_pump,
+            }),
         })
     }
 
@@ -145,7 +132,7 @@ impl ConnectedQuoteClient {
     /// Waits until the current state reaches at least `minimum` commitment.
     pub async fn await_ready(&self, minimum: Commitment) -> Result<(), IndexerError> {
         loop {
-            let notified = self.ready.notified();
+            let notified = self.shared.ready.notified();
             let health = self.health()?;
             if health.ready && health.commitment >= minimum {
                 return Ok(());
@@ -159,7 +146,8 @@ impl ConnectedQuoteClient {
         if !self.is_ready() {
             return Err(IndexerError::NotReady);
         }
-        self.indexer
+        self.shared
+            .indexer
             .read()
             .map_err(|_| IndexerError::LockPoisoned)?
             .quote(request)
@@ -170,7 +158,8 @@ impl ConnectedQuoteClient {
         if !self.is_ready() {
             return Err(IndexerError::NotReady);
         }
-        self.indexer
+        self.shared
+            .indexer
             .read()
             .map_err(|_| IndexerError::LockPoisoned)?
             .quote_many(requests)
@@ -179,6 +168,7 @@ impl ConnectedQuoteClient {
     /// Returns current readiness and execution context.
     pub fn health(&self) -> Result<IndexerHealth, IndexerError> {
         let mut health = self
+            .shared
             .indexer
             .read()
             .map_err(|_| IndexerError::LockPoisoned)?
@@ -190,6 +180,7 @@ impl ConnectedQuoteClient {
     /// Returns a durable checkpoint. The clone is explicit and off hot path.
     pub fn checkpoint(&self) -> Result<Option<Checkpoint>, IndexerError> {
         Ok(self
+            .shared
             .indexer
             .read()
             .map_err(|_| IndexerError::LockPoisoned)?
@@ -198,7 +189,7 @@ impl ConnectedQuoteClient {
 
     /// Returns the atomic readiness gate used by HTTP probes.
     pub fn is_ready(&self) -> bool {
-        self.available.load(Ordering::Acquire)
+        self.shared.available.load(Ordering::Acquire)
     }
 
     /// Samples ingestion and recovery counters.
@@ -214,21 +205,24 @@ impl ConnectedQuoteClient {
     /// Stops workers within `deadline` and guarantees no detached tasks.
     pub async fn shutdown_gracefully(&self, deadline: Duration) -> Result<(), IndexerError> {
         let started = Instant::now();
-        self.available.store(false, Ordering::Release);
+        self.shared.available.store(false, Ordering::Release);
         let _ = self.cancel.send(true);
-        self.indexer
+        self.shared
+            .indexer
             .write()
             .map_err(|_| IndexerError::LockPoisoned)?
             .shutdown();
-        self.ready.notify_waiters();
+        self.shared.ready.notify_waiters();
 
-        let mut stop = self.stop.lock().await.take();
-        let mut pump = self.pump.lock().await.take();
+        let (mut reducer, mut source_pump) = {
+            let mut tasks = self.tasks.lock().await;
+            (tasks.reducer.take(), tasks.source_pump.take())
+        };
         let joined = timeout(deadline, async {
-            if let Some(task) = stop.as_mut() {
+            if let Some(task) = reducer.as_mut() {
                 collect_join("reducer", task.await, &self.runtime_events)?;
             }
-            if let Some(task) = pump.as_mut() {
+            if let Some(task) = source_pump.as_mut() {
                 collect_join("source-pump", task.await, &self.runtime_events)?;
             }
             Ok::<(), IndexerError>(())
@@ -238,18 +232,18 @@ impl ConnectedQuoteClient {
             Ok(result) => result,
             Err(_) => {
                 publish(&self.runtime_events, ClientRuntimeEvent::ShutdownTimedOut);
-                if let Some(task) = &stop {
+                if let Some(task) = &reducer {
                     task.abort();
                 }
-                if let Some(task) = &pump {
+                if let Some(task) = &source_pump {
                     task.abort();
                 }
                 let remaining = deadline.saturating_sub(started.elapsed());
                 let _ = timeout(remaining, async {
-                    if let Some(task) = stop.as_mut() {
+                    if let Some(task) = reducer.as_mut() {
                         let _ = task.await;
                     }
-                    if let Some(task) = pump.as_mut() {
+                    if let Some(task) = source_pump.as_mut() {
                         let _ = task.await;
                     }
                 })
@@ -258,6 +252,14 @@ impl ConnectedQuoteClient {
             }
         }
     }
+}
+
+/// Background tasks owned and joined as one runtime lifecycle unit.
+struct RuntimeTasks {
+    /// Ordered reducer task.
+    reducer: Option<JoinHandle<()>>,
+    /// Realtime source subscription task.
+    source_pump: Option<JoinHandle<()>>,
 }
 
 /// Cancels and aborts the subscription pump when bootstrap is dropped.
@@ -328,15 +330,13 @@ pub(super) fn publish(sender: &broadcast::Sender<ClientRuntimeEvent>, event: Cli
 impl Drop for ConnectedQuoteClient {
     fn drop(&mut self) {
         let _ = self.cancel.send(true);
-        if let Ok(stop) = self.stop.try_lock()
-            && let Some(task) = stop.as_ref()
-        {
-            task.abort();
-        }
-        if let Ok(pump) = self.pump.try_lock()
-            && let Some(task) = pump.as_ref()
-        {
-            task.abort();
+        if let Ok(tasks) = self.tasks.try_lock() {
+            if let Some(task) = tasks.reducer.as_ref() {
+                task.abort();
+            }
+            if let Some(task) = tasks.source_pump.as_ref() {
+                task.abort();
+            }
         }
     }
 }
