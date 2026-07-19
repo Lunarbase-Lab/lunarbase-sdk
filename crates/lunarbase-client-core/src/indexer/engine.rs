@@ -1,10 +1,15 @@
-use super::{ClientBatchQuote, ClientQuote, IndexerError, IndexerHealth};
-use crate::{
-    BootstrapSnapshot, ChainCursor, ChainUpdate, Checkpoint, Commitment, ContractLog,
-    DeploymentConfig, MATH_COMPATIBILITY_VERSION, QuoteEvent, QuoteReducer, ReducerError,
-    decode_core_event,
+use crate::bootstrap::BootstrapSnapshot;
+use crate::indexer::errors::IndexerError;
+use crate::indexer::quote_types::{ClientBatchQuote, ClientQuote, IndexerHealth};
+use crate::model::{
+    ChainCursor, ChainUpdate, Checkpoint, Commitment, ContractLog, DeploymentConfig,
+    MATH_COMPATIBILITY_VERSION, QuoteEvent,
 };
-use lunarbase_math::{QuoteOutcome, QuoteRequest, QuoteState};
+use crate::protocol::abi::decode_core_event;
+use crate::state::reducer::{QuoteReducer, ReducerError};
+use lunarbase_math::quote::quote;
+use lunarbase_math::state::{QuoteOutcome, QuoteRequest, QuoteState};
+use lunarbase_math::types::B256;
 
 #[derive(Clone, Debug)]
 /// Synchronous state machine used under the client's short `RwLock` guards.
@@ -42,7 +47,7 @@ impl QuoteIndexer {
         snapshot: BootstrapSnapshot,
         mut buffered: Vec<ChainUpdate>,
     ) -> Result<(), IndexerError> {
-        if self.deployment.expected_runtime_code_hash != lunarbase_math::B256::ZERO
+        if self.deployment.expected_runtime_code_hash != B256::ZERO
             && snapshot.runtime_code_hash != self.deployment.expected_runtime_code_hash
         {
             return Err(IndexerError::CodeHashMismatch);
@@ -166,7 +171,7 @@ impl QuoteIndexer {
             .cursor()
             .cloned()
             .ok_or(IndexerError::NoCursor)?;
-        let outcome = lunarbase_math::quote(request, cursor.execution_block_number, state)?;
+        let outcome = quote(request, cursor.execution_block_number, state)?;
         Ok(ClientQuote {
             outcome,
             execution_block_number: cursor.execution_block_number,
@@ -187,7 +192,7 @@ impl QuoteIndexer {
         let execution_block_number = cursor.execution_block_number;
         let outcomes = requests
             .iter()
-            .map(|request| lunarbase_math::quote(request, execution_block_number, state))
+            .map(|request| quote(request, execution_block_number, state))
             .collect::<Result<Vec<QuoteOutcome>, _>>()?;
         Ok(ClientBatchQuote {
             outcomes,

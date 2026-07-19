@@ -1,5 +1,6 @@
-use crate::{ChainCursor, Commitment};
-use lunarbase_math::{B256, QuoteOutcome};
+use crate::model::{ChainCursor, Commitment};
+use lunarbase_math::state::QuoteOutcome;
+use lunarbase_math::types::B256;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// One quote plus the exact state cursor used for evaluation.

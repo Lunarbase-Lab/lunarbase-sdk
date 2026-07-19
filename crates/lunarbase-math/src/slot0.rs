@@ -1,4 +1,4 @@
-use crate::{MathError, U256};
+use crate::types::{MathError, U256};
 
 const PRICE_BITS: usize = 112;
 const FEE_BITS: usize = 20;

@@ -1,8 +1,8 @@
 //! Pinned Core ABI and strict Alloy event decoding.
 
-use crate::{ContractLog, LogDecodeError, QuoteEvent};
+use crate::model::{ContractLog, LogDecodeError, QuoteEvent};
 use alloy_sol_types::SolEvent;
-use lunarbase_math::{B256, U256};
+use lunarbase_math::types::{B256, U256};
 
 /// Generated function and event types shared by bootstrap and replay.
 pub mod core {
@@ -188,9 +188,11 @@ pub fn decode_core_event(log: &ContractLog) -> Result<Option<QuoteEvent>, LogDec
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{ChainCursor, Commitment};
-    use lunarbase_math::Address;
+    use crate::model::{ChainCursor, Commitment, ContractLog, QuoteEvent};
+    use crate::protocol::abi::{
+        TOPIC_DEPOSIT_EXECUTED, TOPIC_WITHDRAWAL_EXECUTED, decode_core_event,
+    };
+    use lunarbase_math::types::{Address, B256, U256};
 
     #[test]
     fn generated_topics_match_the_pinned_solidity_abi() {

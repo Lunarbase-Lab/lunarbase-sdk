@@ -1,10 +1,19 @@
 //! Cross-module embeddable-runtime acceptance tests.
 
-use crate::*;
-use lunarbase_math::{
-    Address, B256, LaneSlot0, LaneState, QuoteMode, QuoteRequest, QuoteState, U256, WAD,
-    encode_lane_slot0,
+use crate::bootstrap::BootstrapSnapshot;
+use crate::indexer::client::ConnectedQuoteClient;
+use crate::indexer::client_types::ClientConnectConfig;
+use crate::model::{
+    BackfillRequest, ChainCursor, ChainUpdate, Checkpoint, Commitment, ContractFilter, ContractLog,
+    DeploymentConfig, MATH_COMPATIBILITY_VERSION, Network, SourceError,
 };
+use crate::protocol::abi::quote_critical_topics;
+use crate::source::{ChainDataSource, SourceStream};
+use crate::state::reducer::QuoteReducer;
+use lunarbase_math::arithmetic::WAD;
+use lunarbase_math::slot0::{LaneSlot0, encode_lane_slot0};
+use lunarbase_math::state::{LaneState, QuoteMode, QuoteRequest, QuoteState};
+use lunarbase_math::types::{Address, B256, U256};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicUsize, Ordering},

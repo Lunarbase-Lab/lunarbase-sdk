@@ -1,6 +1,6 @@
 use crate::execution::{ExecutionHead, ExecutionLog};
-use lunarbase_client_core::{Commitment, SourceError};
-use lunarbase_math::{Address, B256, Bytes};
+use lunarbase_client_core::model::{Commitment, SourceError};
+use lunarbase_math::types::{Address, B256, Bytes};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -238,7 +238,9 @@ fn is_recovery_alert(message: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::protocol::{ParserMessage, decode_parser_message, decode_parser_value};
+    use lunarbase_client_core::model::Commitment;
+    use lunarbase_math::types::{B256, U256};
     use serde_json::json;
 
     #[test]
@@ -288,10 +290,7 @@ mod tests {
         assert_eq!(log.transaction_index, 2);
         assert_eq!(log.log_index, 5);
         assert_eq!(log.data.as_ref(), [1, 2]);
-        assert_eq!(
-            log.topics,
-            vec![B256::new(lunarbase_math::U256::ONE.to_be_bytes::<32>())]
-        );
+        assert_eq!(log.topics, vec![B256::new(U256::ONE.to_be_bytes::<32>())]);
     }
 
     #[test]

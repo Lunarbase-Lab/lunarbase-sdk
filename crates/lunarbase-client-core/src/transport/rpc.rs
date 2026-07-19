@@ -1,15 +1,9 @@
 //! HTTP JSON-RPC bootstrap and canonical recovery implementation.
 
-mod backend;
-mod client;
-mod codec;
-mod snapshot;
-
-pub use backend::RpcHttpBackend;
-pub use client::{RpcError, RpcHttpClient};
-pub(crate) use codec::parse_rpc_head;
-pub use codec::parse_rpc_log;
-pub use snapshot::RpcSnapshotProvider;
+pub mod backend;
+pub mod client;
+pub mod codec;
+pub mod snapshot;
 
 #[cfg(test)]
 mod tests;

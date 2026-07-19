@@ -1,12 +1,15 @@
-use super::{
-    assertions::{
-        assert_checkpoint, fetch_quote, wait_for_block, wait_for_not_ready, wait_for_ready,
-    },
-    environment::{MockChain, MockEvent, RedisProcess, Workspace},
-    helpers::{free_port, wait_until},
-    process::{spawn_indexer, terminate, write_config},
-    *,
+use crate::support::e2e::assertions::{
+    assert_checkpoint, fetch_quote, wait_for_block, wait_for_not_ready, wait_for_ready,
 };
+use crate::support::e2e::environment::{
+    E2eArguments, E2eError, MockChain, MockEvent, RedisProcess, Workspace,
+};
+use crate::support::e2e::helpers::{free_port, wait_until};
+use crate::support::e2e::process::{spawn_indexer, terminate, write_config};
+use serde_json::json;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+use tokio::time::{sleep, timeout};
 
 /// Runs bootstrap, multi-replica, recovery, Redis fallback, checkpoint, and
 /// SIGTERM scenarios against actual indexer OS processes.

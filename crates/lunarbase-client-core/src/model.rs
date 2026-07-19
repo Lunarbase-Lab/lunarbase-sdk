@@ -1,6 +1,7 @@
 //! Provider-independent runtime model shared by every network adapter.
 
-use lunarbase_math::{Address, B256, Bytes, QuoteState, U256};
+use lunarbase_math::state::QuoteState;
+use lunarbase_math::types::{Address, B256, Bytes, U256};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

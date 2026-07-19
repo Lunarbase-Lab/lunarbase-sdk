@@ -1,5 +1,5 @@
-use super::IndexerError;
-use crate::{ContractFilter, DeploymentConfig, SourceError};
+use crate::indexer::errors::IndexerError;
+use crate::model::{ContractFilter, DeploymentConfig, SourceError};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 

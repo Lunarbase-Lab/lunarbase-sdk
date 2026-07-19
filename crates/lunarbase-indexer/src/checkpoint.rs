@@ -1,7 +1,8 @@
 //! Best-effort v3 Redis checkpoint acceleration.
 
-use lunarbase_client_core::{ChainCursor, Checkpoint, Commitment, DeploymentConfig};
-use lunarbase_math::{Address, B256, FeeProfile, LaneState, QuoteState, U256};
+use lunarbase_client_core::model::{ChainCursor, Checkpoint, Commitment, DeploymentConfig};
+use lunarbase_math::state::{FeeProfile, LaneState, QuoteState};
+use lunarbase_math::types::{Address, B256, U256};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, str::FromStr, time::Duration};
 use thiserror::Error;
@@ -325,8 +326,13 @@ fn hash_hex(value: B256) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use lunarbase_client_core::{Commitment, MATH_COMPATIBILITY_VERSION, Network, SCHEMA_VERSION};
+    use crate::checkpoint::{CheckpointDto, RedisCheckpointStore};
+    use lunarbase_client_core::model::{
+        ChainCursor, Checkpoint, Commitment, DeploymentConfig, MATH_COMPATIBILITY_VERSION, Network,
+        SCHEMA_VERSION,
+    };
+    use lunarbase_math::state::{LaneState, QuoteState};
+    use lunarbase_math::types::{Address, B256, U256};
 
     fn address(suffix: u8) -> Address {
         let mut bytes = [0u8; 20];

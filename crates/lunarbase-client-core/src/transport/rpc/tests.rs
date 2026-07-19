@@ -1,11 +1,10 @@
-use super::RpcHttpClient;
-use super::client::backfill_filter;
+use crate::model::{BackfillRequest, Commitment, ContractFilter};
 use crate::protocol::abi::{core, quote_critical_topics};
-use crate::{BackfillRequest, Commitment, ContractFilter};
+use crate::transport::rpc::client::{RpcHttpClient, backfill_filter};
 use alloy_primitives::Bytes;
 use alloy_provider::{ProviderBuilder, transport::mock::Asserter};
 use alloy_sol_types::SolCall;
-use lunarbase_math::Address;
+use lunarbase_math::types::Address;
 
 #[test]
 fn generated_core_selectors_match_the_pinned_abi() {

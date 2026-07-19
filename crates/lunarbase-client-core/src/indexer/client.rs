@@ -1,11 +1,13 @@
-use super::client_types::ClientRuntimeStats;
-use super::tasks::{ReducerRuntime, recover_checkpoint, reducer_loop, source_pump};
-use super::{
-    ClientBatchQuote, ClientConnectConfig, ClientQuote, ClientRuntimeEvent,
-    ClientRuntimeStatsSnapshot, IndexerError, IndexerHealth, QuoteIndexer,
+use crate::indexer::client_types::{
+    ClientConnectConfig, ClientRuntimeStats, ClientRuntimeStatsSnapshot,
 };
-use crate::{ChainDataSource, Checkpoint, Commitment};
-use lunarbase_math::{QuoteRequest, QuoteState};
+use crate::indexer::engine::QuoteIndexer;
+use crate::indexer::errors::{ClientRuntimeEvent, IndexerError};
+use crate::indexer::quote_types::{ClientBatchQuote, ClientQuote, IndexerHealth};
+use crate::indexer::tasks::{ReducerRuntime, recover_checkpoint, reducer_loop, source_pump};
+use crate::model::{Checkpoint, Commitment, SourceError};
+use crate::source::ChainDataSource;
+use lunarbase_math::state::{QuoteRequest, QuoteState};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -44,7 +46,7 @@ impl ConnectedQuoteClient {
     {
         config.validate()?;
         if source.network() != config.deployment.network {
-            return Err(crate::SourceError::NetworkMismatch.into());
+            return Err(SourceError::NetworkMismatch.into());
         }
         let (updates_tx, mut updates_rx) = mpsc::channel(config.buffer_capacity);
         let (cancel, pump_cancel) = watch::channel(false);
@@ -240,7 +242,7 @@ impl ConnectedQuoteClient {
                     }
                 })
                 .await;
-                Err(crate::SourceError::Unavailable("graceful shutdown timed out".into()).into())
+                Err(SourceError::Unavailable("graceful shutdown timed out".into()).into())
             }
         }
     }
@@ -300,7 +302,7 @@ fn collect_join(
                 detail: error.to_string(),
             },
         );
-        return Err(crate::SourceError::Unavailable(format!("{task} task failed: {error}")).into());
+        return Err(SourceError::Unavailable(format!("{task} task failed: {error}")).into());
     }
     Ok(())
 }

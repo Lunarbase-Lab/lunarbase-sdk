@@ -1,6 +1,6 @@
 //! Core bounded cursor ordering for realtime source updates.
 
-use crate::{ChainCursor, ChainUpdate, SourceError};
+use crate::model::{ChainCursor, ChainUpdate, SourceError};
 use std::collections::BTreeMap;
 
 type CursorKey = (u64, u32, u32, u64, u32, u8);
@@ -135,8 +135,9 @@ fn cursor_key(cursor: &ChainCursor, rank: u8) -> CursorKey {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{ChainCursor, Commitment};
+    use crate::model::{ChainCursor, ChainUpdate, Commitment, ContractLog};
+    use crate::state::ordering::CursorReorderBuffer;
+    use lunarbase_math::types::{Address, Bytes};
 
     fn cursor(block: u64, tx: Option<u32>, log: Option<u32>) -> ChainCursor {
         ChainCursor {
@@ -177,10 +178,10 @@ mod tests {
     #[test]
     fn block_head_watermark_drains_all_events_in_that_block() {
         let mut buffer = CursorReorderBuffer::new(4).unwrap();
-        let log = ChainUpdate::Log(crate::ContractLog {
-            address: lunarbase_math::Address::ZERO,
+        let log = ChainUpdate::Log(ContractLog {
+            address: Address::ZERO,
             topics: vec![],
-            data: lunarbase_math::Bytes::new(),
+            data: Bytes::new(),
             removed: false,
             cursor: cursor(10, Some(3), Some(7)),
         });

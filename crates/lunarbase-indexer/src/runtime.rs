@@ -1,7 +1,9 @@
 //! Network client construction and best-effort checkpoint scheduling.
 
 use crate::{checkpoint::RedisCheckpointStore, config::Config, metrics::Metrics};
-use lunarbase_client_core::{Checkpoint, ConnectedQuoteClient, IndexerError, Network};
+use lunarbase_client_core::indexer::client::ConnectedQuoteClient;
+use lunarbase_client_core::indexer::errors::IndexerError;
+use lunarbase_client_core::model::{Checkpoint, Network};
 use std::{sync::Arc, time::Duration};
 use thiserror::Error;
 use tokio::{sync::watch, task::JoinHandle, time::interval};

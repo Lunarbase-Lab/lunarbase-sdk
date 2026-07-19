@@ -1,8 +1,11 @@
-use lunarbase_client_core::{
-    BackfillRequest, BootstrapSnapshot, ChainCursor, ChainDataSource, Checkpoint, ContractFilter,
-    ContractLog, DeploymentConfig, Network, RpcHttpClient, SourceError, SourceStream, WsRpcBackend,
-    WsRpcConfig,
+use lunarbase_client_core::bootstrap::BootstrapSnapshot;
+use lunarbase_client_core::model::{
+    BackfillRequest, ChainCursor, Checkpoint, ContractFilter, ContractLog, DeploymentConfig,
+    Network, SourceError,
 };
+use lunarbase_client_core::source::{ChainDataSource, SourceStream};
+use lunarbase_client_core::transport::rpc::client::RpcHttpClient;
+use lunarbase_client_core::transport::ws::{WsRpcBackend, WsRpcConfig};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Resource bounds for the Base preconfirmation stream.

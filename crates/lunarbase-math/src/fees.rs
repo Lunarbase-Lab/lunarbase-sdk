@@ -2,7 +2,7 @@ use crate::arithmetic::{
     BPS, MAX_SLIPPAGE_BPS, SLIPPAGE_SCALE, WAD, ceil_div, checked_add, checked_sub,
     full_mul_div_down, full_mul_div_up, mul_div_down_256,
 };
-use crate::{MathError, U256};
+use crate::types::{MathError, U256};
 
 /// Converts an exact-in amount through one lane using the pushed WAD price.
 ///

@@ -1,7 +1,7 @@
-use super::RpcHttpClient;
-use crate::{
+use crate::model::{
     BackfillRequest, ChainCursor, Checkpoint, Commitment, ContractLog, Network, SourceError,
 };
+use crate::transport::rpc::client::RpcHttpClient;
 use std::sync::Arc;
 
 #[derive(Clone)]

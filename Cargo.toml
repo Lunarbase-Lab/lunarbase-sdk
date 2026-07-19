@@ -26,6 +26,7 @@ unused_must_use = "deny"
 dbg_macro = "deny"
 todo = "deny"
 unimplemented = "deny"
+wildcard_imports = "deny"
 
 [workspace.dependencies]
 lunarbase-math = { version = "0.2.0", path = "crates/lunarbase-math" }

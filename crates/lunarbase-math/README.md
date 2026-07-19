@@ -23,13 +23,17 @@ The crate exposes:
 - Solidity-compatible unavailable and sentinel outcomes.
 
 ```rust
-use lunarbase_math::{quote, QuoteRequest, QuoteState};
+use lunarbase_math::prelude::{QuoteRequest, QuoteState, quote};
 
 fn evaluate(request: &QuoteRequest, execution_block: u64, state: &QuoteState) {
     let outcome = quote(request, execution_block, state);
     println!("{outcome:?}");
 }
 ```
+
+Use canonical modules such as `lunarbase_math::state` and
+`lunarbase_math::slot0` when explicit API provenance is preferable. The
+optional `prelude` contains the common integration surface.
 
 The caller owns state and supplies the execution block. This crate has no
 async runtime, RPC, Redis, filesystem, clock, or network dependency.

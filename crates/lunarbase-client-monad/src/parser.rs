@@ -2,12 +2,16 @@
 
 use async_stream::stream;
 use futures_util::{SinkExt, StreamExt};
-use lunarbase_client_core::{
-    BackfillRequest, BootstrapSnapshot, ChainCursor, ChainDataSource, Checkpoint, ContractFilter,
-    ContractLog, DeploymentConfig, Network, RpcHttpBackend, RpcHttpClient, RpcSnapshotProvider,
-    SourceError, SourceStream,
+use lunarbase_client_core::bootstrap::BootstrapSnapshot;
+use lunarbase_client_core::model::{
+    BackfillRequest, ChainCursor, Checkpoint, Commitment, ContractFilter, ContractLog,
+    DeploymentConfig, Network, SourceError,
 };
-use lunarbase_math::Address;
+use lunarbase_client_core::source::{ChainDataSource, SourceStream};
+use lunarbase_client_core::transport::rpc::backend::RpcHttpBackend;
+use lunarbase_client_core::transport::rpc::client::RpcHttpClient;
+use lunarbase_client_core::transport::rpc::snapshot::RpcSnapshotProvider;
+use lunarbase_math::types::{Address, B256};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -213,7 +217,7 @@ pub async fn connect_parser_stream(
                     log.commitment = commitments
                         .get(&log.block_number)
                         .copied()
-                        .unwrap_or(lunarbase_client_core::Commitment::Realtime);
+                        .unwrap_or(Commitment::Realtime);
                     yield Ok(ExecutionEvent::Log(log));
                 }
                 Ok(ParserMessage::Gap(reason)) => {
@@ -262,13 +266,17 @@ fn subscription_request(
     json!({"jsonrpc":"2.0", "id":id, "method":"subscribe", "params":params}).to_string()
 }
 
-fn word_hex(value: lunarbase_math::B256) -> String {
+fn word_hex(value: B256) -> String {
     format!("{value:#x}")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::parser::subscription_request;
+    use crate::protocol::{ParserMessage, decode_parser_message};
+    use lunarbase_client_core::model::ContractFilter;
+    use lunarbase_math::types::{Address, B256, U256};
+    use serde_json::Value;
 
     #[test]
     fn subscription_request_matches_parser_shape() {
@@ -282,9 +290,7 @@ mod tests {
                 &address,
                 &ContractFilter {
                     address,
-                    topics: vec![lunarbase_math::B256::new(
-                        lunarbase_math::U256::ONE.to_be_bytes::<32>(),
-                    )],
+                    topics: vec![B256::new(U256::ONE.to_be_bytes::<32>())],
                 },
             )),
         );

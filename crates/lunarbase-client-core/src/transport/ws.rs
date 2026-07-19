@@ -8,16 +8,20 @@
 
 use crate::source::{ChainDataSource, SourceStream};
 use crate::state::ordering::CursorReorderBuffer;
-use crate::transport::rpc::{
-    RpcError, RpcHttpBackend, RpcHttpClient, parse_rpc_head, parse_rpc_log,
-};
+use crate::transport::rpc::backend::RpcHttpBackend;
+use crate::transport::rpc::client::{RpcError, RpcHttpClient};
+use crate::transport::rpc::codec::{parse_rpc_head, parse_rpc_log};
+use crate::transport::rpc::snapshot::RpcSnapshotProvider;
 use crate::{
-    BackfillRequest, BootstrapSnapshot, ChainCursor, ChainUpdate, Checkpoint, Commitment,
-    ContractFilter, DeploymentConfig, Network, RpcSnapshotProvider, SourceError,
+    bootstrap::BootstrapSnapshot,
+    model::{
+        BackfillRequest, ChainCursor, ChainUpdate, Checkpoint, Commitment, ContractFilter,
+        ContractLog, DeploymentConfig, Network, SourceError,
+    },
 };
 use async_stream::stream;
 use futures_util::{SinkExt, StreamExt};
-use lunarbase_math::B256;
+use lunarbase_math::types::B256;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -138,10 +142,7 @@ impl ChainDataSource for WsRpcBackend {
             .await
     }
 
-    async fn backfill(
-        &self,
-        request: BackfillRequest,
-    ) -> Result<Vec<crate::ContractLog>, SourceError> {
+    async fn backfill(&self, request: BackfillRequest) -> Result<Vec<ContractLog>, SourceError> {
         self.http.backfill(request).await
     }
 

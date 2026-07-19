@@ -1,11 +1,15 @@
 //! Linux shared-memory reader for the official Monad execution event ring.
 
-use lunarbase_client_core::{
-    BackfillRequest, BootstrapSnapshot, ChainCursor, ChainDataSource, Checkpoint, Commitment,
-    ContractFilter, ContractLog, DeploymentConfig, Network, RpcHttpBackend, RpcHttpClient,
-    RpcSnapshotProvider, SourceError, SourceStream,
+use lunarbase_client_core::bootstrap::BootstrapSnapshot;
+use lunarbase_client_core::model::{
+    BackfillRequest, ChainCursor, Checkpoint, Commitment, ContractFilter, ContractLog,
+    DeploymentConfig, Network, SourceError,
 };
-use lunarbase_math::{Address, B256};
+use lunarbase_client_core::source::{ChainDataSource, SourceStream};
+use lunarbase_client_core::transport::rpc::backend::RpcHttpBackend;
+use lunarbase_client_core::transport::rpc::client::RpcHttpClient;
+use lunarbase_client_core::transport::rpc::snapshot::RpcSnapshotProvider;
+use lunarbase_math::types::{Address, B256};
 use monad_event_ring::{
     DecodedEventRing, EventDescriptorInfo, EventNextResult, EventPayloadResult, EventRingPath,
 };
@@ -15,7 +19,7 @@ use monad_exec_events::{
 use std::{path::PathBuf, thread, time::Duration};
 use tokio::sync::mpsc;
 
-use crate::{
+use crate::execution::{
     ExecutionEvent, ExecutionEventStream, ExecutionHead, ExecutionLog, MonadExecutionNormalizer,
 };
 

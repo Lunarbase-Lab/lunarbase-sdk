@@ -1,7 +1,10 @@
-use super::client::publish;
-use super::client_types::ClientRuntimeStats;
-use super::{ClientConnectConfig, ClientRuntimeEvent, IndexerError, QuoteIndexer};
-use crate::{BackfillRequest, ChainDataSource, ChainUpdate, ContractFilter, SourceStream};
+use crate::indexer::client::publish;
+use crate::indexer::client_types::{ClientConnectConfig, ClientRuntimeStats};
+use crate::indexer::engine::QuoteIndexer;
+use crate::indexer::errors::{ClientRuntimeEvent, IndexerError};
+use crate::model::{BackfillRequest, ChainUpdate, ContractFilter};
+use crate::source::{ChainDataSource, SourceStream};
+use crate::state::reducer::ReducerError;
 use futures_util::StreamExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -266,7 +269,7 @@ pub(super) async fn recover_checkpoint<S: ChainDataSource>(
     indexer.reducer.mark_not_ready();
     let head = source.canonical_head().await?;
     if head.chain_id != checkpoint_cursor.chain_id {
-        return Err(crate::ReducerError::ChainIdMismatch.into());
+        return Err(ReducerError::ChainIdMismatch.into());
     }
     if head.block_number < checkpoint_cursor.block_number {
         return Err(IndexerError::Gap(

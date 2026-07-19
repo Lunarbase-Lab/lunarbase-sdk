@@ -8,10 +8,11 @@ use crate::slot0::{
     lane_slot0_ask_fee_bps, lane_slot0_bid_fee_bps, lane_slot0_latest_update_block,
     lane_slot0_price,
 };
-use crate::{
-    Address, LaneState, MathError, QuoteError, QuoteMode, QuoteOutcome, QuoteRequest, QuoteResult,
-    QuoteState, U256, UnavailableReason,
+use crate::state::{
+    LaneState, QuoteError, QuoteMode, QuoteOutcome, QuoteRequest, QuoteResult, QuoteState,
+    UnavailableReason,
 };
+use crate::types::{Address, MathError, U256};
 
 fn lane_or_reason(
     state: &QuoteState,

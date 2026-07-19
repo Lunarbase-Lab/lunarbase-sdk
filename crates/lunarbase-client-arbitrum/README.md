@@ -10,11 +10,9 @@ lunarbase-client-arbitrum = { git = "https://github.com/Lunarbase-Lab/lunarbase-
 ```
 
 ```rust
-let client = lunarbase_client_arbitrum::connect_arbitrum(
-    config,
-    optional_checkpoint,
-)
-.await?;
+use lunarbase_client_arbitrum::prelude::connect_arbitrum;
+
+let client = connect_arbitrum(config, optional_checkpoint).await?;
 ```
 
 The adapter consumes executed logs and keeps the EVM execution-block context

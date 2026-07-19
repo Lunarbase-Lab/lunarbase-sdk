@@ -1,11 +1,14 @@
-use super::RpcHttpClient;
-use crate::protocol::abi::{core, decode_core_event, lane_discovery_topics};
-use crate::{
-    BackfillRequest, BootstrapSnapshot, Commitment, DeploymentConfig, QuoteEvent, SourceError,
+use crate::bootstrap::BootstrapSnapshot;
+use crate::model::{
+    BackfillRequest, Commitment, ContractFilter, DeploymentConfig, QuoteEvent, SourceError,
 };
+use crate::protocol::abi::{core, decode_core_event, lane_discovery_topics};
+use crate::transport::rpc::client::RpcHttpClient;
 use alloy_primitives::{Bytes, keccak256};
 use alloy_sol_types::SolCall;
-use lunarbase_math::{Address, B256, BPS, LaneState, QuoteState, U256};
+use lunarbase_math::arithmetic::BPS;
+use lunarbase_math::state::{LaneState, QuoteState};
+use lunarbase_math::types::{Address, B256, U256};
 use std::{collections::BTreeSet, sync::Arc};
 
 #[derive(Clone)]
@@ -153,7 +156,7 @@ impl RpcSnapshotProvider {
         let request = BackfillRequest {
             from_block: config.deployment_block,
             to_block: snapshot_block,
-            filter: crate::ContractFilter {
+            filter: ContractFilter {
                 address: config.core,
                 topics: lane_discovery_topics().to_vec(),
             },

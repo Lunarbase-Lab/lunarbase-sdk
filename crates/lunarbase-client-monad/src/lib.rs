@@ -3,22 +3,24 @@
 //! Parser WebSocket and native shared-memory readers live in this network
 //! package; the common reducer has no Monad-specific dependency.
 
-mod execution;
-mod parser;
-mod protocol;
+pub mod execution;
+pub mod parser;
+pub mod prelude;
+pub mod protocol;
 
 #[cfg(all(feature = "native-event-ring", target_os = "linux"))]
-mod native;
+pub mod native;
 
-pub use execution::*;
-pub use parser::*;
-pub use protocol::*;
-
-#[cfg(all(feature = "native-event-ring", target_os = "linux"))]
-pub use native::*;
-
-use lunarbase_client_core::{Checkpoint, ClientConnectConfig, ConnectedQuoteClient, IndexerError};
+use lunarbase_client_core::indexer::client::ConnectedQuoteClient;
+use lunarbase_client_core::indexer::client_types::ClientConnectConfig;
+use lunarbase_client_core::indexer::errors::IndexerError;
+use lunarbase_client_core::model::Checkpoint;
 use std::sync::Arc;
+
+use crate::parser::{MonadParserConfig, MonadParserSource};
+
+#[cfg(all(feature = "native-event-ring", target_os = "linux"))]
+use crate::native::{MonadEventRingConfig, MonadEventRingSource};
 
 /// Connects the portable parser/RPC Monad implementation.
 pub async fn connect_monad_parser(

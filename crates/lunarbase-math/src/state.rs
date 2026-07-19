@@ -1,4 +1,4 @@
-use crate::{Address, U256};
+use crate::types::{Address, MathError, U256};
 use std::collections::HashMap;
 
 const LANE_EXISTS: u8 = 1;
@@ -170,5 +170,5 @@ pub enum QuoteOutcome {
 /// Solidity-compatible checked arithmetic failure.
 pub enum QuoteError {
     #[error(transparent)]
-    Arithmetic(#[from] crate::MathError),
+    Arithmetic(#[from] MathError),
 }

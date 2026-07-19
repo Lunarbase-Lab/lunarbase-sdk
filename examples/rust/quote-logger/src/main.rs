@@ -1,11 +1,13 @@
 use clap::Parser;
 use dotenvy::from_path;
-use lunarbase_client_base::connect_base;
-use lunarbase_client_core::{
+use lunarbase_client_base::prelude::connect_base;
+use lunarbase_client_core::model::MATH_COMPATIBILITY_VERSION;
+use lunarbase_client_core::prelude::{
     ClientConnectConfig, ClientRuntimeEvent, Commitment, ConnectedQuoteClient, ContractFilter,
-    DeploymentConfig, MATH_COMPATIBILITY_VERSION, Network, RpcHttpClient, quote_critical_topics,
+    DeploymentConfig, Network, RpcHttpClient,
 };
-use lunarbase_math::{Address, B256, QuoteMode, QuoteOutcome, QuoteRequest, U256};
+use lunarbase_client_core::protocol::abi::quote_critical_topics;
+use lunarbase_math::prelude::{Address, B256, QuoteMode, QuoteOutcome, QuoteRequest, U256};
 use std::{error::Error, io, num::NonZeroU64, path::Path, str::FromStr, time::Duration};
 use tokio::{sync::broadcast, time::MissedTickBehavior};
 use tracing::{error, info, warn};
@@ -272,7 +274,10 @@ fn validate_ws_url(url: Url) -> Result<Url, AnyError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::{DEMO_ROUTER, derive_ws_url, quote_requests};
+    use lunarbase_math::prelude::{Address, QuoteMode, U256};
+    use std::str::FromStr;
+    use url::Url;
 
     #[test]
     fn derives_websocket_urls_from_http_urls() {

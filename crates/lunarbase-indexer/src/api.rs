@@ -8,12 +8,14 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use lunarbase_client_core::{
-    ChainCursor, ClientBatchQuote, ClientQuote, Commitment, ConnectedQuoteClient, IndexerError,
+use lunarbase_client_core::indexer::client::ConnectedQuoteClient;
+use lunarbase_client_core::indexer::errors::IndexerError;
+use lunarbase_client_core::indexer::quote_types::{ClientBatchQuote, ClientQuote};
+use lunarbase_client_core::model::{ChainCursor, Commitment};
+use lunarbase_math::state::{
+    QuoteMode, QuoteOutcome, QuoteRequest, QuoteResult, UnavailableReason,
 };
-use lunarbase_math::{
-    Address, B256, QuoteMode, QuoteOutcome, QuoteRequest, QuoteResult, U256, UnavailableReason,
-};
+use lunarbase_math::types::{Address, B256, U256};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{future::Future, net::SocketAddr, str::FromStr, sync::Arc, time::Instant};
@@ -339,7 +341,8 @@ fn hash_hex(value: B256) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::api::{ApiQuoteOutcome, ApiQuoteRequest};
+    use serde_json::json;
 
     #[test]
     fn outcome_fields_are_camel_case() {

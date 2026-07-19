@@ -1,11 +1,12 @@
 //! Minimal production configuration for one Core/router deployment.
 
 use clap::Parser;
-use lunarbase_client_core::{
-    ClientConnectConfig, ContractFilter, DeploymentConfig, MATH_COMPATIBILITY_VERSION, Network,
-    quote_critical_topics,
+use lunarbase_client_core::indexer::client_types::ClientConnectConfig;
+use lunarbase_client_core::model::{
+    ContractFilter, DeploymentConfig, MATH_COMPATIBILITY_VERSION, Network,
 };
-use lunarbase_math::{Address, B256};
+use lunarbase_client_core::protocol::abi::quote_critical_topics;
+use lunarbase_math::types::{Address, B256};
 use serde::Deserialize;
 use std::{net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
 use thiserror::Error;

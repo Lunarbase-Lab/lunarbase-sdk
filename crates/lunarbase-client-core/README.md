@@ -18,6 +18,8 @@ checkpoint validation. `ConnectedQuoteClient` owns ordering, fail-closed
 recovery, compact in-memory state, and quote access.
 
 ```rust
+use lunarbase_client_core::prelude::{ChainDataSource, ConnectedQuoteClient};
+
 let client = ConnectedQuoteClient::connect(config, source, checkpoint).await?;
 let single = client.quote(&request)?;
 let batch = client.quote_many(&requests)?;
@@ -25,6 +27,10 @@ let health = client.health();
 let checkpoint = client.checkpoint();
 client.shutdown().await;
 ```
+
+All entities are also available through explicit canonical modules, for
+example `lunarbase_client_core::source::ChainDataSource` and
+`lunarbase_client_core::indexer::client::ConnectedQuoteClient`.
 
 `quote_many` evaluates the full batch under one shared state snapshot. Quote
 methods do not call the data source and do not perform RPC or persistence I/O.

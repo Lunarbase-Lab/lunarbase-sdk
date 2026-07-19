@@ -13,7 +13,7 @@ lunarbase-client-base = { git = "https://github.com/Lunarbase-Lab/lunarbase-sdk.
 ## Connect
 
 ```rust
-use lunarbase_client_base::connect_base;
+use lunarbase_client_base::prelude::connect_base;
 
 let client = connect_base(config, optional_checkpoint).await?;
 let quote = client.quote(&request)?;

@@ -1,7 +1,8 @@
 //! Unified bootstrap, recovery, and realtime source boundary.
 
-use crate::{
-    BackfillRequest, BootstrapSnapshot, ChainUpdate, Checkpoint, ContractFilter, ContractLog,
+use crate::bootstrap::BootstrapSnapshot;
+use crate::model::{
+    BackfillRequest, ChainCursor, ChainUpdate, Checkpoint, ContractFilter, ContractLog,
     DeploymentConfig, Network, SourceError,
 };
 use futures_core::Stream;
@@ -34,9 +35,7 @@ pub trait ChainDataSource: Send + Sync {
     ) -> impl Future<Output = Result<SourceStream, SourceError>> + Send;
 
     /// Returns the canonical cursor used as the recovery target.
-    fn canonical_head(
-        &self,
-    ) -> impl Future<Output = Result<crate::ChainCursor, SourceError>> + Send;
+    fn canonical_head(&self) -> impl Future<Output = Result<ChainCursor, SourceError>> + Send;
 
     /// Verifies that a checkpoint cursor is still on the canonical chain.
     fn validate_checkpoint(

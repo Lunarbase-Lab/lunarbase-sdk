@@ -10,11 +10,9 @@ lunarbase-client-monad = { git = "https://github.com/Lunarbase-Lab/lunarbase-sdk
 ```
 
 ```rust
-let client = lunarbase_client_monad::connect_monad_parser(
-    config,
-    optional_checkpoint,
-)
-.await?;
+use lunarbase_client_monad::prelude::connect_monad_parser;
+
+let client = connect_monad_parser(config, optional_checkpoint).await?;
 ```
 
 The portable implementation consumes the parser WebSocket and uses RPC for
@@ -32,7 +30,8 @@ lunarbase-client-monad = {
 }
 ```
 
-Then use `connect_monad_event_ring`. The native feature depends on the official
+Then import `connect_monad_event_ring` from
+`lunarbase_client_monad::prelude`. The native feature depends on the official
 Monad execution-events crates and is intended to run beside a Monad node.
 
 This package remains experimental until parser and native-ring sequencing,

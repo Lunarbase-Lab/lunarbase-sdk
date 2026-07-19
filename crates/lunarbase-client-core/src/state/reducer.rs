@@ -1,10 +1,12 @@
 //! Ordered single-writer quote-state reducer.
 
-use crate::{
+use crate::model::{
     ChainCursor, Checkpoint, DeploymentConfig, MATH_COMPATIBILITY_VERSION, QuoteEvent,
     SCHEMA_VERSION,
 };
-use lunarbase_math::{Address, QuoteState};
+use lunarbase_math::arithmetic::BPS;
+use lunarbase_math::state::QuoteState;
+use lunarbase_math::types::Address;
 use thiserror::Error;
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -169,7 +171,7 @@ impl QuoteReducer {
                 self.state.lanes.entry(asset).or_default().slot0 = slot0;
             }
             QuoteEvent::SlippageKSet { asset, new_k } => {
-                if new_k > lunarbase_math::BPS {
+                if new_k > BPS {
                     return Err(ReducerError::InvalidSlippageK);
                 }
                 let value = u32::try_from(new_k).map_err(|_| ReducerError::InvalidWidth)?;
@@ -180,7 +182,7 @@ impl QuoteReducer {
                 if router != self.configured_router {
                     return Ok(());
                 }
-                if fee > lunarbase_math::BPS {
+                if fee > BPS {
                     return Err(ReducerError::InvalidWidth);
                 }
                 let value = u32::try_from(fee).map_err(|_| ReducerError::InvalidWidth)?;
@@ -237,7 +239,7 @@ impl QuoteReducer {
 }
 
 fn is_realtime_progression(previous: &ChainCursor, next: &ChainCursor) -> bool {
-    previous.commitment == crate::Commitment::Realtime
-        && next.commitment == crate::Commitment::Realtime
+    previous.commitment == crate::model::Commitment::Realtime
+        && next.commitment == crate::model::Commitment::Realtime
         && next.source_sequence > previous.source_sequence
 }

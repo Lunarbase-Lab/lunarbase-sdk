@@ -1,7 +1,7 @@
-use super::RpcError;
-use crate::{ChainCursor, Commitment, ContractLog};
+use crate::model::{ChainCursor, Commitment, ContractLog};
+use crate::transport::rpc::client::RpcError;
 use alloy_rpc_types_eth::Log;
-use lunarbase_math::B256;
+use lunarbase_math::types::B256;
 use serde::Deserialize;
 use serde_json::Value;
 

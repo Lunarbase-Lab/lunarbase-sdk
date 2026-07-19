@@ -1,13 +1,16 @@
 //! Base Flashblocks client using official `pendingLogs + newHeads`.
 
-mod transport;
+pub mod prelude;
+pub mod transport;
 
-pub use transport::{BaseFlashblocksConfig, BaseFlashblocksSource};
-
-use lunarbase_client_core::{
-    Checkpoint, ClientConnectConfig, ConnectedQuoteClient, IndexerError, RpcHttpClient, SourceError,
-};
+use lunarbase_client_core::indexer::client::ConnectedQuoteClient;
+use lunarbase_client_core::indexer::client_types::ClientConnectConfig;
+use lunarbase_client_core::indexer::errors::IndexerError;
+use lunarbase_client_core::model::{Checkpoint, SourceError};
+use lunarbase_client_core::transport::rpc::client::RpcHttpClient;
 use std::sync::Arc;
+
+use crate::transport::BaseFlashblocksSource;
 
 /// Connects a ready-to-use Base client from the common runtime config.
 pub async fn connect_base(

@@ -1,8 +1,13 @@
-use super::{
-    environment::{MockEvent, MockState},
-    helpers::{block_hash, stop_requested},
-    *,
-};
+use crate::support::e2e::environment::{E2eError, MockEvent, MockState};
+use crate::support::e2e::helpers::{block_hash, stop_requested};
+use futures_util::{SinkExt, StreamExt};
+use serde_json::{Value, json};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
+use tokio::task::JoinSet;
+use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 pub(super) async fn serve_websockets(
     listener: TcpListener,

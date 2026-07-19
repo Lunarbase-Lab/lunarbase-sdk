@@ -1,8 +1,7 @@
 /// Canonical EVM value types shared with Alloy, Foundry, Reth, and Revm.
 ///
-/// Re-exporting the primitives from the math crate keeps downstream LunarBase
-/// APIs on one concrete type while avoiding a second address/hash
-/// implementation.
+/// Re-exporting these primitives pins one concrete family of EVM types across
+/// LunarBase's public Rust API.
 pub use alloy_primitives::{Address, B256, Bytes, U256, U512};
 
 #[derive(Clone, Debug, Eq, thiserror::Error, PartialEq)]

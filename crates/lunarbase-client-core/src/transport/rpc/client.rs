@@ -1,10 +1,10 @@
-use super::codec::{normalize_rpc_log, parse_rpc_head};
-use crate::{BackfillRequest, ChainCursor, Commitment, ContractLog, SourceError};
+use crate::model::{BackfillRequest, ChainCursor, Commitment, ContractLog, SourceError};
+use crate::transport::rpc::codec::{normalize_rpc_log, parse_rpc_head};
 use alloy_eips::{BlockId, BlockNumberOrTag};
 use alloy_primitives::Bytes;
 use alloy_provider::{Provider, ProviderBuilder, RootProvider};
 use alloy_rpc_types_eth::{Filter, TransactionRequest};
-use lunarbase_math::Address;
+use lunarbase_math::types::Address;
 use serde_json::Value;
 use std::{str::FromStr, sync::Arc};
 use thiserror::Error;

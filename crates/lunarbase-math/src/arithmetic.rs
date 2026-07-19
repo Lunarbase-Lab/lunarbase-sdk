@@ -1,4 +1,4 @@
-use crate::{MathError, U256, U512};
+use crate::types::{MathError, U256, U512};
 
 pub const WAD: U256 = U256::from_limbs([1_000_000_000_000_000_000, 0, 0, 0]);
 pub const BPS: U256 = U256::from_limbs([1_000_000, 0, 0, 0]);
