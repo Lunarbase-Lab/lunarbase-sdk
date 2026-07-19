@@ -1,3 +1,6 @@
+#!/usr/bin/env node
+
+import { readFile } from "node:fs/promises";
 import {
   encodeLaneSlot0,
   createLaneState,
@@ -11,9 +14,6 @@ import {
 } from "./index.js";
 import * as AbiParameters from "ox/AbiParameters";
 import * as Hex from "ox/Hex";
-
-declare const process: { argv: string[]; stdout: { write(value: string): void } };
-declare const Bun: { file(path: string): { text(): Promise<string> } };
 
 type LaneVector = {
   price: string;
@@ -185,7 +185,7 @@ if (vectorIndex !== -1) {
 } else {
   const file = args[args.indexOf("--file") + 1];
   const index = Number(args[args.indexOf("--index") + 1]);
-  const fixture = JSON.parse(await Bun.file(file).text()) as { vectors: Vector[] };
+  const fixture = JSON.parse(await readFile(file, "utf8")) as { vectors: Vector[] };
   vector = fixture.vectors[index];
 }
 process.stdout.write(`hex:${output(vector).slice(2)}`);
