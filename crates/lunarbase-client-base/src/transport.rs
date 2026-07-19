@@ -1,3 +1,5 @@
+//! Base Flashblocks transport composed from official Ethereum subscriptions.
+
 use lunarbase_client_core::bootstrap::BootstrapSnapshot;
 use lunarbase_client_core::model::{
     BackfillRequest, ChainCursor, Checkpoint, ContractFilter, ContractLog, DeploymentConfig,
@@ -10,7 +12,9 @@ use lunarbase_client_core::transport::ws::{WsRpcBackend, WsRpcConfig};
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Resource bounds for the Base preconfirmation stream.
 pub struct BaseFlashblocksConfig {
+    /// Maximum accepted parser frame size before the source fails closed.
     pub max_frame_bytes: usize,
+    /// Maximum provisional updates buffered while awaiting a head watermark.
     pub reorder_capacity: usize,
 }
 
@@ -30,6 +34,7 @@ impl Default for BaseFlashblocksConfig {
 /// client intentionally avoids decoding the much larger `newFlashblocks`
 /// payload.
 pub struct BaseFlashblocksSource {
+    /// Common bounded WebSocket implementation configured for Base subscriptions.
     inner: WsRpcBackend,
 }
 

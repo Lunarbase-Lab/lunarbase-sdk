@@ -5,11 +5,16 @@ type CursorKey = readonly [bigint, bigint, bigint, bigint, bigint, number];
 
 /** Reorder buffer that fails closed on overflow or conflicting cursor payloads. */
 export class CursorReorderBuffer {
+  /** Updates indexed by their normalized deterministic source position. */
   private readonly pending = new Map<string, { key: CursorKey; update: ChainUpdate }>();
+  /** Sticky continuity-failure flag cleared only by creating a new buffer. */
   private poisoned = false;
 
   /** Creates a buffer with a hard memory bound. */
-  constructor(readonly capacity: number) {
+  constructor(
+    /** Maximum retained updates before continuity fails closed. */
+    readonly capacity: number,
+  ) {
     if (!Number.isSafeInteger(capacity) || capacity <= 0) throw new Error("reorder buffer capacity must be positive");
   }
 

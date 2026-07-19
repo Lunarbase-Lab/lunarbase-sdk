@@ -52,7 +52,7 @@ help:
 	@echo "  make docker-up      Build and start indexer + Redis"
 	@echo "  make docker-build-monad-native  Build the x86_64 native Monad image"
 	@echo "  make release-check  Validate Rust/npm package contents"
-	@echo "  make source-size-check  Enforce the 500-line source-file limit"
+	@echo "  make source-size-check  Enforce the 500 non-comment code-line limit"
 	@echo "  make verify         Run formatting, checks, lint, tests, and docs"
 	@echo "  make install        Install locked pnpm dependencies"
 	@echo "  make clean          Remove Rust and TypeScript build artifacts"

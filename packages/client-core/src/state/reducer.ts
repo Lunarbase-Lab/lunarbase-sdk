@@ -47,13 +47,17 @@ function cloneState(state: QuoteState): QuoteState {
 
 /** In-memory reducer whose maps never escape the client API. */
 export class QuoteReducer {
+  /** Complete quote-critical state mutated only by this ordered reducer. */
   private state: QuoteState;
+  /** Last normalized head or event position accepted by the reducer. */
   private cursorValue?: ChainCursor;
+  /** Fail-closed publication flag cleared by gaps and reducer failures. */
   private ready = false;
 
   /** Creates a not-ready reducer for one configured router. */
   constructor(
     state: QuoteState,
+    /** Only router whose fee and whitelist updates affect this instance. */
     private readonly configuredRouter: Address,
   ) {
     this.state = cloneState(state);

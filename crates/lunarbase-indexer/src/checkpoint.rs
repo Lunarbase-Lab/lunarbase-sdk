@@ -12,19 +12,25 @@ const REDIS_TIMEOUT: Duration = Duration::from_secs(2);
 #[derive(Clone, Debug)]
 /// One-key Redis store. `SET` is atomic and the key has no TTL.
 pub struct RedisCheckpointStore {
+    /// Redis connection URL used only by blocking checkpoint workers.
     url: String,
+    /// Deployment- and schema-specific key containing the full checkpoint DTO.
     key: String,
 }
 
 #[derive(Debug, Error)]
 /// Redis transport or checkpoint DTO failure.
 pub enum CheckpointError {
+    /// Redis connection or command execution failed.
     #[error("Redis: {0}")]
     Redis(String),
+    /// The versioned checkpoint value is not valid JSON.
     #[error("checkpoint JSON: {0}")]
     Json(#[from] serde_json::Error),
+    /// A decoded DTO contains an invalid EVM primitive or incompatible value.
     #[error("checkpoint DTO: {0}")]
     Invalid(String),
+    /// The blocking Redis worker panicked or was cancelled.
     #[error("checkpoint worker: {0}")]
     Worker(String),
 }

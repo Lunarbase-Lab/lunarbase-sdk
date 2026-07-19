@@ -17,21 +17,32 @@ import { QuoteIndexer } from "./engine.js";
 
 /** Runtime-only configuration; persistence belongs to the Rust indexer. */
 export interface ClientConnectConfig {
+  /** Immutable network, Core contract, router, and endpoint identity. */
   readonly deployment: DeploymentConfig;
+  /** Core address and quote-critical topics accepted by the source. */
   readonly filter: ContractFilter;
+  /** Maximum normalized updates waiting for the ordered reducer. */
   readonly queueBound: number;
+  /** Delay before reopening a failed realtime subscription. */
   readonly reconnectDelayMilliseconds: number;
 }
 
 /** High-level embeddable client with one active ordered reducer. */
 export class ConnectedQuoteClient {
   private constructor(
+    /** Mutable quote state owned by the single ordered reducer. */
     private readonly indexer: QuoteIndexer,
+    /** Provider adapter used for realtime updates and canonical recovery. */
     private readonly source: ChainDataSource,
+    /** Validated deployment and bounded runtime settings. */
     private readonly config: ClientConnectConfig,
+    /** Cooperative cancellation signal for source and reducer loops. */
     private readonly controller: AbortController,
+    /** Bounded handoff between asynchronous ingestion and ordered reduction. */
     private readonly queue: BoundedUpdateQueue,
+    /** Realtime subscription task retained for deterministic shutdown. */
     private readonly pumpTask: Promise<void>,
+    /** Ordered reducer task retained for deterministic shutdown. */
     private readonly reducerTask: Promise<void>,
   ) {}
 

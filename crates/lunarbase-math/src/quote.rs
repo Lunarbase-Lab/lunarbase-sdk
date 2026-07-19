@@ -1,3 +1,5 @@
+//! High-level direct and routed quote evaluation.
+
 use crate::arithmetic::{checked_add, checked_sub};
 use crate::fees::{
     calculate_fee_bps_for_router, quote_lane_exact_in, quote_lane_exact_in_fee,

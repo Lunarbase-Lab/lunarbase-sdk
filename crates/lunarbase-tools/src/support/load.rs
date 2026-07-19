@@ -13,17 +13,22 @@ use tokio::sync::Semaphore;
 #[derive(Clone, Debug, Parser)]
 #[command(name = "lunarbase-load")]
 pub struct LoadArguments {
+    /// Base HTTP URL of the indexer under test.
     #[arg(long, default_value = "http://127.0.0.1:8080")]
     pub indexer_url: String,
     /// JSON array of quote request objects. Synthetic requests are used when omitted.
     #[arg(long)]
     pub vectors: Option<PathBuf>,
+    /// Number of distinct lane states represented by the test topology.
     #[arg(long, default_value_t = 15)]
     pub lanes: usize,
+    /// Number of distinct quote pairs represented by request vectors.
     #[arg(long, default_value_t = 100)]
     pub pairs: usize,
+    /// Total HTTP quote requests issued during the run.
     #[arg(long, default_value_t = 20_000)]
     pub requests: usize,
+    /// Maximum number of in-flight quote requests.
     #[arg(long, default_value_t = 128)]
     pub concurrency: usize,
     /// Number of requests released in each scheduling burst.
@@ -38,13 +43,18 @@ pub struct LoadArguments {
 }
 
 #[derive(Debug, Error)]
+/// Configuration, input, or transport failure in the load harness.
 pub enum LoadError {
+    /// Vector input or operating-system metrics could not be read.
     #[error("I/O failure: {0}")]
     Io(#[from] std::io::Error),
+    /// Quote, metrics, or event-control HTTP request failed.
     #[error("HTTP failure: {0}")]
     Http(#[from] reqwest::Error),
+    /// Supplied quote vectors are not valid JSON.
     #[error("invalid vector JSON: {0}")]
     Json(#[from] serde_json::Error),
+    /// A requested load dimension is empty or internally inconsistent.
     #[error("invalid load settings: {0}")]
     Invalid(String),
 }

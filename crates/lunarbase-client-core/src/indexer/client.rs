@@ -1,3 +1,5 @@
+//! Connected client lifecycle, quote access, and graceful shutdown.
+
 use crate::indexer::client_types::{
     ClientConnectConfig, ClientRuntimeStats, ClientRuntimeStatsSnapshot,
 };
@@ -20,13 +22,23 @@ const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Fully connected client with a synchronous, shared-read quote path.
 pub struct ConnectedQuoteClient {
+    /// Shared hot state; quotes take a read lock and the reducer takes a short
+    /// write lock while applying an ordered update.
     indexer: Arc<RwLock<QuoteIndexer>>,
+    /// Notification used by bootstrap and recovery waiters when readiness is
+    /// restored.
     ready: Arc<Notify>,
+    /// Lock-free readiness flag checked before entering the quote read path.
     available: Arc<AtomicBool>,
+    /// Cooperative cancellation signal shared by all background tasks.
     cancel: watch::Sender<bool>,
+    /// Bounded fan-out channel for operational runtime events.
     runtime_events: broadcast::Sender<ClientRuntimeEvent>,
+    /// Shared lock-free counters exposed through `runtime_stats`.
     stats: Arc<ClientRuntimeStats>,
+    /// Reducer task handle retained so shutdown can await task completion.
     stop: Mutex<Option<JoinHandle<()>>>,
+    /// Source subscription task handle retained to prevent detached work.
     pump: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -253,7 +265,9 @@ impl ConnectedQuoteClient {
 /// This makes `connect` cancellation-safe, including SIGTERM received while a
 /// block-tagged snapshot RPC is still in flight.
 struct BootstrapPump {
+    /// Cooperative cancellation signal sent if bootstrap exits early.
     cancel: watch::Sender<bool>,
+    /// Realtime source task aborted unless ownership transfers to the client.
     handle: Option<JoinHandle<()>>,
 }
 

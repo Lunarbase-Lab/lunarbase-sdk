@@ -13,9 +13,13 @@ import {
 
 /** Optional dependency injection and transport bounds for Base. */
 export interface BaseClientOptions {
+  /** Canonical block tag used for coherent bootstrap snapshots. */
   readonly snapshotTag?: string;
+  /** Overrides for bounded Flashblocks WebSocket resources. */
   readonly wsConfig?: Partial<WsRpcConfig>;
+  /** Optional HTTP implementation for Node, browser, or tests. */
   readonly fetcher?: typeof fetch;
+  /** Optional WebSocket implementation for Node, browser, or tests. */
   readonly webSocketFactory?: WebSocketFactory;
 }
 

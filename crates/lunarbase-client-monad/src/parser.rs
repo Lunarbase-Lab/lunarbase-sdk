@@ -23,9 +23,13 @@ use crate::protocol::{ParserMessage, decode_parser_message};
 /// Resource and identity settings for the local Monad parser connection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MonadParserConfig {
+    /// Parser WebSocket subscription endpoint.
     pub ws_url: String,
+    /// Core contract used to reject unrelated parser logs.
     pub core: Address,
+    /// EIP-155 chain identifier attached to normalized updates.
     pub chain_id: u64,
+    /// Maximum accepted WebSocket frame size before fail-closed recovery.
     pub max_frame_bytes: usize,
 }
 
@@ -62,7 +66,9 @@ impl MonadParserConfig {
 
 /// Portable parser-WebSocket source with finalized RPC recovery.
 pub struct MonadParserSource {
+    /// Validated identity and resource limits for the portable parser.
     config: MonadParserConfig,
+    /// Finalized HTTP source used for snapshots, backfill, and checkpoint validation.
     canonical: RpcHttpBackend,
 }
 

@@ -1,3 +1,5 @@
+//! Connects to a portable Monad parser and prints normalized execution updates.
+
 use futures_util::StreamExt;
 use lunarbase_client_core::prelude::{ChainDataSource, ContractFilter};
 use lunarbase_client_monad::prelude::{MonadParserConfig, MonadParserSource};

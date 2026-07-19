@@ -11,8 +11,10 @@ use tokio::{sync::watch, task::JoinHandle, time::interval};
 #[derive(Debug, Error)]
 /// Service startup failure.
 pub enum RuntimeError {
+    /// The embeddable client failed deployment validation, bootstrap, or recovery.
     #[error(transparent)]
     Client(#[from] IndexerError),
+    /// The binary was compiled without the adapter selected by configuration.
     #[cfg(not(all(feature = "base", feature = "monad", feature = "arbitrum")))]
     #[error("network support is not compiled: {0:?}")]
     UnsupportedNetwork(Network),

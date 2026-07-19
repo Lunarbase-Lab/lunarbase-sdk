@@ -11,11 +11,17 @@ use std::{
 #[derive(Debug, Default)]
 /// Lock-free process metrics recorder.
 pub struct Metrics {
+    /// Total HTTP quote requests, including batch requests as one request.
     quote_count: AtomicU64,
+    /// Quote requests that returned a transport-level or runtime error.
     quote_errors: AtomicU64,
+    /// Accumulated quote handler latency used to expose a low-cost average.
     quote_latency_nanos: AtomicU64,
+    /// Quote requests submitted through the batch endpoint.
     quote_batches: AtomicU64,
+    /// Best-effort Redis checkpoint writes completed successfully.
     checkpoint_success: AtomicU64,
+    /// Redis checkpoint load or write attempts that failed.
     checkpoint_failure: AtomicU64,
 }
 

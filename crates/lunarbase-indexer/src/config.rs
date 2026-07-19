@@ -24,30 +24,47 @@ pub struct Cli {
 #[serde(deny_unknown_fields)]
 /// Human-editable service configuration.
 pub struct RawConfig {
+    /// Adapter family name: `base`, `monad`, or `arbitrum`.
     pub network: String,
+    /// EIP-155 chain identifier expected from RPC and realtime sources.
     pub chain_id: u64,
+    /// LunarBase Core contract address encoded as an EVM hex string.
     pub core: String,
+    /// Single configured router whose fee profile is tracked.
     pub router: String,
+    /// Required bootstrap whitelist status for the configured router.
     #[serde(default = "default_true")]
     pub expect_whitelisted: bool,
+    /// First deployment block included in lane discovery.
     pub deployment_block: u64,
+    /// Pinned Core runtime bytecode hash, or the configured compatibility sentinel.
     pub expected_runtime_code_hash: String,
+    /// Contracts revision expected by the runtime and checkpoint schema.
     #[serde(default = "default_compatibility")]
     pub contract_compatibility_version: String,
+    /// HTTP JSON-RPC endpoint used only for bootstrap and recovery.
     pub http_rpc_url: String,
+    /// Network-adapter realtime endpoint or native event-ring locator.
     pub realtime_url: String,
+    /// Optional lane allowlist that avoids a full discovery replay.
     #[serde(default)]
     pub explicit_lane_assets: Vec<String>,
+    /// Socket address for quote, health, and metrics HTTP endpoints.
     #[serde(default = "default_bind")]
     pub bind: String,
+    /// Maximum normalized updates waiting for the single reducer.
     #[serde(default = "default_queue_bound")]
     pub queue_bound: usize,
+    /// Delay before reopening a failed realtime subscription.
     #[serde(default = "default_reconnect_milliseconds")]
     pub reconnect_delay_milliseconds: u64,
+    /// Optional Redis URL used solely to accelerate restarts.
     #[serde(default)]
     pub redis_url: Option<String>,
+    /// Period between best-effort full checkpoint writes.
     #[serde(default = "default_checkpoint_seconds")]
     pub checkpoint_interval_seconds: u64,
+    /// Maximum graceful-shutdown duration before the process exits.
     #[serde(default = "default_shutdown_seconds")]
     pub shutdown_timeout_seconds: u64,
 }
@@ -55,22 +72,35 @@ pub struct RawConfig {
 #[derive(Clone, Debug)]
 /// Validated runtime configuration.
 pub struct Config {
+    /// Validated embeddable client identity and runtime bounds.
     pub client: ClientConnectConfig,
+    /// Parsed HTTP listen address.
     pub bind: SocketAddr,
+    /// Optional Redis checkpoint endpoint.
     pub redis_url: Option<String>,
+    /// Period between background checkpoint attempts.
     pub checkpoint_interval: Duration,
+    /// Deadline shared by client shutdown and final checkpoint handling.
     pub shutdown_timeout: Duration,
 }
 
 #[derive(Debug, Error)]
 /// Configuration loading or validation failure.
 pub enum ConfigError {
+    /// The TOML configuration file could not be read.
     #[error("read config: {0}")]
     Read(#[from] std::io::Error),
+    /// The configuration does not match the strict TOML schema.
     #[error("parse config: {0}")]
     Toml(#[from] toml::de::Error),
+    /// A parsed value violates a deployment or resource invariant.
     #[error("invalid {field}: {detail}")]
-    Invalid { field: &'static str, detail: String },
+    Invalid {
+        /// Stable configuration field or section name.
+        field: &'static str,
+        /// Parsing, range, or semantic validation failure.
+        detail: String,
+    },
 }
 
 impl Config {

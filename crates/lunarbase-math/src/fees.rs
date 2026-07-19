@@ -1,3 +1,5 @@
+//! Pure fee, spread, and slippage formulas used by the quote engine.
+
 use crate::arithmetic::{
     BPS, MAX_SLIPPAGE_BPS, SLIPPAGE_SCALE, WAD, ceil_div, checked_add, checked_sub,
     full_mul_div_down, full_mul_div_up, mul_div_down_256,

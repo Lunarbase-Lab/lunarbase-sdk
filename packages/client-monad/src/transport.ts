@@ -28,7 +28,9 @@ import { MonadExecutionNormalizer, type ExecutionEvent, type ExecutionEventReade
 
 /** Bounded parser-side WebSocket resources. */
 export interface MonadParserConfig {
+  /** Maximum accepted parser frame size before fail-closed recovery. */
   readonly maxFrameBytes: number;
+  /** Maximum decoded parser messages waiting for consumption. */
   readonly queueCapacity: number;
 }
 
@@ -39,17 +41,26 @@ export const DEFAULT_MONAD_PARSER_CONFIG: MonadParserConfig = Object.freeze({
 
 /** Complete portable Monad source; TypeScript intentionally has no native ring binding. */
 export class MonadParserSource implements ChainDataSource, ExecutionEventReader {
+  /** Network family exposed through the common data-source interface. */
   readonly network = Network.Monad;
+  /** Finalized HTTP authority used for backfill and checkpoint validation. */
   private readonly http: RpcHttpBackend;
+  /** Coherent block-tagged Core snapshot provider. */
   private readonly snapshots: RpcSnapshotProvider;
+  /** Platform or injected WebSocket constructor. */
   private readonly factory: WebSocketFactory;
+  /** Validated parser frame and queue bounds. */
   readonly config: MonadParserConfig;
 
   /** Creates a parser source plus canonical RPC bootstrap/recovery backend. */
   constructor(
+    /** Strict read-only HTTP client used for canonical operations. */
     readonly rpc: JsonRpcHttpClient,
+    /** Portable parser WebSocket subscription endpoint. */
     readonly wsEndpoint: string,
+    /** EIP-155 chain identifier attached to normalized updates. */
     readonly chainId: bigint,
+    /** Canonical block tag used for bootstrap and recovery. */
     readonly snapshotTag = "finalized",
     config: Partial<MonadParserConfig> = {},
     factory: WebSocketFactory = defaultWebSocketFactory,

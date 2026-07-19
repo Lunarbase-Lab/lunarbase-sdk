@@ -1,3 +1,5 @@
+//! Connection configuration and observable runtime counters.
+
 use crate::indexer::errors::IndexerError;
 use crate::model::{ContractFilter, DeploymentConfig, SourceError};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -6,9 +8,13 @@ use std::time::Duration;
 #[derive(Clone, Debug)]
 /// Connection and bounded-queue settings for an embeddable client.
 pub struct ClientConnectConfig {
+    /// Immutable chain, Core contract, router, and endpoint identity.
     pub deployment: DeploymentConfig,
+    /// Core address and topic set accepted by the realtime source.
     pub filter: ContractFilter,
+    /// Maximum number of normalized updates waiting for the reducer.
     pub buffer_capacity: usize,
+    /// Delay before reopening a failed realtime subscription.
     pub reconnect_delay: Duration,
 }
 
@@ -30,12 +36,19 @@ impl ClientConnectConfig {
 }
 
 #[derive(Debug)]
+/// Lock-free counters shared by the source pump, reducer, and metrics reader.
 pub(super) struct ClientRuntimeStats {
+    /// Number of normalized updates currently waiting for the reducer.
     pub(super) queue_depth: AtomicUsize,
+    /// Immutable hard bound configured for the reducer queue.
     queue_capacity: usize,
+    /// Number of source subscription reopen attempts.
     pub(super) source_reconnects: AtomicU64,
+    /// Number of discontinuities that revoked quote readiness.
     pub(super) gaps: AtomicU64,
+    /// Number of canonical recoveries completed successfully.
     pub(super) recoveries: AtomicU64,
+    /// Number of canonical recovery attempts that failed.
     pub(super) recovery_failures: AtomicU64,
 }
 
@@ -66,10 +79,16 @@ impl ClientRuntimeStats {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 /// Point-in-time runtime counters for metrics.
 pub struct ClientRuntimeStatsSnapshot {
+    /// Number of updates currently waiting in the reducer queue.
     pub queue_depth: usize,
+    /// Configured hard bound of the reducer queue.
     pub queue_capacity: usize,
+    /// Number of realtime subscription reopen attempts.
     pub source_reconnects: u64,
+    /// Number of continuity gaps observed by the runtime.
     pub gaps: u64,
+    /// Number of canonical recoveries completed successfully.
     pub recoveries: u64,
+    /// Number of canonical recovery attempts that failed.
     pub recovery_failures: u64,
 }

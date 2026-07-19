@@ -1,3 +1,5 @@
+//! Canonical HTTP backend shared by realtime network adapters.
+
 use crate::model::{
     BackfillRequest, ChainCursor, Checkpoint, Commitment, ContractLog, Network, SourceError,
 };
@@ -7,9 +9,13 @@ use std::sync::Arc;
 #[derive(Clone)]
 /// Canonical HTTP backend used by all realtime network adapters.
 pub struct RpcHttpBackend {
+    /// Read-only Alloy provider used for explicit JSON-RPC operations.
     rpc: RpcHttpClient,
+    /// Network family exposed through the common data-source interface.
     network: Network,
+    /// EIP-155 chain identifier attached to normalized cursors.
     chain_id: u64,
+    /// Explicit block tag used to make bootstrap reads coherent.
     snapshot_tag: Arc<str>,
 }
 

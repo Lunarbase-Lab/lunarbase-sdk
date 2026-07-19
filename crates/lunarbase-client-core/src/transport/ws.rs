@@ -31,8 +31,11 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 /// use when an RPC provider stops producing heads or sends a burst of logs.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WsRpcConfig {
+    /// Maximum accepted WebSocket frame size before the stream fails closed.
     pub max_frame_bytes: usize,
+    /// Maximum normalized updates retained while waiting for an ordering watermark.
     pub reorder_capacity: usize,
+    /// Ethereum subscription method, either `logs` or provider-specific `pendingLogs`.
     pub logs_subscription: String,
     /// Accept multiple monotonically sequenced heads at one block height.
     pub progressive_heads: bool,
@@ -72,8 +75,11 @@ impl WsRpcConfig {
 /// `flashblocks.rs` while retaining this backend for canonical fallback.
 #[derive(Clone)]
 pub struct WsRpcBackend {
+    /// Canonical HTTP backend used for snapshots, backfills, and validation.
     http: RpcHttpBackend,
+    /// WebSocket endpoint used exclusively for realtime subscriptions.
     ws_endpoint: Arc<str>,
+    /// Frame, ordering, and subscription behavior limits.
     config: WsRpcConfig,
 }
 

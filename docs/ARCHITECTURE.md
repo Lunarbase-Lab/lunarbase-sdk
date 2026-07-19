@@ -184,5 +184,6 @@ Embeddable clients expose `checkpoint()` but contain no Redis dependency.
 - Base payload fixtures.
 - Separate Monad and Arbitrum live-validation gates.
 
-All Rust and TypeScript source files are limited to 500 lines so modules retain
-a reviewable context boundary.
+All Rust and TypeScript source files are limited to 500 non-comment code lines
+so documentation can remain detailed without encouraging oversized modules.
+Modules retain a reviewable context boundary.

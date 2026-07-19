@@ -1,3 +1,5 @@
+//! Alloy-backed normalization of Ethereum JSON-RPC heads and logs.
+
 use crate::model::{ChainCursor, Commitment, ContractLog};
 use crate::transport::rpc::client::RpcError;
 use alloy_rpc_types_eth::Log;

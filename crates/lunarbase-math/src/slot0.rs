@@ -1,3 +1,5 @@
+//! Bit-exact packing and decoding for the protocol's `Lane.slot0` word.
+
 use crate::types::{MathError, U256};
 
 const PRICE_BITS: usize = 112;
@@ -13,12 +15,19 @@ const RESERVED_BITS: usize = 56;
 /// pack/unpack operations and therefore does not spread `U256` through fields
 /// whose Solidity widths are known.
 pub struct LaneSlot0 {
+    /// WAD-denominated lane price stored in the low 112 bits.
     pub price: u128,
+    /// Exact-in fee applied when converting cash into the lane asset.
     pub ask_fee_bps: u32,
+    /// Exact-in fee applied when converting the lane asset into cash.
     pub bid_fee_bps: u32,
+    /// Seven-bit price movement threshold copied from the Solidity layout.
     pub price_push_threshold: u8,
+    /// Whether `price_push_threshold` participates in on-chain update policy.
     pub threshold_enabled: bool,
+    /// EVM block at which the packed lane price was last updated.
     pub latest_update_block: u64,
+    /// Uninterpreted upper 56 bits preserved across decode/encode operations.
     pub reserved_high_bits: u64,
 }
 

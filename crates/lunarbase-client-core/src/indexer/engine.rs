@@ -1,3 +1,5 @@
+//! Synchronous quote state machine shared by the connected runtime.
+
 use crate::bootstrap::BootstrapSnapshot;
 use crate::indexer::errors::IndexerError;
 use crate::indexer::quote_types::{ClientBatchQuote, ClientQuote, IndexerHealth};
@@ -14,7 +16,9 @@ use lunarbase_math::types::B256;
 #[derive(Clone, Debug)]
 /// Synchronous state machine used under the client's short `RwLock` guards.
 pub struct QuoteIndexer {
+    /// Ordered reducer owning the current quote-critical state and cursor.
     pub reducer: QuoteReducer,
+    /// Immutable deployment identity used for compatibility and router checks.
     deployment: DeploymentConfig,
 }
 

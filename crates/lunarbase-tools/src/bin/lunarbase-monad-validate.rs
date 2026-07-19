@@ -1,3 +1,5 @@
+//! Performs long-running Monad parser, indexer, RPC, and quote parity validation.
+
 use clap::Parser;
 use lunarbase_tools::support::monad::runner::run;
 use lunarbase_tools::support::monad::types::MonadArguments;

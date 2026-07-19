@@ -25,10 +25,15 @@ import {
 
 /** Resource bounds for generic Ethereum WebSocket ingestion. */
 export interface WsRpcConfig {
+  /** Maximum accepted WebSocket frame size before fail-closed recovery. */
   readonly maxFrameBytes: number;
+  /** Maximum updates retained while awaiting an ordering watermark. */
   readonly reorderCapacity: number;
+  /** Maximum decoded frames waiting for the socket consumer. */
   readonly queueCapacity: number;
+  /** Ethereum subscription method used for Core event logs. */
   readonly logsSubscription: "logs" | "pendingLogs";
+  /** Whether multiple sequenced heads at one block height are valid progress. */
   readonly progressiveHeads: boolean;
 }
 
@@ -41,10 +46,15 @@ export const DEFAULT_WS_RPC_CONFIG: WsRpcConfig = Object.freeze({
 });
 
 export interface WebSocketLike {
+  /** Browser-compatible numeric socket state, when exposed by the implementation. */
   readonly readyState?: number;
+  /** Sends one text subscription or control frame. */
   send(data: string): void;
+  /** Requests an orderly socket close. */
   close(code?: number, reason?: string): void;
+  /** Registers a browser-compatible socket event listener. */
   addEventListener(type: "open" | "message" | "error" | "close", listener: (event: SocketEvent) => void): void;
+  /** Removes a previously registered listener when supported. */
   removeEventListener?(type: "open" | "message" | "error" | "close", listener: (event: SocketEvent) => void): void;
 }
 
@@ -58,17 +68,26 @@ export type WebSocketFactory = (url: string) => WebSocketLike;
  * instead of being silently hidden by reconnecting from an unknown cursor.
  */
 export class WsRpcBackend implements ChainDataSource {
+  /** Canonical HTTP backend used for heads, backfill, and validation. */
   private readonly http: RpcHttpBackend;
+  /** Coherent block-tagged Core snapshot provider. */
   private readonly snapshots: RpcSnapshotProvider;
+  /** Platform or injected WebSocket constructor. */
   private readonly factory: WebSocketFactory;
+  /** Validated frame, queue, ordering, and subscription limits. */
   readonly config: WsRpcConfig;
 
   /** Creates a WebSocket backend with bounded frame, queue, and reorder memory. */
   constructor(
+    /** Strict read-only HTTP client used outside the quote path. */
     readonly rpc: JsonRpcHttpClient,
+    /** WebSocket endpoint used exclusively for realtime subscriptions. */
     readonly wsEndpoint: string,
+    /** Network family exposed through the common source interface. */
     readonly network: Network,
+    /** EIP-155 chain identifier attached to normalized cursors. */
     readonly chainId: bigint,
+    /** Canonical block tag used for snapshot and recovery reads. */
     readonly snapshotTag = "finalized",
     config: Partial<WsRpcConfig> = {},
     factory: WebSocketFactory = defaultWebSocketFactory,
@@ -336,14 +355,22 @@ export function defaultWebSocketFactory(url: string): WebSocketLike {
 }
 
 export class BoundedFrameQueue {
+  /** Decoded text frames waiting for the socket consumer. */
   private readonly values: string[] = [];
+  /** Pending consumers released when data or terminal state arrives. */
   private readonly waiters: Array<(value: string | undefined) => void> = [];
+  /** Whether the underlying socket emitted its open event. */
   private opened = false;
+  /** Whether close, failure, or cancellation terminated the queue. */
   private ended = false;
+  /** Terminal transport failure propagated to pending and future readers. */
   private failure?: Error;
 
   /** Creates a bounded frame queue for one socket reader. */
-  constructor(private readonly capacity: number) {}
+  constructor(
+    /** Maximum decoded frames retained before fail-closed recovery. */
+    private readonly capacity: number,
+  ) {}
 
   /** Marks the socket open and releases open waiters. */
   open(): void {

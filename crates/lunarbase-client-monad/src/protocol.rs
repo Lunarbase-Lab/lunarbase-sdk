@@ -1,3 +1,5 @@
+//! Strict decoding for the portable Monad execution-events parser protocol.
+
 use crate::execution::{ExecutionHead, ExecutionLog};
 use lunarbase_client_core::model::{Commitment, SourceError};
 use lunarbase_math::types::{Address, B256, Bytes};
@@ -5,23 +7,39 @@ use serde_json::Value;
 use thiserror::Error;
 
 #[derive(Debug, Error, Clone, Eq, PartialEq)]
+/// Invalid, incomplete, or rejected parser WebSocket payload.
 pub enum ParserProtocolError {
+    /// The frame is not valid JSON.
     #[error("invalid parser JSON: {0}")]
     Json(String),
+    /// A required parser field is absent or null.
     #[error("parser message is missing `{0}`")]
     MissingField(&'static str),
+    /// A parser field exists but cannot be converted to its protocol type.
     #[error("parser message has invalid `{field}`: {detail}")]
-    InvalidField { field: &'static str, detail: String },
+    InvalidField {
+        /// Stable JSON field name used for diagnostics.
+        field: &'static str,
+        /// Conversion or range-check failure.
+        detail: String,
+    },
+    /// The parser returned an explicit JSON-RPC error response.
     #[error("parser returned an error: {0}")]
     RemoteError(String),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+/// Typed classification of one parser WebSocket frame.
 pub enum ParserMessage {
+    /// Successful subscription acknowledgement with no state transition.
     SubscriptionAck,
+    /// Monad block lifecycle notification.
     Head(ExecutionHead),
+    /// Quote-critical candidate EVM log.
     Log(ExecutionLog),
+    /// Explicit parser discontinuity that requires canonical recovery.
     Gap(String),
+    /// Recognized frame that does not affect quote-critical state.
     Ignore,
 }
 

@@ -12,18 +12,25 @@ use thiserror::Error;
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 /// Failure that revokes quote readiness until canonical recovery.
 pub enum ReducerError {
+    /// An update cursor belongs to another EIP-155 chain.
     #[error("cursor chain id mismatch")]
     ChainIdMismatch,
+    /// An event precedes the last accepted position in deterministic ordering.
     #[error("cursor regression")]
     CursorRegression,
+    /// A provider retracted an applied log, requiring canonical state rebuild.
     #[error("removed log requires canonical rebuild")]
     RemovedLog,
+    /// Two non-progressive cursors claim different hashes for one block height.
     #[error("block hash mismatch")]
     BlockHashMismatch,
+    /// A state delta would underflow, overflow, or otherwise violate arithmetic invariants.
     #[error("arithmetic transition failed")]
     Arithmetic,
+    /// A lane slippage coefficient exceeds the contract's basis-point bound.
     #[error("invalid lane slippage K")]
     InvalidSlippageK,
+    /// An event value cannot fit the corresponding compact contract field.
     #[error("event value does not fit the contract storage width")]
     InvalidWidth,
 }
@@ -34,9 +41,13 @@ pub enum ReducerError {
 /// Every fallible value is validated before mutation, avoiding the previous
 /// full-state clone used for rollback on each event.
 pub struct QuoteReducer {
+    /// Complete quote-critical state mutated only by the ordered reducer task.
     state: QuoteState,
+    /// Only router whose partner fee and whitelist changes affect this instance.
     configured_router: Address,
+    /// Last normalized head or event position accepted by the reducer.
     cursor: Option<ChainCursor>,
+    /// Fail-closed publication flag cleared on gaps, reorgs, and reducer errors.
     ready: bool,
 }
 

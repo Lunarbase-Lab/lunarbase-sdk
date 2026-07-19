@@ -13,8 +13,11 @@ type CursorKey = (u64, u32, u32, u64, u32, u8);
 /// exceeded or conflicting updates share one event cursor.
 #[derive(Clone, Debug)]
 pub struct CursorReorderBuffer {
+    /// Maximum number of updates retained before continuity fails closed.
     capacity: usize,
+    /// Updates indexed by normalized deterministic source position.
     pending: BTreeMap<CursorKey, ChainUpdate>,
+    /// Sticky continuity-failure flag cleared only by constructing a new buffer.
     poisoned: bool,
 }
 

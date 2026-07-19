@@ -1,3 +1,5 @@
+//! Minimal read-only Alloy HTTP client without transaction fillers.
+
 use crate::model::{BackfillRequest, ChainCursor, Commitment, ContractLog, SourceError};
 use crate::transport::rpc::codec::{normalize_rpc_log, parse_rpc_head};
 use alloy_eips::{BlockId, BlockNumberOrTag};
@@ -12,8 +14,10 @@ use thiserror::Error;
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 /// Failure returned by the Alloy HTTP JSON-RPC boundary.
 pub enum RpcError {
+    /// The provider failed to send, receive, or execute a JSON-RPC request.
     #[error("RPC transport failed: {0}")]
     Transport(String),
+    /// Local input or a provider response could not be normalized safely.
     #[error("RPC response is invalid: {0}")]
     Invalid(String),
 }
@@ -27,7 +31,9 @@ impl From<RpcError> for SourceError {
 #[derive(Clone)]
 /// Read-only Alloy provider with no transaction fillers or retry layers.
 pub struct RpcHttpClient {
+    /// Original validated endpoint retained for diagnostics and configuration views.
     endpoint: Arc<str>,
+    /// Alloy root provider configured without signing or transaction fillers.
     provider: RootProvider,
 }
 

@@ -1,3 +1,5 @@
+//! Managed external processes and local network fixtures for indexer E2E tests.
+
 use crate::support::e2e::assertions::wait_for_redis;
 use crate::support::e2e::helpers::{free_port, stop_requested};
 use crate::support::e2e::rpc_mock::rpc;
@@ -36,13 +38,18 @@ pub struct E2eArguments {
 }
 
 #[derive(Debug, Error)]
+/// Infrastructure or assertion failure in a process-level scenario.
 pub enum E2eError {
+    /// Local file, socket, or child-process operation failed.
     #[error("I/O failure: {0}")]
     Io(#[from] std::io::Error),
+    /// HTTP request to a mock or indexer endpoint failed.
     #[error("HTTP failure: {0}")]
     Http(#[from] reqwest::Error),
+    /// Temporary or externally configured Redis operation failed.
     #[error("Redis failure: {0}")]
     Redis(#[from] redis::RedisError),
+    /// Scenario invariant was not satisfied before its deadline.
     #[error("scenario failed: {0}")]
     Scenario(String),
 }

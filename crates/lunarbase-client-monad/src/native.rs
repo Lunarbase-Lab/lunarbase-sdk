@@ -52,7 +52,9 @@ impl MonadEventRingConfig {
 
 /// Production Monad source backed by the official native event-ring SDK.
 pub struct MonadEventRingSource {
+    /// Validated shared-memory identity, filtering, and resource bounds.
     config: MonadEventRingConfig,
+    /// Finalized HTTP authority used for bootstrap and canonical recovery.
     canonical: RpcHttpBackend,
 }
 

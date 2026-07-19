@@ -37,10 +37,12 @@ export class RpcError extends Error {
  * and CCIP-read are disabled. Chain ID is read only through `chainId()`.
  */
 export class JsonRpcHttpClient {
+  /** viem public client configured without batching, retries, or CCIP reads. */
   readonly client: PublicClient;
 
   /** Creates a strict read-only JSON-RPC client with an injectable fetcher. */
   constructor(
+    /** Validated HTTP JSON-RPC endpoint retained for diagnostics. */
     readonly endpoint: string,
     fetcher: typeof fetch = fetch,
   ) {
@@ -127,9 +129,13 @@ export class JsonRpcHttpClient {
 /** Canonical HTTP fallback for backfill, heads, and checkpoint validation. */
 export class RpcHttpBackend {
   constructor(
+    /** Strict read-only JSON-RPC client. */
     readonly rpc: JsonRpcHttpClient,
+    /** Network family exposed through the common source interface. */
     readonly network: Network,
+    /** EIP-155 chain identifier attached to normalized cursors. */
     readonly chainId: bigint,
+    /** Explicit block tag used for canonical snapshots and heads. */
     readonly snapshotTag = "finalized",
   ) {}
 
@@ -165,7 +171,9 @@ export class RpcHttpBackend {
 /** Materializes all quote-critical Core state at one explicit block. */
 export class RpcSnapshotProvider {
   constructor(
+    /** Strict read-only JSON-RPC client used for Core view calls. */
     readonly rpc: JsonRpcHttpClient,
+    /** Block tag applied to every read in one coherent snapshot. */
     readonly snapshotTag = "finalized",
   ) {}
 

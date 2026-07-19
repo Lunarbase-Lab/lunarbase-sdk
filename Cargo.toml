@@ -19,6 +19,7 @@ rust-version = "1.95"
 repository = "https://github.com/Lunarbase-Lab/lunarbase-sdk"
 
 [workspace.lints.rust]
+missing_docs = "deny"
 unsafe_code = "forbid"
 unused_must_use = "deny"
 

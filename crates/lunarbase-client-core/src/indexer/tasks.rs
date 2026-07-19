@@ -1,3 +1,5 @@
+//! Background source and single-writer reducer tasks for a connected client.
+
 use crate::indexer::client::publish;
 use crate::indexer::client_types::{ClientConnectConfig, ClientRuntimeStats};
 use crate::indexer::engine::QuoteIndexer;
@@ -12,10 +14,15 @@ use std::time::Duration;
 use tokio::sync::{Notify, broadcast, mpsc, watch};
 use tokio::time::sleep;
 
+/// Shared readiness, event, and counter handles used by the reducer task.
 pub(super) struct ReducerRuntime {
+    /// Notifies waiters whenever canonical recovery publishes ready state.
     pub ready: Arc<Notify>,
+    /// Lock-free fast readiness check performed before taking a quote read guard.
     pub available: Arc<AtomicBool>,
+    /// Bounded broadcast channel for operational lifecycle events.
     pub events: broadcast::Sender<ClientRuntimeEvent>,
+    /// Lock-free runtime counters updated by the single reducer task.
     pub stats: Arc<ClientRuntimeStats>,
 }
 

@@ -18,7 +18,9 @@ import { compareCursor, updateCursor } from "../source.js";
 /** Provider-neutral quote engine. No method on its hot path performs I/O. */
 export class QuoteIndexer {
   private constructor(
+    /** Ordered owner of current quote-critical state and cursor. */
     private reducer: QuoteReducer,
+    /** Immutable deployment identity used for compatibility checks. */
     private readonly deployment: DeploymentConfig,
   ) {}
 

@@ -9,34 +9,53 @@ use lunarbase_math::types::{Address, B256, Bytes};
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Block lifecycle notification from the parser or native ring.
 pub struct ExecutionHead {
+    /// Monotonic execution-event ring or parser sequence.
     pub sequence: u64,
+    /// EVM-visible Monad block height.
     pub block_number: u64,
+    /// Block identifier supplied by the execution source, when available.
     pub block_hash: Option<B256>,
+    /// Lifecycle confidence represented by this notification.
     pub commitment: Commitment,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// EVM log before normalization into the common client model.
 pub struct ExecutionLog {
+    /// Monotonic execution-event ring or parser sequence.
     pub sequence: u64,
+    /// Deterministic position inside one source sequence.
     pub source_sub_index: u32,
+    /// EVM-visible block that executed the log.
     pub block_number: u64,
+    /// Hash of the executing block, when supplied by the source.
     pub block_hash: Option<B256>,
+    /// Transaction position within the executing block.
     pub transaction_index: u32,
+    /// Log position within the executing block.
     pub log_index: u32,
+    /// EVM contract that emitted the log.
     pub address: Address,
+    /// Indexed event topics, including signature topic zero.
     pub topics: Vec<B256>,
+    /// Unindexed ABI-encoded event payload.
     pub data: Bytes,
+    /// Lifecycle confidence inherited from the nearest block notification.
     pub commitment: Commitment,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Raw execution lifecycle item.
 pub enum ExecutionEvent {
+    /// Announces a Monad block lifecycle transition.
     Head(ExecutionHead),
+    /// Carries one EVM log in execution order.
     Log(ExecutionLog),
+    /// Reports lost, expired, or non-monotonic execution-event data.
     Gap {
+        /// Last known normalized position, when the source can identify it.
         cursor: Option<ChainCursor>,
+        /// Diagnostic reason requiring canonical recovery.
         reason: String,
     },
 }
@@ -48,7 +67,9 @@ pub type ExecutionEventStream =
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 /// Tracks sparse parser or contiguous ring sequence positions.
 pub struct MonadSequenceTracker {
+    /// Latest source sequence accepted from the filtered stream.
     last_sequence: Option<u64>,
+    /// Latest event position accepted within `last_sequence`.
     last_sub_index: u32,
 }
 
@@ -87,7 +108,9 @@ impl MonadSequenceTracker {
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Converts parser or native ring events into common runtime updates.
 pub struct MonadExecutionNormalizer {
+    /// EIP-155 chain identifier attached to every normalized cursor.
     chain_id: u64,
+    /// Duplicate/regression guard for sparse parser and ring messages.
     tracker: MonadSequenceTracker,
 }
 

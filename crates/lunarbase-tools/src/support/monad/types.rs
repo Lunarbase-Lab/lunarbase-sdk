@@ -9,19 +9,25 @@ use thiserror::Error;
 #[derive(Clone, Debug, Parser)]
 #[command(name = "lunarbase-monad-validate")]
 pub struct MonadArguments {
+    /// Base HTTP URL of the Monad indexer under validation.
     #[arg(long, default_value = "http://127.0.0.1:8081")]
     pub indexer_url: String,
+    /// Execution-events parser WebSocket subscription endpoint.
     #[arg(long, default_value = "ws://127.0.0.1:8080/ws/subscriptions")]
     pub parser_ws_url: String,
+    /// Parser readiness endpoint sampled during the soak.
     #[arg(long, default_value = "http://127.0.0.1:8080/readyz")]
     pub parser_ready_url: String,
+    /// Canonical Monad JSON-RPC endpoint used as validation authority.
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     pub rpc_url: String,
     /// Quote plus optional Solidity eth_call comparison vectors.
     #[arg(long)]
     pub vectors: Option<PathBuf>,
+    /// Total soak-test runtime in seconds.
     #[arg(long, default_value_t = 3_600)]
     pub duration_seconds: u64,
+    /// Delay between health and quote samples in milliseconds.
     #[arg(long, default_value_t = 1_000)]
     pub sample_interval_milliseconds: u64,
     /// Optional JSON report destination; the report is always printed.
@@ -30,15 +36,21 @@ pub struct MonadArguments {
 }
 
 #[derive(Debug, Error)]
+/// Infrastructure, protocol, or comparison failure during Monad validation.
 pub enum MonadError {
+    /// Vector or report file operation failed.
     #[error("I/O failure: {0}")]
     Io(#[from] std::io::Error),
+    /// Indexer, parser-health, or canonical RPC HTTP request failed.
     #[error("HTTP failure: {0}")]
     Http(#[from] reqwest::Error),
+    /// Validation input or provider output is not valid JSON.
     #[error("JSON failure: {0}")]
     Json(#[from] serde_json::Error),
+    /// Parser WebSocket connection or frame operation failed.
     #[error("WebSocket failure: {0}")]
     WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
+    /// A semantic parity or health invariant failed.
     #[error("validation failed: {0}")]
     Validation(String),
 }

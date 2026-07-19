@@ -1,3 +1,5 @@
+//! Arbitrum Nitro transport built on standard logs and execution-aware heads.
+
 use lunarbase_client_core::bootstrap::BootstrapSnapshot;
 use lunarbase_client_core::model::{
     BackfillRequest, ChainCursor, Checkpoint, ContractFilter, ContractLog, DeploymentConfig,
@@ -10,6 +12,7 @@ use lunarbase_client_core::transport::ws::{WsRpcBackend, WsRpcConfig};
 #[derive(Clone)]
 /// Generic Nitro `logs + newHeads` source with explicit execution context.
 pub struct ArbitrumNitroSource {
+    /// Common HTTP/WebSocket source configured for the Arbitrum network family.
     inner: WsRpcBackend,
 }
 

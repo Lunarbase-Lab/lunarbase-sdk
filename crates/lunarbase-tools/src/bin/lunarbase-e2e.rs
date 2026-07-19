@@ -1,3 +1,5 @@
+//! Runs process-level indexer recovery, shutdown, and multi-replica scenarios.
+
 use clap::Parser;
 use lunarbase_tools::support::e2e::environment::E2eArguments;
 use lunarbase_tools::support::e2e::scenarios::run;

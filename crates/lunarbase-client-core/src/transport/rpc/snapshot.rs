@@ -1,3 +1,5 @@
+//! Coherent block-tagged reconstruction of quote-critical Core state.
+
 use crate::bootstrap::BootstrapSnapshot;
 use crate::model::{
     BackfillRequest, Commitment, ContractFilter, DeploymentConfig, QuoteEvent, SourceError,
@@ -14,7 +16,9 @@ use std::{collections::BTreeSet, sync::Arc};
 #[derive(Clone)]
 /// Produces one coherent, block-tagged quote state from Core view calls.
 pub struct RpcSnapshotProvider {
+    /// Read-only Alloy client used for Core views, code, heads, and lane discovery.
     rpc: RpcHttpClient,
+    /// Block tag applied to every view in one snapshot operation.
     snapshot_tag: Arc<str>,
 }
 

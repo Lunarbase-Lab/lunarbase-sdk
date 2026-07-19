@@ -62,7 +62,9 @@ pub mod core {
     }
 }
 
+/// Event signature used to discover newly configured lanes.
 pub const TOPIC_LANE_ADDED: B256 = core::LaneAdded::SIGNATURE_HASH;
+/// Event signature used to remove lanes during discovery replay.
 pub const TOPIC_LANE_REMOVED: B256 = core::LaneRemoved::SIGNATURE_HASH;
 const TOPIC_LANE_UPDATED: B256 = core::LaneUpdated::SIGNATURE_HASH;
 const TOPIC_SLIPPAGE_K_SET: B256 = core::SlippageKSet::SIGNATURE_HASH;

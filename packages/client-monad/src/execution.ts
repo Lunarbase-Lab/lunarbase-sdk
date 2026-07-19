@@ -5,23 +5,37 @@ import type { Hex } from "ox/Hex";
 
 /** Block lifecycle record emitted by the parser. */
 export interface ExecutionHead {
+  /** Monotonic parser or native execution-event sequence. */
   readonly sequence: bigint;
+  /** EVM-visible Monad block height. */
   readonly blockNumber: bigint;
+  /** Block identifier supplied by the execution source, when available. */
   readonly blockHash?: Hex;
+  /** Lifecycle confidence represented by the notification. */
   readonly commitment: Commitment;
 }
 
 /** EVM log emitted before normalization into the common model. */
 export interface ExecutionLog {
+  /** Monotonic parser or native execution-event sequence. */
   readonly sequence: bigint;
+  /** Deterministic position within one source sequence. */
   readonly sourceSubIndex: bigint;
+  /** EVM-visible block that executed the log. */
   readonly blockNumber: bigint;
+  /** Hash of the executing block, when supplied by the source. */
   readonly blockHash?: Hex;
+  /** Transaction position within the executing block. */
   readonly transactionIndex: bigint;
+  /** Log position within the executing block. */
   readonly logIndex: bigint;
+  /** EVM contract that emitted the log. */
   readonly address: Address;
+  /** Indexed event topics, including signature topic zero. */
   readonly topics: readonly Hex[];
+  /** Unindexed ABI-encoded event payload. */
   readonly data: Hex;
+  /** Lifecycle confidence inherited from the nearest block notification. */
   readonly commitment: Commitment;
 }
 
@@ -33,7 +47,9 @@ export type ExecutionEvent =
 
 /** Suppresses duplicate sparse parser positions and rejects regression. */
 export class MonadSequenceTracker {
+  /** Latest source sequence accepted from the filtered parser stream. */
   private lastSequence?: bigint;
+  /** Latest event position accepted within `lastSequence`. */
   private lastSubIndex = -1n;
 
   /** Records one parser sequence/sub-index pair. */
@@ -59,9 +75,13 @@ export class MonadSequenceTracker {
 
 /** Converts parser events to provider-neutral runtime updates. */
 export class MonadExecutionNormalizer {
+  /** Duplicate and regression guard for sparse parser messages. */
   private readonly tracker = new MonadSequenceTracker();
 
-  constructor(readonly chainId: bigint) {}
+  constructor(
+    /** EIP-155 chain identifier attached to every normalized cursor. */
+    readonly chainId: bigint,
+  ) {}
 
   /** Converts one event, returning `undefined` for an exact duplicate. */
   normalize(event: ExecutionEvent): ChainUpdate | undefined {
@@ -108,5 +128,6 @@ export class MonadExecutionNormalizer {
 
 /** Parser transport boundary useful to alternative portable implementations. */
 export interface ExecutionEventReader {
+  /** Opens a raw execution-event stream filtered to one Core deployment. */
   subscribeExecution(filter: ContractFilter, signal?: AbortSignal): AsyncIterable<ExecutionEvent>;
 }

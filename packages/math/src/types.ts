@@ -2,12 +2,19 @@ import type { Address, Word } from "./constants.js";
 
 /** Complete logical view of the packed lane slot. */
 export interface LaneSlot0 {
+  /** Fixed-point lane price stored in the low 128 bits of Solidity `slot0`. */
   price: bigint;
+  /** Exact-input fee charged when buying the lane asset, in protocol BPS. */
   askFeeBps: bigint;
+  /** Exact-input fee charged when selling the lane asset, in protocol BPS. */
   bidFeeBps: bigint;
+  /** Minimum price movement required before a thresholded update is accepted. */
   pricePushThreshold: bigint;
+  /** Whether Core enforces `pricePushThreshold` for this lane. */
   thresholdEnabled: boolean;
+  /** EVM block number of the latest accepted price update. */
   latestUpdateBlock: bigint;
+  /** Unassigned high bits preserved for bit-exact slot round trips. */
   reservedHighBits: bigint;
 }
 
@@ -30,10 +37,15 @@ export const LaneFlags = Object.freeze({
 
 /** Compact lane state consumed by the quote engine. */
 export interface LaneState {
+  /** Raw packed Solidity `Lane.slot0` word consumed by quote math. */
   slot0: Word;
+  /** Active principal used as the denominator of lane slippage. */
   totalPrincipalAmount: bigint;
+  /** Lane-specific slippage coefficient in protocol BPS. */
   slippageKBps: number;
+  /** Required execution-block delay after the latest price update. */
   blockDelay: number;
+  /** Compact `LaneFlags` bitset for existence and pause state. */
   flags: number;
 }
 
@@ -69,15 +81,21 @@ export function createLaneState(
 
 /** Effective fees for the single router configured by this client instance. */
 export interface FeeProfile {
+  /** Whether the configured router bypasses the global blacklist multiplier. */
   whitelisted: boolean;
+  /** Global fee multiplier applied only to non-whitelisted routers. */
   blacklistFeeMultiplier: bigint;
+  /** Partner fee for the configured router, keyed by fee asset. */
   partnerFeeBps: ReadonlyMap<Address, number>;
 }
 
 /** Immutable quote state snapshot shared by math and client layers. */
 export interface QuoteState {
+  /** Settlement asset used between two non-cash lanes. */
   cash: Address;
+  /** Quote-critical lane state keyed by non-cash asset address. */
   lanes: ReadonlyMap<Address, LaneState>;
+  /** Effective fees for the single router configured by this runtime. */
   feeProfile: FeeProfile;
 }
 
@@ -86,19 +104,29 @@ export type QuoteMode = "ExactIn" | "ExactOut";
 
 /** Pure quote request; router and freshness policy belong to the runtime. */
 export interface QuoteRequest {
+  /** ERC-20 asset supplied by the swap caller. */
   assetIn: Address;
+  /** ERC-20 asset requested by the swap caller. */
   assetOut: Address;
+  /** Fixed input or output quantity selected by `mode`. */
   amount: bigint;
+  /** Selects exact-input or exact-output quote evaluation. */
   mode: QuoteMode;
 }
 
 /** Successful quote amounts and fee attribution. */
 export interface QuoteResult {
+  /** Total input required by the quote, including input-side fees. */
   amountIn: bigint;
+  /** Net output returned by the quote, after output-side fees. */
   amountOut: bigint;
+  /** Asset in which `feeAmount` is denominated. */
   feeAsset: Address;
+  /** Full protocol fee before partner/treasury attribution. */
   feeAmount: bigint;
+  /** Portion of `feeAmount` assigned to the configured partner. */
   partnerFee: bigint;
+  /** Portion of `feeAmount` assigned to the protocol treasury. */
   treasuryFee: bigint;
 }
 

@@ -1,3 +1,5 @@
+//! Runs the embeddable Base client and periodically logs offchain quotes.
+
 use clap::Parser;
 use dotenvy::from_path;
 use lunarbase_client_base::prelude::connect_base;

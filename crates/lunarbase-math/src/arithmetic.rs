@@ -1,9 +1,16 @@
+//! Solidity-compatible fixed-width arithmetic primitives.
+
 use crate::types::{MathError, U256, U512};
 
+/// Fixed-point scale used for protocol prices (`1e18`).
 pub const WAD: U256 = U256::from_limbs([1_000_000_000_000_000_000, 0, 0, 0]);
+/// Protocol fee denominator (`1_000_000` units equal 100%).
 pub const BPS: U256 = U256::from_limbs([1_000_000, 0, 0, 0]);
+/// Additional divisor applied to the raw slippage expression.
 pub const SLIPPAGE_SCALE: U256 = U256::from_limbs([10, 0, 0, 0]);
+/// Maximum slippage charged by the protocol, expressed in protocol BPS.
 pub const MAX_SLIPPAGE_BPS: U256 = U256::from_limbs([100_000, 0, 0, 0]);
+/// Largest value accepted by contract fields declared as `uint128`.
 pub const U128_MAX: U256 = U256::from_limbs([u64::MAX, u64::MAX, 0, 0]);
 
 #[inline(always)]

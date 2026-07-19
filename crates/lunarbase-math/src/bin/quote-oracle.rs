@@ -1,3 +1,5 @@
+//! JSON-lines oracle used by the canonical Solidity differential FFI suite.
+
 use lunarbase_math::quote::{
     quote, solidity_exact_in_amount, solidity_exact_out_amount_for_request,
 };
