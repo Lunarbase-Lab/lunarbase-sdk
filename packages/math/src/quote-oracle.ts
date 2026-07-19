@@ -3,13 +3,13 @@ import {
   createLaneState,
   quote,
   parseAddress,
-  solidityExactInAmount,
   solidityExactOutAmountForRequest,
   type LaneState,
   type Address,
   type QuoteRequest,
   type QuoteState,
 } from "./index.js";
+import * as AbiParameters from "ox/AbiParameters";
 import * as Hex from "ox/Hex";
 
 declare const process: { argv: string[]; stdout: { write(value: string): void } };
@@ -40,6 +40,26 @@ type Vector = {
   laneIn: LaneVector | null;
   laneOut: LaneVector | null;
 };
+
+type AbiInteger = number | bigint;
+type AbiLane = {
+  present: boolean;
+  price: bigint;
+  askFeeBps: AbiInteger;
+  bidFeeBps: AbiInteger;
+  latestUpdateBlock: AbiInteger;
+  exists: boolean;
+  paused: boolean;
+  blockDelay: AbiInteger;
+  slippageKBps: AbiInteger;
+  principal: bigint;
+};
+
+const abiLane =
+  "(bool present,uint112 price,uint32 askFeeBps,uint32 bidFeeBps,uint40 latestUpdateBlock,bool exists,bool paused,uint8 blockDelay,uint32 slippageKBps,uint128 principal)";
+const abiFuzzVector = AbiParameters.from(
+  `(address cash,address assetIn,address assetOut,bool exactIn,uint256 amount,uint40 executionBlockNumber,uint256 blacklistFeeMultiplier,bool whitelisted,uint32 partnerFeeBps,${abiLane} laneIn,${abiLane} laneOut) vector`,
+);
 
 const value = (input: string): bigint => BigInt(input);
 const lane = (input: LaneVector): LaneState =>
@@ -92,6 +112,40 @@ function build(vector: Vector): { state: QuoteState; request: QuoteRequest; exec
     executionBlockNumber: value(vector.executionBlockNumber),
   };
 }
+
+function decodeLane(input: AbiLane): LaneVector | null {
+  if (!input.present) return null;
+  return {
+    price: String(input.price),
+    askFeeBps: String(input.askFeeBps),
+    bidFeeBps: String(input.bidFeeBps),
+    latestUpdateBlock: String(input.latestUpdateBlock),
+    exists: input.exists,
+    paused: input.paused,
+    blockDelay: String(input.blockDelay),
+    slippageKBps: String(input.slippageKBps),
+    principal: String(input.principal),
+  };
+}
+
+function decodeFuzzVector(encoded: Hex.Hex): Vector {
+  const [input] = AbiParameters.decode(abiFuzzVector, encoded);
+  return {
+    cash: input.cash,
+    router: "0x0000000000000000000000000000000000000000",
+    assetIn: input.assetIn,
+    assetOut: input.assetOut,
+    mode: input.exactIn ? "ExactIn" : "ExactOut",
+    amount: String(input.amount),
+    executionBlockNumber: String(input.executionBlockNumber),
+    blacklistFeeMultiplier: String(input.blacklistFeeMultiplier),
+    whitelisted: input.whitelisted,
+    partnerFeeBps: String(input.partnerFeeBps),
+    laneIn: decodeLane(input.laneIn),
+    laneOut: decodeLane(input.laneOut),
+  };
+}
+
 function output(vector: Vector): Hex.Hex {
   const built = build(vector);
   let words: bigint[];
@@ -110,8 +164,8 @@ function output(vector: Vector): Hex.Hex {
           ]
         : [
             0n,
-            solidityExactInAmount(outcome),
-            solidityExactOutAmountForRequest(built.request, outcome),
+            built.request.mode === "ExactOut" ? solidityExactOutAmountForRequest(built.request, outcome) : 0n,
+            0n,
             0n,
             0n,
             0n,
@@ -124,7 +178,14 @@ function output(vector: Vector): Hex.Hex {
 }
 
 const args = process.argv;
-const file = args[args.indexOf("--file") + 1];
-const index = Number(args[args.indexOf("--index") + 1]);
-const fixture = JSON.parse(await Bun.file(file).text()) as { vectors: Vector[] };
-process.stdout.write(`hex:${output(fixture.vectors[index]).slice(2)}`);
+const vectorIndex = args.indexOf("--vector");
+let vector: Vector;
+if (vectorIndex !== -1) {
+  vector = decodeFuzzVector(args[vectorIndex + 1] as Hex.Hex);
+} else {
+  const file = args[args.indexOf("--file") + 1];
+  const index = Number(args[args.indexOf("--index") + 1]);
+  const fixture = JSON.parse(await Bun.file(file).text()) as { vectors: Vector[] };
+  vector = fixture.vectors[index];
+}
+process.stdout.write(`hex:${output(vector).slice(2)}`);
