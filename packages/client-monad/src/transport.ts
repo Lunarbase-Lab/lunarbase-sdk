@@ -39,11 +39,22 @@ export const DEFAULT_MONAD_PARSER_CONFIG: MonadParserConfig = Object.freeze({
   queueCapacity: 4096,
 });
 
+const HANDSHAKE_TIMEOUT_MILLISECONDS = 10_000;
+
+interface EstablishedParserSocket {
+  readonly socket: WebSocketLike;
+  readonly queue: BoundedFrameQueue;
+  readonly logsSubscription: string;
+  readonly allSubscription: string;
+  readonly prefetched: string[];
+  readonly close: () => void;
+}
+
 /** Complete portable Monad source; TypeScript intentionally has no native ring binding. */
 export class MonadParserSource implements ChainDataSource, ExecutionEventReader {
   /** Network family exposed through the common data-source interface. */
   readonly network = Network.Monad;
-  /** Finalized HTTP authority used for backfill and checkpoint validation. */
+  /** Latest executed HTTP authority used for backfill and checkpoint validation. */
   private readonly http: RpcHttpBackend;
   /** Coherent block-tagged Core snapshot provider. */
   private readonly snapshots: RpcSnapshotProvider;
@@ -61,7 +72,7 @@ export class MonadParserSource implements ChainDataSource, ExecutionEventReader 
     /** EIP-155 chain identifier attached to normalized updates. */
     readonly chainId: bigint,
     /** Canonical block tag used for bootstrap and recovery. */
-    readonly snapshotTag = "finalized",
+    readonly snapshotTag = "latest",
     config: Partial<MonadParserConfig> = {},
     factory: WebSocketFactory = defaultWebSocketFactory,
   ) {
@@ -94,8 +105,8 @@ export class MonadParserSource implements ChainDataSource, ExecutionEventReader 
   }
 
   /** Normalizes parser records into the common update stream. */
-  subscribe(filter: ContractFilter, signal?: AbortSignal): AsyncIterable<ChainUpdate> {
-    const events = this.subscribeExecution(filter, signal);
+  async subscribe(filter: ContractFilter, signal?: AbortSignal): Promise<AsyncIterable<ChainUpdate>> {
+    const events = await this.subscribeExecution(filter, signal);
     const chainId = this.chainId;
     return (async function* () {
       const normalizer = new MonadExecutionNormalizer(chainId);
@@ -108,47 +119,25 @@ export class MonadParserSource implements ChainDataSource, ExecutionEventReader 
   }
 
   /** Exposes raw portable parser records for live validation tooling. */
-  subscribeExecution(filter: ContractFilter, signal?: AbortSignal): AsyncIterable<ExecutionEvent> {
-    return this.readSocket(this.factory(this.wsEndpoint), filter, signal);
+  async subscribeExecution(filter: ContractFilter, signal?: AbortSignal): Promise<AsyncIterable<ExecutionEvent>> {
+    const connection = await establishParserSocket(this.factory(this.wsEndpoint), filter, this.config, signal);
+    return this.readSocket(connection, filter, signal);
   }
 
   private async *readSocket(
-    socket: WebSocketLike,
+    connection: EstablishedParserSocket,
     filter: ContractFilter,
     signal?: AbortSignal,
   ): AsyncIterable<ExecutionEvent> {
-    const queue = new BoundedFrameQueue(this.config.queueCapacity);
-    const onOpen = () => queue.open();
-    const onMessage = (event: SocketEvent) => {
-      const frame = decodeFrame(event.data);
-      if (frame === undefined) queue.fail(new Error("Monad parser delivered a non-text frame"));
-      else if (new TextEncoder().encode(frame).byteLength > this.config.maxFrameBytes)
-        queue.fail(new Error("Monad parser frame exceeded configured bound"));
-      else queue.push(frame);
-    };
-    const onError = (event: SocketEvent) =>
-      queue.fail(event.error instanceof Error ? event.error : new Error("Monad parser WebSocket error"));
-    const onClose = (event: SocketEvent) => (event.reason ? queue.fail(new Error(event.reason)) : queue.close());
-    socket.addEventListener("open", onOpen);
-    socket.addEventListener("message", onMessage);
-    socket.addEventListener("error", onError);
-    socket.addEventListener("close", onClose);
-    const abort = () => queue.close();
-    signal?.addEventListener("abort", abort, { once: true });
+    const { queue, logsSubscription, allSubscription, prefetched, close } = connection;
 
     try {
-      if (socket.readyState === 1) queue.open();
-      await queue.waitUntilOpen(signal);
-      socket.send(subscriptionRequest(1, "logs", sidecarFilter(filter)));
-      socket.send(subscriptionRequest(2, "all"));
-      let logsSubscription: string | undefined;
-      let allSubscription: string | undefined;
       const commitments = new Map<bigint, Commitment>();
 
       while (!signal?.aborted) {
         let frame: string | undefined;
         try {
-          frame = await queue.next(signal);
+          frame = prefetched.shift() ?? (await queue.next(signal));
         } catch (error) {
           yield executionGap(`Monad parser failed: ${message(error)}`);
           return;
@@ -168,11 +157,6 @@ export class MonadParserSource implements ChainDataSource, ExecutionEventReader 
           yield executionGap(`Monad parser subscription error: ${JSON.stringify(value.error)}`);
           return;
         }
-        if (value.result !== undefined && typeof value.result === "string") {
-          if (Number(value.id) === 1) logsSubscription = value.result;
-          if (Number(value.id) === 2) allSubscription = value.result;
-          continue;
-        }
         if (value.method === "subscriptionGap") {
           const params =
             value.params && typeof value.params === "object" ? (value.params as Record<string, unknown>) : {};
@@ -190,10 +174,7 @@ export class MonadParserSource implements ChainDataSource, ExecutionEventReader 
           }
           continue;
         }
-        const subscription =
-          value.params && typeof value.params === "object"
-            ? (value.params as Record<string, unknown>).subscription
-            : undefined;
+        const subscription = result.subscription;
         if (typeof subscription !== "string") {
           yield executionGap("Monad parser notification has no subscription id");
           return;
@@ -240,14 +221,92 @@ export class MonadParserSource implements ChainDataSource, ExecutionEventReader 
     } catch (error) {
       yield executionGap(`invalid Monad parser payload: ${message(error)}`);
     } finally {
-      signal?.removeEventListener("abort", abort);
-      socket.removeEventListener?.("open", onOpen);
-      socket.removeEventListener?.("message", onMessage);
-      socket.removeEventListener?.("error", onError);
-      socket.removeEventListener?.("close", onClose);
-      if (!signal?.aborted) socket.close(1000, "source consumer stopped");
+      close();
     }
   }
+}
+
+async function establishParserSocket(
+  socket: WebSocketLike,
+  filter: ContractFilter,
+  config: MonadParserConfig,
+  signal?: AbortSignal,
+): Promise<EstablishedParserSocket> {
+  const queue = new BoundedFrameQueue(config.queueCapacity);
+  const onOpen = () => queue.open();
+  const onMessage = (event: SocketEvent) => {
+    const frame = decodeFrame(event.data);
+    if (frame === undefined) queue.fail(new Error("Monad parser delivered a non-text frame"));
+    else if (new TextEncoder().encode(frame).byteLength > config.maxFrameBytes)
+      queue.fail(new Error("Monad parser frame exceeded configured bound"));
+    else queue.push(frame);
+  };
+  const onError = (event: SocketEvent) =>
+    queue.fail(event.error instanceof Error ? event.error : new Error("Monad parser WebSocket error"));
+  const onClose = (event: SocketEvent) => (event.reason ? queue.fail(new Error(event.reason)) : queue.close());
+  socket.addEventListener("open", onOpen);
+  socket.addEventListener("message", onMessage);
+  socket.addEventListener("error", onError);
+  socket.addEventListener("close", onClose);
+  const abort = () => queue.close();
+  signal?.addEventListener("abort", abort, { once: true });
+  const close = () => {
+    signal?.removeEventListener("abort", abort);
+    socket.removeEventListener?.("open", onOpen);
+    socket.removeEventListener?.("message", onMessage);
+    socket.removeEventListener?.("error", onError);
+    socket.removeEventListener?.("close", onClose);
+    if (!signal?.aborted) socket.close(1000, "source consumer stopped");
+  };
+  try {
+    if (socket.readyState === 1) queue.open();
+    await withHandshakeTimeout(queue.waitUntilOpen(signal));
+    socket.send(subscriptionRequest(1, "logs", sidecarFilter(filter)));
+    socket.send(subscriptionRequest(2, "all"));
+    const acknowledgements = await readParserAcknowledgements(queue, signal);
+    return { socket, queue, close, ...acknowledgements };
+  } catch (error) {
+    close();
+    throw error;
+  }
+}
+
+async function readParserAcknowledgements(
+  queue: BoundedFrameQueue,
+  signal?: AbortSignal,
+): Promise<Pick<EstablishedParserSocket, "logsSubscription" | "allSubscription" | "prefetched">> {
+  let logsSubscription: string | undefined;
+  let allSubscription: string | undefined;
+  const prefetched: string[] = [];
+  while (!logsSubscription || !allSubscription) {
+    const frame = await withHandshakeTimeout(queue.next(signal));
+    if (frame === undefined) throw new RpcError("TRANSPORT", "Monad parser closed during handshake");
+    const value = JSON.parse(frame) as Record<string, unknown>;
+    if (value.error) throw new RpcError("TRANSPORT", `Monad parser subscription error: ${JSON.stringify(value.error)}`);
+    if (Number(value.id) === 1 && typeof value.result === "string") logsSubscription = value.result;
+    else if (Number(value.id) === 2 && typeof value.result === "string") allSubscription = value.result;
+    else prefetched.push(frame);
+  }
+  return { logsSubscription, allSubscription, prefetched };
+}
+
+function withHandshakeTimeout<T>(operation: Promise<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new RpcError("TRANSPORT", "Monad parser subscription handshake timed out")),
+      HANDSHAKE_TIMEOUT_MILLISECONDS,
+    );
+    operation.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 function validateConfig(config: MonadParserConfig): MonadParserConfig {

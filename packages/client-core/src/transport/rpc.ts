@@ -1,4 +1,4 @@
-import { BPS, createLaneState, type Address, type QuoteState } from "@lunarbase/math";
+import { BPS, createLaneState, laneExists, type Address, type QuoteState } from "@lunarbase/math";
 import type { AbiEvent as AbiEventType } from "ox/AbiEvent";
 import * as Hash from "ox/Hash";
 import * as Hex from "ox/Hex";
@@ -18,6 +18,8 @@ import { decodeCoreEvent, laneDiscoveryTopics } from "../protocol/abi.js";
 import { CORE_ABI, CORE_EVENTS, CORE_EVENT_TOPICS } from "../protocol/core.js";
 
 const BLOCK_TAGS = new Set<BlockTag>(["earliest", "finalized", "latest", "pending", "safe"]);
+const LOG_RANGE_CHUNK_BLOCKS = 10_000n;
+const SNAPSHOT_CONCURRENCY = 16;
 
 /** Typed failure from HTTP, JSON-RPC, or ABI response validation. */
 export class RpcError extends Error {
@@ -56,6 +58,7 @@ export class JsonRpcHttpClient {
         batch: false,
         fetchFn: fetcher,
         retryCount: 0,
+        timeout: 15_000,
       }),
     });
   }
@@ -75,6 +78,28 @@ export class JsonRpcHttpClient {
         }),
       )) ?? "0x"
     );
+  }
+
+  /** Reads runtime bytecode against an exact EIP-1898 block hash. */
+  async getCodeAtHash(address: Address, blockHash: Hex.Hex): Promise<Hex.Hex> {
+    return (
+      (await this.remote(() =>
+        this.client.getCode({
+          address,
+          blockHash,
+        }),
+      )) ?? "0x"
+    );
+  }
+
+  /** Computes the exact runtime bytecode hash at an explicit block tag. */
+  async runtimeCodeHash(address: Address, blockTag: string): Promise<Hex.Hex> {
+    return Hash.keccak256(await this.getCode(address, blockTag));
+  }
+
+  /** Computes runtime bytecode hash at one exact EIP-1898 block hash. */
+  async runtimeCodeHashAtHash(address: Address, blockHash: Hex.Hex): Promise<Hex.Hex> {
+    return Hash.keccak256(await this.getCodeAtHash(address, blockHash));
   }
 
   /** Converts one explicit `eth_getBlockByNumber` into a source cursor. */
@@ -97,23 +122,41 @@ export class JsonRpcHttpClient {
     };
   }
 
-  /** Fetches canonical logs with topic0 OR semantics and normalizes them. */
+  /**
+   * Fetches canonical logs in bounded ranges and bisects dense chunks rejected
+   * by a provider's documented result/range limit.
+   */
   async getLogs(
     request: BackfillRequest,
     chainId: bigint,
     commitment: ChainCursor["commitment"],
   ): Promise<ContractLog[]> {
+    if (request.fromBlock > request.toBlock) throw new RpcError("INVALID", "log range starts after its end");
     const events = eventsForTopics(request.filter.topics);
-    const logs = await this.remote(() =>
-      this.client.getLogs({
-        address: request.filter.address,
-        events,
-        fromBlock: request.fromBlock,
-        toBlock: request.toBlock,
-        strict: false,
-      }),
-    );
-    return logs.map((value) => normalizeViemLog(value, chainId, commitment));
+    const pending = initialLogRanges(request.fromBlock, request.toBlock);
+    const logs: ContractLog[] = [];
+    while (pending.length > 0) {
+      const [fromBlock, toBlock] = pending.shift()!;
+      try {
+        const chunk = await this.remote(() =>
+          this.client.getLogs({
+            address: request.filter.address,
+            events,
+            fromBlock,
+            toBlock,
+            strict: false,
+          }),
+        );
+        logs.push(...chunk.map((value) => normalizeViemLog(value, chainId, commitment)));
+      } catch (error) {
+        if (fromBlock >= toBlock || !isLogRangeLimit(error)) throw error;
+        const middle = fromBlock + (toBlock - fromBlock) / 2n;
+        pending.unshift([middle + 1n, toBlock]);
+        pending.unshift([fromBlock, middle]);
+      }
+    }
+    logs.sort((left, right) => compareCursor(left.cursor, right.cursor));
+    return logs;
   }
 
   private async remote<T>(operation: () => Promise<T>): Promise<T> {
@@ -126,6 +169,22 @@ export class JsonRpcHttpClient {
   }
 }
 
+function initialLogRanges(fromBlock: bigint, toBlock: bigint): Array<[bigint, bigint]> {
+  const ranges: Array<[bigint, bigint]> = [];
+  for (let start = fromBlock; start <= toBlock; start += LOG_RANGE_CHUNK_BLOCKS) {
+    const end = start + LOG_RANGE_CHUNK_BLOCKS - 1n;
+    ranges.push([start, end < toBlock ? end : toBlock]);
+  }
+  return ranges;
+}
+
+function isLogRangeLimit(error: unknown): boolean {
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  return ["too many results", "response size", "block range", "query exceeds", "limit exceeded", "-32005"].some(
+    (needle) => message.includes(needle),
+  );
+}
+
 /** Canonical HTTP fallback for backfill, heads, and checkpoint validation. */
 export class RpcHttpBackend {
   constructor(
@@ -136,7 +195,7 @@ export class RpcHttpBackend {
     /** EIP-155 chain identifier attached to normalized cursors. */
     readonly chainId: bigint,
     /** Explicit block tag used for canonical snapshots and heads. */
-    readonly snapshotTag = "finalized",
+    readonly snapshotTag = "latest",
   ) {}
 
   /** Reads the block-tagged source head. */
@@ -174,47 +233,55 @@ export class RpcSnapshotProvider {
     /** Strict read-only JSON-RPC client used for Core view calls. */
     readonly rpc: JsonRpcHttpClient,
     /** Block tag applied to every read in one coherent snapshot. */
-    readonly snapshotTag = "finalized",
+    readonly snapshotTag = "latest",
   ) {}
 
   /** Reads code, lanes, reserves, router policy, and the snapshot cursor. */
   async snapshot(config: DeploymentConfig): Promise<BootstrapSnapshot> {
+    const rpcChainId = await this.rpc.chainId();
+    if (rpcChainId !== config.chainId)
+      throw new RpcError("INVALID", `HTTP RPC chain id mismatch: expected ${config.chainId}, got ${rpcChainId}`);
     const commitment = this.snapshotTag === "finalized" ? CommitmentValue.Finalized : CommitmentValue.Canonical;
     const cursor = await this.rpc.blockCursor(this.snapshotTag, config.chainId, commitment);
+    if (cursor.blockHash === undefined) throw new RpcError("INVALID", "snapshot block has no canonical hash");
     if (cursor.blockNumber < config.deploymentBlock)
       throw new RpcError("INVALID", "snapshot block precedes deployment block");
 
-    const code = await this.rpc.getCode(config.core, this.snapshotTag);
+    const pinnedBlock = Hex.fromNumber(cursor.blockNumber);
+    const code = await this.rpc.getCodeAtHash(config.core, cursor.blockHash);
     const runtimeCodeHash = Hash.keccak256(code);
-    if (!isZeroHash(config.expectedRuntimeCodeHash) && runtimeCodeHash !== config.expectedRuntimeCodeHash)
-      throw new RpcError("INVALID", "runtime code hash mismatch");
+    if (runtimeCodeHash !== config.expectedRuntimeCodeHash) throw new RpcError("INVALID", "runtime code hash mismatch");
 
     const assets = await this.resolveLaneAssets(config, cursor.blockNumber);
-    const at = blockParameters(this.snapshotTag);
-    const cash = await this.rpc.client.readContract({
-      abi: CORE_ABI,
-      address: config.core,
-      functionName: "cash",
-      ...at,
-    });
-    const whitelisted = await this.rpc.client.readContract({
-      abi: CORE_ABI,
-      address: config.core,
-      functionName: "whitelist",
-      args: [config.router],
-      ...at,
-    });
+    const at = { blockHash: cursor.blockHash } as const;
+    const [cash, whitelisted] = await Promise.all([
+      this.rpc.client.readContract({
+        abi: CORE_ABI,
+        address: config.core,
+        functionName: "cash",
+        ...at,
+      }),
+      this.rpc.client.readContract({
+        abi: CORE_ABI,
+        address: config.core,
+        functionName: "whitelist",
+        args: [config.router],
+        ...at,
+      }),
+    ]);
     if (whitelisted !== config.expectWhitelisted)
       throw new RpcError(
         "INVALID",
         `configured router whitelist mismatch: expected ${config.expectWhitelisted}, got ${whitelisted}`,
       );
-    const blacklistFeeMultiplier = await this.rpc.client.readContract({
-      abi: CORE_ABI,
-      address: config.core,
-      functionName: "blacklistFeeMultiplier",
-      ...at,
-    });
+    const blacklistFeeMultiplier = whitelisted
+      ? 1n
+      : await this.rpc.client.readContract({
+          abi: CORE_ABI,
+          address: config.core,
+          functionName: "blacklistFeeMultiplier",
+          ...at,
+        });
     const lanes = new Map<Address, ReturnType<typeof createLaneState>>();
     const partnerFeeBps = new Map<Address, number>();
     const state: QuoteState = {
@@ -227,41 +294,61 @@ export class RpcSnapshotProvider {
       },
     };
 
-    for (const asset of assets) {
-      const [lane, reserves] = await Promise.all([
-        this.rpc.client.readContract({
-          abi: CORE_ABI,
-          address: config.core,
-          functionName: "lane",
-          args: [asset],
-          ...at,
+    for (let offset = 0; offset < assets.length; offset += SNAPSHOT_CONCURRENCY) {
+      const entries = await Promise.all(
+        assets.slice(offset, offset + SNAPSHOT_CONCURRENCY).map(async (asset) => {
+          const [lane, reserves] = await Promise.all([
+            this.rpc.client.readContract({
+              abi: CORE_ABI,
+              address: config.core,
+              functionName: "lane",
+              args: [asset],
+              ...at,
+            }),
+            this.rpc.client.readContract({
+              abi: CORE_ABI,
+              address: config.core,
+              functionName: "reserves",
+              args: [asset],
+              ...at,
+            }),
+          ]);
+          return [
+            asset,
+            createLaneState(Hex.toBigInt(lane[0]), reserves[4], lane[4], lane[3], lane[1], lane[2]),
+          ] as const;
         }),
-        this.rpc.client.readContract({
-          abi: CORE_ABI,
-          address: config.core,
-          functionName: "reserves",
-          args: [asset],
-          ...at,
-        }),
-      ]);
-      lanes.set(asset, createLaneState(Hex.toBigInt(lane[0]), reserves[4], lane[4], lane[3], lane[1], lane[2]));
+      );
+      for (const [asset, lane] of entries) lanes.set(asset, lane);
     }
+    if (config.explicitLaneAssets.length > 0 && [...lanes.values()].some((lane) => !laneExists(lane)))
+      throw new RpcError("INVALID", "explicit lane asset is not active at the snapshot block");
 
-    for (const asset of new Set([...assets, cash])) {
-      const partner = await this.rpc.client.readContract({
-        abi: CORE_ABI,
-        address: config.core,
-        functionName: "partners",
-        args: [config.router, asset],
-        ...at,
-      });
-      if (BigInt(partner[1]) > BPS) throw new RpcError("INVALID", "partner fee exceeds BPS");
-      partnerFeeBps.set(asset, partner[1]);
+    const partnerAssets = [...new Set([...assets, cash])];
+    for (let offset = 0; offset < partnerAssets.length; offset += SNAPSHOT_CONCURRENCY) {
+      const entries = await Promise.all(
+        partnerAssets.slice(offset, offset + SNAPSHOT_CONCURRENCY).map(async (asset) => {
+          const partner = await this.rpc.client.readContract({
+            abi: CORE_ABI,
+            address: config.core,
+            functionName: "partners",
+            args: [config.router, asset],
+            ...at,
+          });
+          if (BigInt(partner[1]) > BPS) throw new RpcError("INVALID", "partner fee exceeds BPS");
+          return [asset, partner[1]] as const;
+        }),
+      );
+      for (const [asset, fee] of entries) partnerFeeBps.set(asset, fee);
     }
+    const verified = await this.rpc.blockCursor(pinnedBlock, config.chainId, commitment);
+    if (verified.blockHash?.toLowerCase() !== cursor.blockHash.toLowerCase())
+      throw new RpcError("TRANSPORT", "snapshot block changed while state was reconstructed");
     return { state, cursor, runtimeCodeHash };
   }
 
   private async resolveLaneAssets(config: DeploymentConfig, snapshotBlock: bigint): Promise<Address[]> {
+    if (config.explicitLaneAssets.length > 0) return [...config.explicitLaneAssets];
     const history = await this.rpc.getLogs(
       {
         fromBlock: config.deploymentBlock,
@@ -278,10 +365,7 @@ export class RpcSnapshotProvider {
       if (event?.kind === "LaneAdded") active.add(event.asset);
       else if (event?.kind === "LaneRemoved") active.delete(event.asset);
     }
-    if (config.explicitLaneAssets.length === 0) return [...active];
-    if (config.explicitLaneAssets.some((asset) => !active.has(asset)))
-      throw new RpcError("INVALID", "explicit lane asset was not active in deployment history");
-    return [...config.explicitLaneAssets];
+    return [...active];
   }
 }
 
@@ -348,10 +432,6 @@ export function parseHexU64(value: unknown, field: string): bigint {
 export function parseHash(value: unknown, field: string): Hex.Hex {
   if (typeof value !== "string" || !Hash.validate(value)) throw new RpcError("INVALID", `${field} is not bytes32`);
   return value.toLowerCase() as Hex.Hex;
-}
-
-function isZeroHash(value: Hex.Hex): boolean {
-  return Hash.validate(value) && Hex.toBigInt(value) === 0n;
 }
 
 /** Computes legacy Keccak-256 with Ox's audited noble implementation. */

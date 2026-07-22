@@ -6,12 +6,15 @@ use crate::model::{
 };
 use crate::protocol::abi::{core, decode_core_event, lane_discovery_topics};
 use crate::transport::rpc::client::RpcHttpClient;
-use alloy_primitives::{Bytes, keccak256};
+use alloy_primitives::Bytes;
 use alloy_sol_types::SolCall;
+use futures_util::{StreamExt, TryStreamExt, stream};
 use lunarbase_math::arithmetic::BPS;
 use lunarbase_math::state::{LaneState, QuoteState};
-use lunarbase_math::types::{Address, B256, U256};
+use lunarbase_math::types::{Address, U256};
 use std::{collections::BTreeSet, sync::Arc};
+
+const SNAPSHOT_CONCURRENCY: usize = 16;
 
 #[derive(Clone)]
 /// Produces one coherent, block-tagged quote state from Core view calls.
@@ -42,6 +45,13 @@ impl RpcSnapshotProvider {
         config: &DeploymentConfig,
     ) -> Result<BootstrapSnapshot, SourceError> {
         config.validate()?;
+        let rpc_chain_id = self.rpc.chain_id().await?;
+        if rpc_chain_id != config.chain_id {
+            return Err(SourceError::Unavailable(format!(
+                "HTTP RPC chain id mismatch: expected {}, got {rpc_chain_id}",
+                config.chain_id
+            )));
+        }
         let commitment = if self.snapshot_tag.as_ref() == "finalized" {
             Commitment::Finalized
         } else {
@@ -51,16 +61,20 @@ impl RpcSnapshotProvider {
             .rpc
             .block_cursor(&self.snapshot_tag, config.chain_id, commitment)
             .await?;
+        let block_hash = cursor.block_hash.ok_or_else(|| {
+            SourceError::Unavailable("snapshot block has no canonical hash".into())
+        })?;
         if cursor.block_number < config.deployment_block {
             return Err(SourceError::Unavailable(
                 "snapshot block precedes deployment block".into(),
             ));
         }
-        let code = self.rpc.get_code(config.core, &self.snapshot_tag).await?;
-        let runtime_code_hash = keccak256(&code);
-        if config.expected_runtime_code_hash != B256::ZERO
-            && runtime_code_hash != config.expected_runtime_code_hash
-        {
+        let block_tag = format!("0x{:x}", cursor.block_number);
+        let runtime_code_hash = self
+            .rpc
+            .runtime_code_hash_at_hash(config.core, block_hash)
+            .await?;
+        if runtime_code_hash != config.expected_runtime_code_hash {
             return Err(SourceError::Unavailable(
                 "runtime code hash does not match deployment config".into(),
             ));
@@ -69,13 +83,16 @@ impl RpcSnapshotProvider {
         let assets = self
             .resolve_lane_assets(config, cursor.block_number)
             .await?;
-        let cash = self.read(config.core, core::cashCall {}).await?;
+        let cash = self
+            .read(config.core, core::cashCall {}, block_hash)
+            .await?;
         let whitelist = self
             .read(
                 config.core,
                 core::whitelistCall {
                     account: config.router,
                 },
+                block_hash,
             )
             .await?;
         if whitelist != config.expect_whitelisted {
@@ -84,9 +101,12 @@ impl RpcSnapshotProvider {
                 config.expect_whitelisted, whitelist
             )));
         }
-        let blacklist_fee_multiplier = self
-            .read(config.core, core::blacklistFeeMultiplierCall {})
-            .await?;
+        let blacklist_fee_multiplier = if whitelist {
+            U256::from(1)
+        } else {
+            self.read(config.core, core::blacklistFeeMultiplierCall {}, block_hash)
+                .await?
+        };
         let mut state = QuoteState {
             cash,
             ..Default::default()
@@ -94,42 +114,69 @@ impl RpcSnapshotProvider {
         state.fee_profile.whitelisted = whitelist;
         state.fee_profile.blacklist_fee_multiplier = blacklist_fee_multiplier;
 
-        for asset in &assets {
-            let (lane, reserves) = tokio::try_join!(
-                self.read(config.core, core::laneCall { asset: *asset }),
-                self.read(config.core, core::reservesCall { asset: *asset }),
-            )?;
-            state.lanes.insert(
-                *asset,
-                LaneState::new(
-                    U256::from_be_slice(lane.slot0.as_slice()),
-                    reserves.totalPrincipalAmount,
-                    lane.slippageKBps,
-                    lane.blockDelay,
-                    lane.exists,
-                    lane.paused,
-                ),
-            );
+        let lane_states = stream::iter(assets.iter().copied())
+            .map(|asset| async move {
+                let (lane, reserves) = tokio::try_join!(
+                    self.read(config.core, core::laneCall { asset }, block_hash),
+                    self.read(config.core, core::reservesCall { asset }, block_hash),
+                )?;
+                Ok::<_, SourceError>((
+                    asset,
+                    LaneState::new(
+                        U256::from_be_slice(lane.slot0.as_slice()),
+                        reserves.totalPrincipalAmount,
+                        lane.slippageKBps,
+                        lane.blockDelay,
+                        lane.exists,
+                        lane.paused,
+                    ),
+                ))
+            })
+            .buffer_unordered(SNAPSHOT_CONCURRENCY)
+            .try_collect::<Vec<_>>()
+            .await?;
+        if !config.explicit_lane_assets.is_empty()
+            && lane_states.iter().any(|(_, lane)| !lane.exists())
+        {
+            return Err(SourceError::Unavailable(
+                "explicit lane asset is not active at the snapshot block".into(),
+            ));
         }
+        state.lanes.extend(lane_states);
 
         let mut partner_assets = assets.clone();
         if !partner_assets.contains(&cash) {
             partner_assets.push(cash);
         }
-        for asset in partner_assets {
-            let partner = self
-                .read(
-                    config.core,
-                    core::partnersCall {
-                        router: config.router,
-                        asset,
-                    },
-                )
-                .await?;
-            if U256::from(partner.fee) > BPS {
-                return Err(SourceError::Unavailable("partner fee exceeds BPS".into()));
-            }
-            state.fee_profile.partner_fee_bps.insert(asset, partner.fee);
+        let partner_fees = stream::iter(partner_assets)
+            .map(|asset| async move {
+                let partner = self
+                    .read(
+                        config.core,
+                        core::partnersCall {
+                            router: config.router,
+                            asset,
+                        },
+                        block_hash,
+                    )
+                    .await?;
+                if U256::from(partner.fee) > BPS {
+                    return Err(SourceError::Unavailable("partner fee exceeds BPS".into()));
+                }
+                Ok((asset, partner.fee))
+            })
+            .buffer_unordered(SNAPSHOT_CONCURRENCY)
+            .try_collect::<Vec<_>>()
+            .await?;
+        state.fee_profile.partner_fee_bps.extend(partner_fees);
+        let verified = self
+            .rpc
+            .block_cursor(&block_tag, config.chain_id, commitment)
+            .await?;
+        if verified.block_hash != Some(block_hash) {
+            return Err(SourceError::Unavailable(
+                "snapshot block changed while state was reconstructed".into(),
+            ));
         }
         Ok(BootstrapSnapshot {
             state,
@@ -138,14 +185,15 @@ impl RpcSnapshotProvider {
         })
     }
 
-    async fn read<C: SolCall>(&self, core: Address, call: C) -> Result<C::Return, SourceError> {
+    async fn read<C: SolCall>(
+        &self,
+        core: Address,
+        call: C,
+        block_hash: lunarbase_math::types::B256,
+    ) -> Result<C::Return, SourceError> {
         let response = self
             .rpc
-            .call_at(
-                core,
-                Bytes::from(call.abi_encode()),
-                self.snapshot_tag.as_ref(),
-            )
+            .call_at_hash(core, Bytes::from(call.abi_encode()), block_hash)
             .await?;
         C::abi_decode_returns_validate(&response).map_err(|error| {
             SourceError::Unavailable(format!("invalid Core ABI response: {error}"))
@@ -157,6 +205,9 @@ impl RpcSnapshotProvider {
         config: &DeploymentConfig,
         snapshot_block: u64,
     ) -> Result<Vec<Address>, SourceError> {
+        if !config.explicit_lane_assets.is_empty() {
+            return Ok(config.explicit_lane_assets.clone());
+        }
         let request = BackfillRequest {
             from_block: config.deployment_block,
             to_block: snapshot_block,
@@ -184,18 +235,6 @@ impl RpcSnapshotProvider {
                 _ => {}
             }
         }
-        if config.explicit_lane_assets.is_empty() {
-            return Ok(discovered.into_iter().collect());
-        }
-        if config
-            .explicit_lane_assets
-            .iter()
-            .any(|asset| !discovered.contains(asset))
-        {
-            return Err(SourceError::Unavailable(
-                "explicit lane asset was not active in deployment history".into(),
-            ));
-        }
-        Ok(config.explicit_lane_assets.clone())
+        Ok(discovered.into_iter().collect())
     }
 }

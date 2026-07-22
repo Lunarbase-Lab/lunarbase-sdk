@@ -16,7 +16,15 @@ use monad_event_ring::{
 use monad_exec_events::{
     ExecEvent, ExecEventDescriptorExt, ExecEventReaderExt, ExecEventRing, ExecEventType,
 };
-use std::{path::PathBuf, thread, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::Duration,
+};
 use tokio::sync::mpsc;
 
 use crate::execution::{
@@ -69,7 +77,7 @@ impl MonadEventRingSource {
             RpcHttpClient::new(rpc_endpoint).map_err(SourceError::from)?,
             Network::Monad,
             config.chain_id,
-            "finalized",
+            "latest",
         );
         Ok(Self { config, canonical })
     }
@@ -120,8 +128,20 @@ pub async fn connect_event_ring(
 ) -> Result<ExecutionEventStream, SourceError> {
     config.validate()?;
     let (sender, mut receiver) = mpsc::channel(config.queue_bound);
-    tokio::task::spawn_blocking(move || read_ring(config, filter, sender));
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let worker_cancelled = cancelled.clone();
+    let worker = thread::Builder::new()
+        .name("lunarbase-monad-ring".into())
+        .spawn(move || read_ring(config, filter, sender, worker_cancelled))
+        .map_err(|error| {
+            SourceError::Unavailable(format!("spawn Monad event-ring reader: {error}"))
+        })?;
+    let guard = RingReaderGuard {
+        cancelled,
+        worker: Some(worker),
+    };
     Ok(Box::pin(async_stream::stream! {
+        let _guard = guard;
         while let Some(event) = receiver.recv().await {
             yield event;
         }
@@ -132,6 +152,7 @@ fn read_ring(
     config: MonadEventRingConfig,
     filter: ContractFilter,
     sender: mpsc::Sender<Result<ExecutionEvent, SourceError>>,
+    cancelled: Arc<AtomicBool>,
 ) {
     let path = match EventRingPath::resolve(config.event_ring_path) {
         Ok(path) => path,
@@ -146,13 +167,16 @@ fn read_ring(
     let mut block_log_index = 0u32;
 
     loop {
+        if cancelled.load(Ordering::Acquire) {
+            return;
+        }
         let descriptor = match reader.next_descriptor() {
             EventNextResult::Gap => {
                 send_gap(&sender, "Monad event-ring descriptor gap");
                 return;
             }
             EventNextResult::NotReady => {
-                if sender.is_closed() {
+                if sender.is_closed() || cancelled.load(Ordering::Acquire) {
                     return;
                 }
                 thread::sleep(config.poll_interval);
@@ -169,11 +193,13 @@ fn read_ring(
             }
             EventPayloadResult::Ready(event) => event,
         };
-        let normalized = convert_event(event, info, block_number, &filter, &mut block_log_index);
-        if let Some(event) = normalized
-            && sender.blocking_send(Ok(event)).is_err()
-        {
-            return;
+        match convert_event(event, info, block_number, &filter, &mut block_log_index) {
+            Ok(Some(event)) if sender.blocking_send(Ok(event)).is_err() => return,
+            Ok(_) => {}
+            Err(error) => {
+                let _ = sender.blocking_send(Err(error));
+                return;
+            }
         }
     }
 }
@@ -184,9 +210,9 @@ fn convert_event(
     block_number: Option<u64>,
     filter: &ContractFilter,
     block_log_index: &mut u32,
-) -> Option<ExecutionEvent> {
+) -> Result<Option<ExecutionEvent>, SourceError> {
     let sequence = info.seqno;
-    match event {
+    Ok(match event {
         ExecEvent::BlockStart(start) => {
             *block_log_index = 0;
             Some(head(
@@ -198,7 +224,7 @@ fn convert_event(
         }
         ExecEvent::BlockEnd(end) => Some(head(
             sequence,
-            block_number?,
+            required_block_number(block_number)?,
             Some(B256::new(end.eth_block_hash.bytes)),
             Commitment::Realtime,
         )),
@@ -230,24 +256,28 @@ fn convert_event(
             topic_bytes,
             data_bytes,
         } => {
+            let log_index = *block_log_index;
+            *block_log_index = block_log_index
+                .checked_add(1)
+                .ok_or_else(|| SourceError::Gap("Monad block log index overflow".into()))?;
             let address = Address::new(txn_log.address.bytes);
-            let topics = decode_topics(&topic_bytes);
+            let topics = decode_topics(&topic_bytes)?;
             if address != filter.address
                 || (!filter.topics.is_empty()
                     && topics
                         .first()
                         .is_none_or(|topic| !filter.topics.contains(topic)))
             {
-                return None;
+                return Ok(None);
             }
-            let log_index = *block_log_index;
-            *block_log_index = block_log_index.checked_add(1)?;
             Some(ExecutionEvent::Log(ExecutionLog {
                 sequence,
                 source_sub_index: txn_log.index,
-                block_number: block_number?,
+                block_number: required_block_number(block_number)?,
                 block_hash: None,
-                transaction_index: u32::try_from(txn_index).ok()?,
+                transaction_index: u32::try_from(txn_index).map_err(|_| {
+                    SourceError::Gap("Monad transaction index exceeds uint32".into())
+                })?,
                 log_index,
                 address,
                 topics,
@@ -256,11 +286,20 @@ fn convert_event(
             }))
         }
         _ => None,
-    }
+    })
 }
 
-fn decode_topics(bytes: &[u8]) -> Vec<B256> {
-    bytes.chunks_exact(32).map(B256::from_slice).collect()
+fn decode_topics(bytes: &[u8]) -> Result<Vec<B256>, SourceError> {
+    if !bytes.len().is_multiple_of(32) {
+        return Err(SourceError::Gap(
+            "Monad execution log topics are not aligned to bytes32".into(),
+        ));
+    }
+    Ok(bytes.chunks_exact(32).map(B256::from_slice).collect())
+}
+
+fn required_block_number(block_number: Option<u64>) -> Result<u64, SourceError> {
+    block_number.ok_or_else(|| SourceError::Gap("Monad execution event has no block number".into()))
 }
 
 fn head(
@@ -286,4 +325,18 @@ fn send_gap(sender: &mpsc::Sender<Result<ExecutionEvent, SourceError>>, reason: 
 
 fn send_error(sender: &mpsc::Sender<Result<ExecutionEvent, SourceError>>, reason: String) {
     let _ = sender.blocking_send(Err(SourceError::Unavailable(reason)));
+}
+
+struct RingReaderGuard {
+    cancelled: Arc<AtomicBool>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for RingReaderGuard {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }

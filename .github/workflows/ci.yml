@@ -9,8 +9,8 @@ jobs:
   rust:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -27,16 +27,16 @@ jobs:
       matrix:
         network: [base, monad, arbitrum]
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo check -p lunarbase-indexer --no-default-features --features "${{ matrix.network }}" --all-targets
 
   monad-native:
     runs-on: ubuntu-24.04
-    container: rust:1.95-trixie
+    container: rust:1.97.1-trixie
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v6
       - run: apt-get update && apt-get install -y clang cmake libhugetlbfs-dev
       - run: rustup component add clippy
       - uses: Swatinem/rust-cache@v2
@@ -46,11 +46,11 @@ jobs:
   typescript:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v6
         with:
           version: 9.15.0
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: pnpm
@@ -63,9 +63,24 @@ jobs:
   process-e2e:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y redis-server
       - run: cargo build -p lunarbase-indexer -p lunarbase-tools
       - run: cargo run -p lunarbase-tools --bin lunarbase-e2e -- --indexer-bin target/debug/lunarbase-indexer
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm audit --prod --audit-level high

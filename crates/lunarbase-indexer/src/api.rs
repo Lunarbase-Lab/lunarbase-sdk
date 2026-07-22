@@ -58,6 +58,8 @@ async fn ready(State(state): State<ApiState>) -> Response {
                 "ready": true,
                 "cursor": health.cursor.as_ref().map(ApiCursor::from),
                 "executionBlockNumber": health.execution_block_number,
+                "contractCodeHash": hash_hex(health.code_hash),
+                "mathCompatibilityVersion": health.math_compatibility_version,
             })),
         )
             .into_response(),
@@ -66,6 +68,8 @@ async fn ready(State(state): State<ApiState>) -> Response {
             Json(json!({
                 "ready": false,
                 "cursor": health.cursor.as_ref().map(ApiCursor::from),
+                "contractCodeHash": hash_hex(health.code_hash),
+                "mathCompatibilityVersion": health.math_compatibility_version,
             })),
         )
             .into_response(),
@@ -186,6 +190,8 @@ impl ApiBatchRequest {
 struct ApiQuoteResponse {
     cursor: ApiCursor,
     execution_block_number: u64,
+    contract_code_hash: String,
+    math_compatibility_version: String,
     result: ApiQuoteOutcome,
 }
 
@@ -194,6 +200,8 @@ impl From<ClientQuote> for ApiQuoteResponse {
         Self {
             cursor: ApiCursor::from(&quote.cursor),
             execution_block_number: quote.execution_block_number,
+            contract_code_hash: hash_hex(quote.contract_code_hash),
+            math_compatibility_version: quote.math_compatibility_version,
             result: ApiQuoteOutcome::from(quote.outcome),
         }
     }
@@ -204,6 +212,8 @@ impl From<ClientQuote> for ApiQuoteResponse {
 struct ApiBatchResponse {
     cursor: ApiCursor,
     execution_block_number: u64,
+    contract_code_hash: String,
+    math_compatibility_version: String,
     results: Vec<ApiQuoteOutcome>,
 }
 
@@ -212,6 +222,8 @@ impl From<ClientBatchQuote> for ApiBatchResponse {
         Self {
             cursor: ApiCursor::from(&batch.cursor),
             execution_block_number: batch.execution_block_number,
+            contract_code_hash: hash_hex(batch.contract_code_hash),
+            math_compatibility_version: batch.math_compatibility_version,
             results: batch
                 .outcomes
                 .into_iter()
@@ -228,8 +240,11 @@ struct ApiCursor {
     block_number: u64,
     execution_block_number: u64,
     block_hash: Option<String>,
+    transaction_index: Option<u32>,
+    log_index: Option<u32>,
     commitment: &'static str,
     source_sequence: Option<u64>,
+    source_sub_index: Option<u32>,
 }
 
 impl From<&ChainCursor> for ApiCursor {
@@ -239,12 +254,15 @@ impl From<&ChainCursor> for ApiCursor {
             block_number: cursor.block_number,
             execution_block_number: cursor.execution_block_number,
             block_hash: cursor.block_hash.map(hash_hex),
+            transaction_index: cursor.transaction_index,
+            log_index: cursor.log_index,
             commitment: match cursor.commitment {
                 Commitment::Realtime => "realtime",
                 Commitment::Canonical => "canonical",
                 Commitment::Finalized => "finalized",
             },
             source_sequence: cursor.source_sequence,
+            source_sub_index: cursor.source_sub_index,
         }
     }
 }

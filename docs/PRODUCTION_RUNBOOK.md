@@ -64,12 +64,13 @@ affected.
 
 ## Capacity validation
 
-Run the checked-in harness against staging with real lane and pair vectors:
+Run the checked-in harness against staging. Without `--vectors`, it generates
+the requested 15-lane/100-pair request topology; for a real deployment, pass a
+deployment-specific JSON vector file:
 
 ```sh
 cargo run -p lunarbase-tools --bin lunarbase-load -- \
   --indexer-url http://127.0.0.1:8080 \
-  --vectors fixtures/load/quotes.json \
   --lanes 15 --pairs 100 --requests 20000 --concurrency 128 \
   --pid "$(pgrep -n lunarbase-indexer)"
 ```
@@ -85,10 +86,12 @@ cargo run -p lunarbase-tools --bin lunarbase-monad-validate -- \
   --parser-ws-url ws://127.0.0.1:8080/ws/subscriptions \
   --parser-ready-url http://127.0.0.1:8080/readyz \
   --rpc-url http://127.0.0.1:8545 \
-  --vectors fixtures/monad/live-validation.json \
   --duration-seconds 86400 \
   --report monad-soak-report.json
 ```
+
+Add `--vectors /absolute/path/to/live-validation.json` when Solidity
+`eth_call` comparisons are available for the deployed private contracts.
 
 The official native event-ring SDK currently targets Linux x86_64. Build the
 colocated image with `make docker-build-monad-native`; the portable `monad`
@@ -102,4 +105,9 @@ Base artifacts are the only production release artifacts for now.
 `make verify` validates source size, formatting, builds, lint, tests, and docs.
 `make release-check` inspects publishable crate and npm contents. The canonical
 Solidity/Rust/TypeScript differential suite is run from
-`../lunarbase-contracts` with `make ffi`.
+from a separately checked-out private contracts repository. From this SDK
+workspace, pass its absolute location explicitly:
+
+```sh
+make ffi CONTRACTS_DIR=/absolute/path/to/lunarbase-contracts
+```

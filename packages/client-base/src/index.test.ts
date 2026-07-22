@@ -1,6 +1,12 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { Network, type ClientConnectConfig, type SocketEvent, type WebSocketLike } from "@lunarbase/client-core";
+import {
+  MATH_COMPATIBILITY_VERSION,
+  Network,
+  type ClientConnectConfig,
+  type SocketEvent,
+  type WebSocketLike,
+} from "@lunarbase/client-core";
 import { BaseDataSource } from "./index.js";
 
 test("Base uses official pendingLogs plus newHeads transport", () => {
@@ -21,8 +27,7 @@ test("Base treats changing same-height Flashblock heads as progress", async () =
     webSocketFactory: () => socket,
   });
   const abort = new AbortController();
-  const iterator = source.subscribe(config().filter, abort.signal)[Symbol.asyncIterator]();
-  const first = iterator.next();
+  const stream = source.subscribe(config().filter, abort.signal);
   socket.emit("open", {});
   socket.emit("message", {
     data: JSON.stringify({ jsonrpc: "2.0", id: 1, result: "logs" }),
@@ -30,6 +35,11 @@ test("Base treats changing same-height Flashblock heads as progress", async () =
   socket.emit("message", {
     data: JSON.stringify({ jsonrpc: "2.0", id: 2, result: "heads" }),
   });
+  socket.emit("message", {
+    data: JSON.stringify({ jsonrpc: "2.0", id: 3, result: "0x2105" }),
+  });
+  const iterator = (await stream)[Symbol.asyncIterator]();
+  const first = iterator.next();
   socket.emit("message", {
     data: JSON.stringify(notification("0x2a", "11", "22")),
   });
@@ -93,8 +103,8 @@ function config(): ClientConnectConfig {
       router: "0x0000000000000000000000000000000000000002",
       expectWhitelisted: true,
       deploymentBlock: 1n,
-      expectedRuntimeCodeHash: `0x${"00".repeat(32)}`,
-      contractCompatibilityVersion: "test",
+      expectedRuntimeCodeHash: `0x${"11".repeat(32)}`,
+      contractCompatibilityVersion: MATH_COMPATIBILITY_VERSION,
       httpRpcUrl: "http://unused",
       realtimeSource: "ws://unused",
       explicitLaneAssets: [],
@@ -105,5 +115,6 @@ function config(): ClientConnectConfig {
     },
     queueBound: 16,
     reconnectDelayMilliseconds: 10,
+    sourceStallTimeoutMilliseconds: 1_000,
   };
 }

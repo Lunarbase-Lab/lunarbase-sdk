@@ -11,7 +11,6 @@ use crate::protocol::abi::decode_core_event;
 use crate::state::reducer::{QuoteReducer, ReducerError};
 use lunarbase_math::quote::quote;
 use lunarbase_math::state::{QuoteOutcome, QuoteRequest, QuoteState};
-use lunarbase_math::types::B256;
 
 #[derive(Clone, Debug)]
 /// Synchronous state machine used under the client's short `RwLock` guards.
@@ -51,12 +50,10 @@ impl QuoteIndexer {
         snapshot: BootstrapSnapshot,
         mut buffered: Vec<ChainUpdate>,
     ) -> Result<(), IndexerError> {
-        if self.deployment.expected_runtime_code_hash != B256::ZERO
-            && snapshot.runtime_code_hash != self.deployment.expected_runtime_code_hash
-        {
+        if snapshot.runtime_code_hash != self.deployment.expected_runtime_code_hash {
             return Err(IndexerError::CodeHashMismatch);
         }
-        let snapshot_block = snapshot.cursor.block_number;
+        let snapshot_cursor = snapshot.cursor.clone();
         let snapshot_chain = snapshot.cursor.chain_id;
         buffered.sort_by_key(update_order);
         self.reducer = QuoteReducer::new(snapshot.state, self.deployment.router);
@@ -68,7 +65,7 @@ impl QuoteIndexer {
                     self.reducer.mark_not_ready();
                     return Err(ReducerError::ChainIdMismatch.into());
                 }
-                if cursor.block_number <= snapshot_block {
+                if snapshot_covers(cursor, &snapshot_cursor)? {
                     continue;
                 }
             }
@@ -101,7 +98,7 @@ impl QuoteIndexer {
                     self.reducer.mark_not_ready();
                     return Err(ReducerError::ChainIdMismatch.into());
                 }
-                if cursor.block_number <= current.block_number {
+                if snapshot_covers(cursor, &current)? {
                     continue;
                 }
             }
@@ -187,6 +184,11 @@ impl QuoteIndexer {
 
     /// Evaluates a batch under one immutable state/cursor snapshot.
     pub fn quote_many(&self, requests: &[QuoteRequest]) -> Result<ClientBatchQuote, IndexerError> {
+        if requests.len() > 256 {
+            return Err(IndexerError::InvalidRequest(
+                "quote_many accepts at most 256 requests".into(),
+            ));
+        }
         let state = self.state()?;
         let cursor = self
             .reducer
@@ -235,6 +237,22 @@ impl QuoteIndexer {
     /// Returns the deployment identity used by recovery.
     pub fn deployment(&self) -> &DeploymentConfig {
         &self.deployment
+    }
+}
+
+fn snapshot_covers(update: &ChainCursor, snapshot: &ChainCursor) -> Result<bool, IndexerError> {
+    if update.block_number < snapshot.block_number {
+        return Ok(true);
+    }
+    if update.block_number > snapshot.block_number {
+        return Ok(false);
+    }
+    match (update.block_hash, snapshot.block_hash) {
+        (Some(update), Some(snapshot)) if update == snapshot => Ok(true),
+        (Some(_), Some(_)) => Ok(false),
+        _ => Err(IndexerError::Gap(
+            "same-block handoff has no hash identity; canonical recovery required".into(),
+        )),
     }
 }
 

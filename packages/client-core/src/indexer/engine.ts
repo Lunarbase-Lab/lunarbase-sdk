@@ -1,6 +1,5 @@
 /** Synchronous in-memory quote engine around the ordered reducer. */
 import type { QuoteRequest } from "@lunarbase/math";
-import * as Hex from "ox/Hex";
 import { decodeCoreEvent } from "../protocol/abi.js";
 import { QuoteReducer } from "../state/reducer.js";
 import { Commitment, IndexerError, MATH_COMPATIBILITY_VERSION } from "../model.js";
@@ -40,13 +39,13 @@ export class QuoteIndexer {
   /** Atomically replaces state after snapshot/recovery and replays handoff updates. */
   installSnapshot(snapshot: BootstrapSnapshot, buffered: readonly ChainUpdate[]): void {
     const replacement = QuoteIndexer.fromSnapshot(snapshot, this.deployment);
-    replacement.replayHandoff(buffered, snapshot.cursor.blockNumber);
+    replacement.replayHandoff(buffered, snapshot.cursor);
     replacement.reducer.publishReady();
     this.reducer = replacement.reducer;
   }
 
   /** Applies buffered subscription messages newer than the installed state. */
-  replayHandoff(buffered: readonly ChainUpdate[], baseBlock: bigint): void {
+  replayHandoff(buffered: readonly ChainUpdate[], snapshotCursor: import("../model.js").ChainCursor): void {
     const ordered = [...buffered].sort((left, right) => {
       const a = updateCursor(left);
       const b = updateCursor(right);
@@ -58,11 +57,7 @@ export class QuoteIndexer {
       if (update.kind === "Reorg") throw new IndexerError("GAP", "reorg during snapshot handoff");
       const cursor = updateCursor(update);
       if (!cursor) continue;
-      if (
-        (update.kind === "Log" && cursor.blockNumber <= baseBlock) ||
-        (update.kind === "Head" && cursor.blockNumber < baseBlock)
-      )
-        continue;
+      if (snapshotCovers(cursor, snapshotCursor)) continue;
       this.applyCoreUpdate(update);
     }
   }
@@ -99,17 +94,21 @@ export class QuoteIndexer {
       outcome: this.reducer.quote(request),
       cursor,
       executionBlockNumber: cursor.executionBlockNumber,
+      contractCodeHash: this.deployment.expectedRuntimeCodeHash,
+      mathCompatibilityVersion: MATH_COMPATIBILITY_VERSION,
     };
   }
 
   /** Computes at most 256 quotes from one synchronous state snapshot. */
   quoteMany(requests: readonly QuoteRequest[]): ClientBatchQuote {
-    if (requests.length > 256) throw new IndexerError("SOURCE", "quoteMany accepts at most 256 requests");
+    if (requests.length > 256) throw new IndexerError("INVALID_REQUEST", "quoteMany accepts at most 256 requests");
     const cursor = this.requireCursor();
     return {
       cursor,
       executionBlockNumber: cursor.executionBlockNumber,
       results: this.reducer.quoteMany(requests),
+      contractCodeHash: this.deployment.expectedRuntimeCodeHash,
+      mathCompatibilityVersion: MATH_COMPATIBILITY_VERSION,
     };
   }
 
@@ -142,8 +141,18 @@ export class QuoteIndexer {
   }
 
   private verifyCodeHash(actual: BootstrapSnapshot["runtimeCodeHash"]): void {
-    const expected = this.deployment.expectedRuntimeCodeHash;
-    if (Hex.toBigInt(expected) !== 0n && actual !== expected)
+    if (actual !== this.deployment.expectedRuntimeCodeHash)
       throw new IndexerError("CODE_HASH_MISMATCH", "snapshot code hash mismatch");
   }
+}
+
+function snapshotCovers(
+  update: import("../model.js").ChainCursor,
+  snapshot: import("../model.js").ChainCursor,
+): boolean {
+  if (update.blockNumber < snapshot.blockNumber) return true;
+  if (update.blockNumber > snapshot.blockNumber) return false;
+  if (update.blockHash === undefined || snapshot.blockHash === undefined)
+    throw new IndexerError("GAP", "same-block handoff has no hash identity; canonical recovery required");
+  return update.blockHash.toLowerCase() === snapshot.blockHash.toLowerCase();
 }

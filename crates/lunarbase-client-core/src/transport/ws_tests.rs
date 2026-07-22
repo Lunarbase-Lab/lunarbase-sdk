@@ -1,5 +1,5 @@
 use crate::model::{Commitment, ContractFilter};
-use crate::transport::ws::{head_discontinuity, parse_ws_head, subscription_request};
+use crate::transport::ws::protocol::{head_discontinuity, parse_ws_head, subscription_request};
 use lunarbase_math::types::{Address, B256, U256};
 use serde_json::{Value, json};
 

@@ -8,6 +8,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Notify;
 
 #[derive(Clone, Debug)]
@@ -21,6 +22,8 @@ pub struct ClientConnectConfig {
     pub buffer_capacity: usize,
     /// Delay before reopening a failed realtime subscription.
     pub reconnect_delay: Duration,
+    /// Maximum interval without any realtime update before readiness is revoked.
+    pub source_stall_timeout: Duration,
 }
 
 impl ClientConnectConfig {
@@ -30,7 +33,10 @@ impl ClientConnectConfig {
         if self.filter.address != self.deployment.core {
             return Err(SourceError::NetworkMismatch.into());
         }
-        if self.buffer_capacity == 0 || self.reconnect_delay.is_zero() {
+        if self.buffer_capacity == 0
+            || self.reconnect_delay.is_zero()
+            || self.source_stall_timeout.is_zero()
+        {
             return Err(SourceError::Unavailable(
                 "client buffer and reconnect bounds must be non-zero".into(),
             )
@@ -56,11 +62,11 @@ pub(super) struct SharedQuoteState {
 }
 
 impl SharedQuoteState {
-    /// Publishes an initially ready quote indexer.
-    pub(super) fn new(indexer: QuoteIndexer) -> Self {
+    /// Creates an unpublished state used while subscription and snapshot bootstrap.
+    pub(super) fn new_not_ready(indexer: QuoteIndexer) -> Self {
         Self {
             indexer: RwLock::new(indexer),
-            available: AtomicBool::new(true),
+            available: AtomicBool::new(false),
             ready: Notify::new(),
         }
     }
@@ -85,6 +91,8 @@ pub(super) struct ClientRuntimeStats {
     pub(super) recoveries: AtomicU64,
     /// Number of canonical recovery attempts that failed.
     pub(super) recovery_failures: AtomicU64,
+    /// Unix milliseconds when the pump last delivered a normalized update.
+    pub(super) last_source_update_unix_millis: AtomicU64,
 }
 
 impl ClientRuntimeStats {
@@ -97,6 +105,7 @@ impl ClientRuntimeStats {
             gaps: AtomicU64::new(0),
             recoveries: AtomicU64::new(0),
             recovery_failures: AtomicU64::new(0),
+            last_source_update_unix_millis: AtomicU64::new(0),
         }
     }
 
@@ -109,6 +118,9 @@ impl ClientRuntimeStats {
             gaps: self.gaps.load(Ordering::Relaxed),
             recoveries: self.recoveries.load(Ordering::Relaxed),
             recovery_failures: self.recovery_failures.load(Ordering::Relaxed),
+            last_source_update_unix_millis: self
+                .last_source_update_unix_millis
+                .load(Ordering::Relaxed),
         }
     }
 }
@@ -128,4 +140,15 @@ pub struct ClientRuntimeStatsSnapshot {
     pub recoveries: u64,
     /// Number of canonical recovery attempts that failed.
     pub recovery_failures: u64,
+    /// Unix milliseconds when a normalized source update was last queued.
+    pub last_source_update_unix_millis: u64,
+}
+
+/// Returns a saturating wall-clock timestamp for operational age metrics.
+pub(super) fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
 }

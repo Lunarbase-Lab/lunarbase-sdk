@@ -5,7 +5,7 @@ use lunarbase_client_core::model::Commitment;
 use std::{
     fmt::Write,
     sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Debug, Default)]
@@ -62,7 +62,8 @@ impl Metrics {
             .as_ref()
             .and_then(|health| health.execution_block_number)
             .unwrap_or(0);
-        let lag = head.saturating_sub(execution);
+        let execution_context_delta = head.saturating_sub(execution);
+        let source_update_age = source_update_age(stats.last_source_update_unix_millis);
         let commitment = health.as_ref().map_or(0, |health| match health.commitment {
             Commitment::Realtime => 0,
             Commitment::Canonical => 1,
@@ -80,7 +81,16 @@ impl Metrics {
         gauge(&mut output, "lunarbase_ready", ready);
         gauge(&mut output, "lunarbase_head_block", head);
         gauge(&mut output, "lunarbase_execution_block", execution);
-        gauge(&mut output, "lunarbase_lag_blocks", lag);
+        gauge(
+            &mut output,
+            "lunarbase_execution_context_delta_blocks",
+            execution_context_delta,
+        );
+        gauge(
+            &mut output,
+            "lunarbase_source_update_age_seconds",
+            source_update_age,
+        );
         gauge(&mut output, "lunarbase_commitment", commitment);
         gauge(&mut output, "lunarbase_queue_depth", stats.queue_depth);
         gauge(
@@ -111,9 +121,10 @@ impl Metrics {
             "lunarbase_quote_batches_total",
             self.quote_batches.load(Ordering::Relaxed),
         );
-        let _ = writeln!(
-            output,
-            "lunarbase_quote_latency_seconds_average {average_latency}"
+        gauge(
+            &mut output,
+            "lunarbase_quote_latency_seconds_average",
+            average_latency,
         );
         counter(
             &mut output,
@@ -141,4 +152,16 @@ fn counter(output: &mut String, name: &str, value: impl std::fmt::Display) {
 
 fn saturating_nanos(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
+fn source_update_age(last_update_millis: u64) -> f64 {
+    if last_update_millis == 0 {
+        return u64::MAX as f64 / 1_000.0;
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64;
+    now.saturating_sub(last_update_millis) as f64 / 1_000.0
 }

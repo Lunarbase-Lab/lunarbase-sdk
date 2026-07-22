@@ -36,7 +36,7 @@ export function connectMonad(
     new JsonRpcHttpClient(config.deployment.httpRpcUrl, options.fetcher ?? fetch),
     config.deployment.realtimeSource,
     config.deployment.chainId,
-    options.snapshotTag ?? "finalized",
+    options.snapshotTag ?? "latest",
     options.parserConfig,
     options.webSocketFactory,
   );

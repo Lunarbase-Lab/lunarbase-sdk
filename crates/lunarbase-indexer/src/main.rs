@@ -9,9 +9,18 @@ mod runtime;
 use checkpoint::RedisCheckpointStore;
 use clap::Parser;
 use config::{Cli, Config};
+use lunarbase_client_core::indexer::errors::ClientRuntimeEvent;
 use metrics::Metrics;
-use std::{error::Error, sync::Arc};
-use tokio::{sync::watch, time::timeout};
+use std::{
+    error::Error,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::{
+    sync::{broadcast, watch},
+    task::JoinHandle,
+    time::timeout,
+};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -68,36 +77,123 @@ async fn run() -> Result<(), Box<dyn Error>> {
         metrics.clone(),
         shutdown_rx.clone(),
     );
-    let api_task = tokio::spawn(api::serve(
+    let mut api_task = tokio::spawn(api::serve(
         config.bind,
         client.clone(),
         metrics.clone(),
         wait_for_shutdown(shutdown_rx),
     ));
-
-    signal.await?;
-    tracing::info!("graceful shutdown started");
-    let _ = shutdown_tx.send(true);
-
-    if let Some(store) = &store {
-        runtime::flush_checkpoint(&client, store, &metrics).await;
-    }
-    client.shutdown_gracefully(config.shutdown_timeout).await?;
-
-    let joined = timeout(config.shutdown_timeout, async {
-        checkpoint_task.await?;
-        api_task.await??;
-        Ok::<(), Box<dyn Error>>(())
-    })
-    .await;
-    match joined {
-        Ok(result) => result?,
-        Err(_) => {
-            return Err("service tasks exceeded graceful shutdown timeout".into());
+    let mut runtime_events = client.subscribe_runtime_events();
+    let mut api_finished = false;
+    let mut failure = tokio::select! {
+        result = &mut signal => {
+            result?;
+            None
         }
+        result = &mut api_task => {
+            api_finished = true;
+            Some(match result {
+                Ok(Ok(())) => "HTTP API stopped unexpectedly".into(),
+                Ok(Err(error)) => format!("HTTP API failed: {error}"),
+                Err(error) => format!("HTTP API task failed: {error}"),
+            })
+        }
+        detail = wait_for_runtime_failure(&mut runtime_events) => Some(detail),
+    };
+    tracing::info!(failure = failure.as_deref(), "graceful shutdown started");
+    let _ = shutdown_tx.send(true);
+    let deadline = Instant::now() + config.shutdown_timeout;
+
+    if let Some(store) = &store
+        && timeout(
+            remaining(deadline),
+            runtime::flush_checkpoint(&client, store, &metrics),
+        )
+        .await
+        .is_err()
+    {
+        metrics.checkpoint_failure();
+        tracing::warn!("final Redis checkpoint exceeded shutdown deadline");
+    }
+    if let Err(error) = client.shutdown_gracefully(remaining(deadline)).await {
+        failure.get_or_insert_with(|| format!("client shutdown failed: {error}"));
+    }
+    if !join_unit_task(checkpoint_task, deadline).await {
+        failure.get_or_insert_with(|| "checkpoint task exceeded shutdown deadline".into());
+    }
+    if !api_finished && !join_api_task(api_task, deadline).await {
+        failure.get_or_insert_with(|| "HTTP API task exceeded shutdown deadline".into());
     }
     tracing::info!("graceful shutdown complete");
-    Ok(())
+    if let Some(detail) = failure {
+        Err(std::io::Error::other(detail).into())
+    } else {
+        Ok(())
+    }
+}
+
+async fn wait_for_runtime_failure(
+    receiver: &mut broadcast::Receiver<ClientRuntimeEvent>,
+) -> String {
+    loop {
+        match receiver.recv().await {
+            Ok(ClientRuntimeEvent::BackgroundTaskStopped { task }) => {
+                return format!("required client task `{task}` stopped");
+            }
+            Ok(ClientRuntimeEvent::BackgroundTaskPanicked { task, detail }) => {
+                return format!("required client task `{task}` panicked: {detail}");
+            }
+            Ok(event) => log_runtime_event(&event),
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                tracing::warn!(
+                    skipped,
+                    "runtime event consumer lagged behind its bounded channel"
+                );
+            }
+            Err(broadcast::error::RecvError::Closed) => {
+                return "client runtime event channel closed".into();
+            }
+        }
+    }
+}
+
+fn log_runtime_event(event: &ClientRuntimeEvent) {
+    let code = event.code();
+    let detail = event.detail();
+    match event {
+        ClientRuntimeEvent::RecoveryCompleted => {
+            tracing::info!(event = code, detail, "client runtime event");
+        }
+        ClientRuntimeEvent::RecoveryStarted => {
+            tracing::warn!(event = code, detail, "client runtime event");
+        }
+        _ => tracing::warn!(event = code, detail, "client runtime event"),
+    }
+}
+
+fn remaining(deadline: Instant) -> Duration {
+    deadline.saturating_duration_since(Instant::now())
+}
+
+async fn join_unit_task(mut task: JoinHandle<()>, deadline: Instant) -> bool {
+    if timeout(remaining(deadline), &mut task).await.is_ok() {
+        return true;
+    }
+    task.abort();
+    let _ = task.await;
+    false
+}
+
+async fn join_api_task(
+    mut task: JoinHandle<Result<(), std::io::Error>>,
+    deadline: Instant,
+) -> bool {
+    if timeout(remaining(deadline), &mut task).await.is_ok() {
+        return true;
+    }
+    task.abort();
+    let _ = task.await;
+    false
 }
 
 async fn wait_for_shutdown(mut receiver: watch::Receiver<bool>) {

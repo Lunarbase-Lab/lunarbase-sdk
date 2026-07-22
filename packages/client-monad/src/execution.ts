@@ -128,6 +128,6 @@ export class MonadExecutionNormalizer {
 
 /** Parser transport boundary useful to alternative portable implementations. */
 export interface ExecutionEventReader {
-  /** Opens a raw execution-event stream filtered to one Core deployment. */
-  subscribeExecution(filter: ContractFilter, signal?: AbortSignal): AsyncIterable<ExecutionEvent>;
+  /** Opens and acknowledges a raw stream filtered to one Core deployment. */
+  subscribeExecution(filter: ContractFilter, signal?: AbortSignal): Promise<AsyncIterable<ExecutionEvent>>;
 }

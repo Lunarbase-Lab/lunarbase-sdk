@@ -8,17 +8,17 @@ import {
   type ConnectedQuoteClient,
 } from "@lunarbase/client-core";
 import { laneExists } from "@lunarbase/math";
-import * as Hex from "ox/Hex";
 import { readEnvironment } from "./config.js";
 import { logQuoteBatch, writeLog } from "./logging.js";
 import { buildQuoteRequests } from "./quotes.js";
 
-const ZERO_HASH = Hex.fromNumber(0, { size: 32 });
-
 async function main(): Promise<void> {
   const environment = readEnvironment();
   const rpc = new JsonRpcHttpClient(environment.rpcUrl);
-  const chainId = await rpc.chainId();
+  const [chainId, runtimeCodeHash] = await Promise.all([
+    rpc.chainId(),
+    rpc.runtimeCodeHash(environment.core, "latest"),
+  ]);
   const deployment = {
     network: Network.Base,
     chainId,
@@ -26,7 +26,7 @@ async function main(): Promise<void> {
     router: environment.router,
     expectWhitelisted: environment.expectWhitelisted,
     deploymentBlock: environment.deploymentBlock,
-    expectedRuntimeCodeHash: ZERO_HASH,
+    expectedRuntimeCodeHash: runtimeCodeHash,
     contractCompatibilityVersion: MATH_COMPATIBILITY_VERSION,
     httpRpcUrl: environment.rpcUrl,
     realtimeSource: environment.wsUrl,
@@ -37,6 +37,7 @@ async function main(): Promise<void> {
     filter: { address: environment.core, topics: quoteCriticalTopics() },
     queueBound: 4096,
     reconnectDelayMilliseconds: 1_000,
+    sourceStallTimeoutMilliseconds: 30_000,
   };
   if (environment.usesDemoRouter)
     writeLog("warn", "ROUTER_ADDRESS is unset; using a non-whitelisted demonstration fee profile", {

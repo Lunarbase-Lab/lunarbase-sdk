@@ -13,6 +13,7 @@ explicit_lane_assets = []
 bind = "0.0.0.0:8080"
 queue_bound = 16384
 reconnect_delay_milliseconds = 500
+source_stall_timeout_milliseconds = 30000
 
 # Optional restart acceleration only. Remove this line to run without Redis.
 redis_url = "redis://redis:6379/"

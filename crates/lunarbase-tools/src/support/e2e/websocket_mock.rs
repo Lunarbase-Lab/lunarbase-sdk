@@ -47,7 +47,7 @@ async fn websocket_connection_inner(
         .await
         .map_err(|error| E2eError::Scenario(error.to_string()))?;
     let (mut writer, mut reader) = socket.split();
-    for _ in 0..2 {
+    for _ in 0..3 {
         let Some(Ok(message)) = reader.next().await else {
             return Ok(());
         };
@@ -57,10 +57,23 @@ async fn websocket_connection_inner(
         let request: Value =
             serde_json::from_str(text).map_err(|error| E2eError::Scenario(error.to_string()))?;
         let id = request.get("id").and_then(Value::as_u64).unwrap_or(0);
-        let subscription = if id == 1 { "pending" } else { "flashblocks" };
+        let method = request
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let result = match (method, id) {
+            ("eth_chainId", 3) => json!("0x2105"),
+            ("eth_subscribe", 1) => json!("pending"),
+            ("eth_subscribe", 2) => json!("flashblocks"),
+            _ => {
+                return Err(E2eError::Scenario(format!(
+                    "unexpected WebSocket handshake request: {request}"
+                )));
+            }
+        };
         writer
             .send(Message::Text(
-                json!({"jsonrpc":"2.0","id":id,"result":subscription}).to_string(),
+                json!({"jsonrpc":"2.0","id":id,"result":result}).to_string(),
             ))
             .await
             .map_err(|error| E2eError::Scenario(error.to_string()))?;

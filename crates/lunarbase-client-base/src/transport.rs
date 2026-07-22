@@ -57,7 +57,7 @@ impl BaseFlashblocksSource {
                 ws_url,
                 Network::Base,
                 chain_id,
-                "finalized",
+                "latest",
                 WsRpcConfig {
                     max_frame_bytes: config.max_frame_bytes,
                     reorder_capacity: config.reorder_capacity,

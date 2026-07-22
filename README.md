@@ -69,7 +69,7 @@ fee profile, and recovery rules are specific to LunarBase quoting.
 
 ### Workspace
 
-Prerequisites: stable Rust 1.95+, Node.js 22+, Corepack or pnpm, and Foundry for the
+Prerequisites: stable Rust 1.97+, Node.js 22+, Corepack or pnpm, and Foundry for the
 cross-language FFI suite.
 
 ```bash
@@ -127,17 +127,17 @@ make run
 Base is the default feature. The service exposes `POST /v1/quote`,
 `POST /v1/quotes`, `GET /healthz`, `GET /readyz`, and `GET /metrics`. See the
 [`lunarbase-indexer` guide](crates/lunarbase-indexer/README.md) and
-[`PRODUCTION_RUNBOOK.md`](PRODUCTION_RUNBOOK.md) before deployment.
+[`PRODUCTION_RUNBOOK.md`](docs/PRODUCTION_RUNBOOK.md) before deployment.
 
 ---
 
 <div align="center">
   <p>
-    <a href="ARCHITECTURE.md">Architecture</a>
+    <a href="docs/ARCHITECTURE.md">Architecture</a>
     ·
-    <a href="SPECIFICATION.md">Specification</a>
+    <a href="docs/SPECIFICATION.md">Specification</a>
     ·
-    <a href="PRODUCTION_RUNBOOK.md">Production runbook</a>
+    <a href="docs/PRODUCTION_RUNBOOK.md">Production runbook</a>
   </p>
   <p>
     Licensed under

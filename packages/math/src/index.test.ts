@@ -86,6 +86,11 @@ test("zero multiplier and whitelist behavior are explicit", () => {
   assert.equal(calculateFeeBpsForRouter(true, 0n, BPS + 1n), BPS);
 });
 
+test("address parsing and map lookups are case canonical", () => {
+  const checksummed = "0x52908400098527886E0F7030069857D2E4169EE7";
+  assert.equal(parseAddress(checksummed), checksummed.toLowerCase());
+});
+
 test("direct quote returns complete result and Solidity sentinels", () => {
   const cash = address("1");
   const asset = address("2");

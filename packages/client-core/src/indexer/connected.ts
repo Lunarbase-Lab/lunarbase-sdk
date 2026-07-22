@@ -4,7 +4,6 @@ import { checkpointMatchesDeployment, validateDeploymentConfig } from "../bootst
 import { IndexerError } from "../model.js";
 import type {
   ChainDataSource,
-  ChainUpdate,
   Checkpoint,
   ClientBatchQuote,
   ClientQuote,
@@ -14,6 +13,8 @@ import type {
 } from "../model.js";
 import { compareCursor } from "../source.js";
 import { QuoteIndexer } from "./engine.js";
+import { delay, pumpSource, SourceActivity } from "./source_task.js";
+import { BoundedUpdateQueue } from "./update_queue.js";
 
 /** Runtime-only configuration; persistence belongs to the Rust indexer. */
 export interface ClientConnectConfig {
@@ -25,6 +26,8 @@ export interface ClientConnectConfig {
   readonly queueBound: number;
   /** Delay before reopening a failed realtime subscription. */
   readonly reconnectDelayMilliseconds: number;
+  /** Maximum interval without an update before readiness is revoked. */
+  readonly sourceStallTimeoutMilliseconds: number;
 }
 
 /** High-level embeddable client with one active ordered reducer. */
@@ -32,14 +35,14 @@ export class ConnectedQuoteClient {
   private constructor(
     /** Mutable quote state owned by the single ordered reducer. */
     private readonly indexer: QuoteIndexer,
-    /** Provider adapter used for realtime updates and canonical recovery. */
-    private readonly source: ChainDataSource,
-    /** Validated deployment and bounded runtime settings. */
-    private readonly config: ClientConnectConfig,
     /** Cooperative cancellation signal for source and reducer loops. */
     private readonly controller: AbortController,
     /** Bounded handoff between asynchronous ingestion and ordered reduction. */
     private readonly queue: BoundedUpdateQueue,
+    /** Acknowledged-subscription state shared with recovery. */
+    private readonly activity: SourceActivity,
+    /** Serialized recovery owner used by reducer and explicit callers. */
+    private readonly recovery: RecoveryCoordinator,
     /** Realtime subscription task retained for deterministic shutdown. */
     private readonly pumpTask: Promise<void>,
     /** Ordered reducer task retained for deterministic shutdown. */
@@ -47,10 +50,8 @@ export class ConnectedQuoteClient {
   ) {}
 
   /**
-   * Connects a subscription before loading checkpoint/snapshot state.
-   *
-   * The optional checkpoint is accepted only after local identity and canonical
-   * block-hash validation.
+   * Connects and acknowledges a subscription before loading checkpoint or
+   * snapshot state, preserving every update that races with bootstrap.
    */
   static async connect(
     config: ClientConnectConfig,
@@ -60,34 +61,34 @@ export class ConnectedQuoteClient {
     validateConnectConfig(config, source);
     const controller = new AbortController();
     const queue = new BoundedUpdateQueue(config.queueBound);
-    const pumpTask = pumpSource(source, config.filter, queue, controller.signal, config.reconnectDelayMilliseconds);
-    let indexer: QuoteIndexer;
+    const activity = new SourceActivity();
+    const pumpTask = pumpSource(
+      source,
+      config.filter,
+      queue,
+      activity,
+      controller.signal,
+      config.reconnectDelayMilliseconds,
+      config.sourceStallTimeoutMilliseconds,
+    );
     try {
-      const checkpointValid =
-        optionalCheckpoint !== undefined &&
-        checkpointMatchesDeployment(optionalCheckpoint, config.deployment) &&
-        (await source.validateCheckpoint(optionalCheckpoint));
-      if (checkpointValid && optionalCheckpoint) {
-        try {
-          indexer = await restoreCheckpoint(optionalCheckpoint, config, source);
-          indexer.replayHandoff(
-            queue.drainAll(),
-            indexer.health().cursor?.blockNumber ?? optionalCheckpoint.cursor.blockNumber,
-          );
-        } catch {
-          indexer = await snapshotIndexer(config, source, queue);
-        }
-      } else {
-        indexer = await snapshotIndexer(config, source, queue);
-      }
+      if (!(await activity.waitUntilActive(controller.signal)))
+        throw new IndexerError("SOURCE", "realtime source stopped before handshake");
+      const indexer = await bootstrapIndexer(config, source, queue, activity, controller.signal, optionalCheckpoint);
+      const recovery = new RecoveryCoordinator(indexer, source, config, queue, activity, controller.signal);
+      const reducerTask = reduceSource(indexer, queue, recovery, controller.signal).catch(() => {
+        indexer.markNotReady();
+        controller.abort();
+        queue.close();
+        activity.setActive(false);
+      });
+      return new ConnectedQuoteClient(indexer, controller, queue, activity, recovery, pumpTask, reducerTask);
     } catch (error) {
       controller.abort();
       queue.close();
       await Promise.allSettled([pumpTask]);
       throw error;
     }
-    const reducerTask = reduceSource(indexer, source, config, queue, controller.signal);
-    return new ConnectedQuoteClient(indexer, source, config, controller, queue, pumpTask, reducerTask);
   }
 
   /** Computes one fully offchain quote. */
@@ -105,22 +106,21 @@ export class ConnectedQuoteClient {
     return this.indexer.health();
   }
 
-  /** Returns a deep-cloned v3 checkpoint for external persistence. */
+  /** Returns a checkpoint only while the current state is publishable. */
   checkpoint(): Checkpoint | undefined {
-    return this.indexer.checkpoint();
+    return this.indexer.health().ready ? this.indexer.checkpoint() : undefined;
   }
 
-  /** Forces an immediate canonical resnapshot while continuing subscription buffering. */
-  async recover(): Promise<void> {
-    this.indexer.markNotReady();
-    const snapshot = await this.source.snapshot(this.config.deployment);
-    this.indexer.installSnapshot(snapshot, this.queue.drainAll());
+  /** Forces one serialized canonical recovery while subscription buffering continues. */
+  recover(): Promise<void> {
+    return this.recovery.run();
   }
 
   /** Stops all background work and revokes readiness. */
   async shutdown(): Promise<void> {
     this.controller.abort();
     this.queue.close();
+    this.activity.setActive(false);
     this.indexer.markNotReady();
     await Promise.allSettled([this.pumpTask, this.reducerTask]);
   }
@@ -140,50 +140,19 @@ function validateConnectConfig(config: ClientConnectConfig, source: ChainDataSou
   if (source.network !== config.deployment.network) throw new IndexerError("SOURCE", "source network mismatch");
   if (config.filter.address.toLowerCase() !== config.deployment.core.toLowerCase())
     throw new IndexerError("SOURCE", "filter must target deployment Core");
-  if (
-    !Number.isSafeInteger(config.queueBound) ||
-    config.queueBound <= 0 ||
-    !Number.isSafeInteger(config.reconnectDelayMilliseconds) ||
-    config.reconnectDelayMilliseconds <= 0
-  )
-    throw new IndexerError("SOURCE", "runtime bounds must be positive safe integers");
-}
-
-async function pumpSource(
-  source: ChainDataSource,
-  filter: ContractFilter,
-  queue: BoundedUpdateQueue,
-  signal: AbortSignal,
-  reconnectDelayMilliseconds: number,
-): Promise<void> {
-  while (!signal.aborted && !queue.closed) {
-    try {
-      for await (const update of source.subscribe(filter, signal)) {
-        if (signal.aborted || queue.closed) return;
-        queue.push(update);
-        if (update.kind === "Gap") break;
-      }
-      if (!signal.aborted && !queue.closed)
-        queue.push({
-          kind: "Gap",
-          reason: "source stream ended; canonical recovery required",
-        });
-    } catch (error) {
-      if (signal.aborted || queue.closed) return;
-      queue.push({
-        kind: "Gap",
-        reason: `source failed: ${error instanceof Error ? error.message : String(error)}`,
-      });
-    }
-    await delay(reconnectDelayMilliseconds, signal);
-  }
+  for (const [name, value] of Object.entries({
+    queueBound: config.queueBound,
+    reconnectDelayMilliseconds: config.reconnectDelayMilliseconds,
+    sourceStallTimeoutMilliseconds: config.sourceStallTimeoutMilliseconds,
+  }))
+    if (!Number.isSafeInteger(value) || value <= 0)
+      throw new IndexerError("SOURCE", `${name} must be a positive safe integer`);
 }
 
 async function reduceSource(
   indexer: QuoteIndexer,
-  source: ChainDataSource,
-  config: ClientConnectConfig,
   queue: BoundedUpdateQueue,
+  recovery: RecoveryCoordinator,
   signal: AbortSignal,
 ): Promise<void> {
   while (!signal.aborted) {
@@ -192,10 +161,44 @@ async function reduceSource(
     try {
       indexer.applyCoreUpdate(update);
     } catch {
-      indexer.markNotReady();
-      await recoverUntilReady(indexer, source, config, queue, signal);
+      await recovery.run();
     }
   }
+}
+
+async function bootstrapIndexer(
+  config: ClientConnectConfig,
+  source: ChainDataSource,
+  queue: BoundedUpdateQueue,
+  activity: SourceActivity,
+  signal: AbortSignal,
+  optionalCheckpoint?: Checkpoint,
+): Promise<QuoteIndexer> {
+  let checkpoint = optionalCheckpoint;
+  while (!signal.aborted) {
+    if (!(await activity.waitUntilActive(signal))) break;
+    try {
+      if (
+        checkpoint &&
+        checkpointMatchesDeployment(checkpoint, config.deployment) &&
+        (await source.validateCheckpoint(checkpoint))
+      ) {
+        try {
+          const restored = await restoreCheckpoint(checkpoint, config, source);
+          restored.replayHandoff(queue.drainAll(), restored.health().cursor ?? checkpoint.cursor);
+          return restored;
+        } catch {
+          checkpoint = undefined;
+        }
+      }
+      return await snapshotIndexer(config, source, queue);
+    } catch (error) {
+      if (isPermanentBootstrapError(error)) throw error;
+      checkpoint = undefined;
+      await delay(config.reconnectDelayMilliseconds, signal);
+    }
+  }
+  throw new IndexerError("SOURCE", "bootstrap cancelled before a coherent state was installed");
 }
 
 async function restoreCheckpoint(
@@ -212,13 +215,9 @@ async function restoreCheckpoint(
       ? checkpoint.cursor.blockNumber + 1n
       : checkpoint.cursor.blockNumber;
   if (fromBlock <= head.blockNumber) {
-    const logs = [
-      ...(await source.backfill({
-        fromBlock,
-        toBlock: head.blockNumber,
-        filter: config.filter,
-      })),
-    ].sort((left, right) => compareCursor(left.cursor, right.cursor));
+    const logs = [...(await source.backfill({ fromBlock, toBlock: head.blockNumber, filter: config.filter }))]
+      .filter((log) => compareCursor(log.cursor, checkpoint.cursor) > 0)
+      .sort((left, right) => compareCursor(left.cursor, right.cursor));
     for (const log of logs) indexer.applyCoreUpdate({ kind: "Log", log });
   }
   indexer.applyCoreUpdate({ kind: "Head", cursor: head });
@@ -232,98 +231,53 @@ async function snapshotIndexer(
 ): Promise<QuoteIndexer> {
   const snapshot = await source.snapshot(config.deployment);
   const indexer = QuoteIndexer.fromSnapshot(snapshot, config.deployment);
-  indexer.replayHandoff(queue.drainAll(), snapshot.cursor.blockNumber);
+  indexer.replayHandoff(queue.drainAll(), snapshot.cursor);
   return indexer;
 }
 
-async function recoverUntilReady(
-  indexer: QuoteIndexer,
-  source: ChainDataSource,
-  config: ClientConnectConfig,
-  queue: BoundedUpdateQueue,
-  signal: AbortSignal,
-): Promise<void> {
-  while (!signal.aborted) {
-    try {
-      const snapshot = await source.snapshot(config.deployment);
-      indexer.installSnapshot(snapshot, queue.drainAll());
-      return;
-    } catch {
-      indexer.markNotReady();
-      await delay(config.reconnectDelayMilliseconds, signal);
-    }
-  }
-}
+class RecoveryCoordinator {
+  /** Currently running recovery shared by every caller. */
+  private current?: Promise<void>;
 
-function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) return Promise.resolve();
-  return new Promise((resolve) => {
-    const timer = setTimeout(done, milliseconds);
-    function done() {
-      signal.removeEventListener("abort", done);
-      clearTimeout(timer);
-      resolve();
-    }
-    signal.addEventListener("abort", done, { once: true });
-  });
-}
+  constructor(
+    private readonly indexer: QuoteIndexer,
+    private readonly source: ChainDataSource,
+    private readonly config: ClientConnectConfig,
+    private readonly queue: BoundedUpdateQueue,
+    private readonly activity: SourceActivity,
+    private readonly signal: AbortSignal,
+  ) {}
 
-class BoundedUpdateQueue {
-  private readonly values: ChainUpdate[] = [];
-  private readonly waiters: Array<(value: ChainUpdate | undefined) => void> = [];
-  private ended = false;
-  private overflowed = false;
-
-  constructor(private readonly capacity: number) {}
-
-  get closed(): boolean {
-    return this.ended;
-  }
-
-  push(update: ChainUpdate): void {
-    if (this.ended || this.overflowed) return;
-    if (this.values.length >= this.capacity) {
-      this.values.length = 0;
-      this.values.push({
-        kind: "Gap",
-        reason: "runtime queue overflow; canonical recovery required",
-      });
-      this.overflowed = true;
-    } else {
-      this.values.push(update);
-    }
-    this.resolveWaiters();
-  }
-
-  drainAll(): ChainUpdate[] {
-    this.overflowed = false;
-    return this.values.splice(0);
-  }
-
-  close(): void {
-    this.ended = true;
-    this.resolveWaiters();
-  }
-
-  async next(signal: AbortSignal): Promise<ChainUpdate | undefined> {
-    const value = this.values.shift();
-    if (value) {
-      if (this.values.length === 0) this.overflowed = false;
-      return value;
-    }
-    if (this.ended || signal.aborted) return undefined;
-    return new Promise((resolve) => {
-      const onAbort = () => resolve(undefined);
-      signal.addEventListener("abort", onAbort, { once: true });
-      this.waiters.push((next) => {
-        signal.removeEventListener("abort", onAbort);
-        resolve(next);
-      });
+  /** Starts or joins the sole canonical recovery. */
+  run(): Promise<void> {
+    this.indexer.markNotReady();
+    if (this.current) return this.current;
+    const operation = this.recoverUntilReady();
+    const tracked = operation.finally(() => {
+      if (this.current === tracked) this.current = undefined;
     });
+    this.current = tracked;
+    return this.current;
   }
 
-  private resolveWaiters(): void {
-    while (this.waiters.length > 0 && (this.values.length > 0 || this.ended))
-      this.waiters.shift()?.(this.values.shift());
+  private async recoverUntilReady(): Promise<void> {
+    while (!this.signal.aborted) {
+      if (!(await this.activity.waitUntilActive(this.signal))) return;
+      try {
+        const snapshot = await this.source.snapshot(this.config.deployment);
+        this.indexer.installSnapshot(snapshot, this.queue.drainAll());
+        return;
+      } catch (error) {
+        this.indexer.markNotReady();
+        if (isPermanentBootstrapError(error)) throw error;
+        await delay(this.config.reconnectDelayMilliseconds, this.signal);
+      }
+    }
   }
+}
+
+function isPermanentBootstrapError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const code = (error as Error & { code?: string }).code;
+  return code === "INVALID" || code === "CODE_HASH_MISMATCH";
 }

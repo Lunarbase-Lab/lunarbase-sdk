@@ -6,7 +6,8 @@
   "packageManager": "pnpm@9.15.0",
   "scripts": {
     "build": "node scripts/clean-dist.mjs packages/math/dist packages/client-core/dist packages/client-base/dist packages/client-monad/dist packages/client-arbitrum/dist examples/typescript/quote-logger/dist && tsc -p packages/math/tsconfig.json && tsc -p packages/client-core/tsconfig.json && tsc -p packages/client-base/tsconfig.json && tsc -p packages/client-monad/tsconfig.json && tsc -p packages/client-arbitrum/tsconfig.json && tsc -p examples/typescript/quote-logger/tsconfig.json",
-    "test": "node --test packages/math/dist/*.test.js packages/client-core/dist/*.test.js packages/client-core/dist/**/*.test.js packages/client-base/dist/*.test.js packages/client-monad/dist/*.test.js packages/client-arbitrum/dist/*.test.js examples/typescript/quote-logger/dist/*.test.js",
+    "test": "pnpm build && pnpm test:compiled",
+    "test:compiled": "node --test packages/math/dist/*.test.js packages/client-core/dist/*.test.js packages/client-core/dist/**/*.test.js packages/client-base/dist/*.test.js packages/client-monad/dist/*.test.js packages/client-arbitrum/dist/*.test.js examples/typescript/quote-logger/dist/*.test.js",
     "format": "prettier --write \"packages/**/*.ts\" \"examples/typescript/**/*.ts\"",
     "format:check": "prettier --check \"packages/**/*.ts\" \"examples/typescript/**/*.ts\"",
     "lint": "eslint packages examples/typescript --max-warnings=0"

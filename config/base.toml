@@ -13,6 +13,7 @@ explicit_lane_assets = []
 bind = "127.0.0.1:8080"
 queue_bound = 4096
 reconnect_delay_milliseconds = 1000
+source_stall_timeout_milliseconds = 30000
 # Omit `redis_url` to disable restart acceleration.
 redis_url = "redis://127.0.0.1/"
 checkpoint_interval_seconds = 30

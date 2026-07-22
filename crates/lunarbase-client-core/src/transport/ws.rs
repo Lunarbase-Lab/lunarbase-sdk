@@ -9,8 +9,8 @@
 use crate::source::{ChainDataSource, SourceStream};
 use crate::state::ordering::CursorReorderBuffer;
 use crate::transport::rpc::backend::RpcHttpBackend;
-use crate::transport::rpc::client::{RpcError, RpcHttpClient};
-use crate::transport::rpc::codec::{parse_rpc_head, parse_rpc_log};
+use crate::transport::rpc::client::RpcHttpClient;
+use crate::transport::rpc::codec::parse_rpc_log;
 use crate::transport::rpc::snapshot::RpcSnapshotProvider;
 use crate::{
     bootstrap::BootstrapSnapshot,
@@ -20,11 +20,15 @@ use crate::{
     },
 };
 use async_stream::stream;
-use futures_util::{SinkExt, StreamExt};
-use lunarbase_math::types::B256;
-use serde_json::{Value, json};
+use futures_util::StreamExt;
+use serde_json::Value;
 use std::sync::Arc;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+mod connection;
+mod protocol;
+
+use connection::{establish, websocket_payload};
+use protocol::{WsHead, head_discontinuity, parse_ws_head};
 
 /// Bounds transport frames and the number of updates that may wait for a
 /// block-head watermark.  Both bounds are required for predictable memory
@@ -154,42 +158,23 @@ impl ChainDataSource for WsRpcBackend {
 
     async fn subscribe(&self, filter: ContractFilter) -> Result<SourceStream, SourceError> {
         self.config.validate()?;
-        let (socket, _) = connect_async(self.ws_endpoint.as_ref())
-            .await
-            .map_err(|error| {
-                SourceError::Unavailable(format!("RPC WebSocket connect failed: {error}"))
-            })?;
+        let established = establish(
+            self.ws_endpoint.as_ref(),
+            &filter,
+            &self.config.logs_subscription,
+            self.http.chain_id(),
+            self.config.max_frame_bytes,
+        )
+        .await?;
+        let logs_subscription = established.logs_subscription;
+        let heads_subscription = established.heads_subscription;
+        let mut buffered = established.buffered;
+        let socket = established.socket;
         let (mut writer, mut reader) = socket.split();
-        writer
-            .send(Message::Text(subscription_request(
-                1,
-                &filter,
-                &self.config.logs_subscription,
-            )))
-            .await
-            .map_err(|error| {
-                SourceError::Unavailable(format!("RPC logs subscription failed: {error}"))
-            })?;
-        writer
-            .send(Message::Text(
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "eth_subscribe",
-                    "params": ["newHeads"],
-                })
-                .to_string(),
-            ))
-            .await
-            .map_err(|error| {
-                SourceError::Unavailable(format!("RPC heads subscription failed: {error}"))
-            })?;
 
         let chain_id = self.http.chain_id();
         let config = self.config.clone();
         let stream = stream! {
-            let mut logs_subscription: Option<String> = None;
-            let mut heads_subscription: Option<String> = None;
             let mut reorder = match CursorReorderBuffer::new(config.reorder_capacity) {
                 Ok(buffer) => buffer,
                 Err(error) => {
@@ -200,26 +185,37 @@ impl ChainDataSource for WsRpcBackend {
             let mut last_head: Option<WsHead> = None;
             let mut source_sequence = 0_u64;
 
-            while let Some(message) = reader.next().await {
-                let message = match message {
-                    Ok(message) => message,
-                    Err(error) => {
+            loop {
+                let payload = if let Some(payload) = buffered.pop_front() {
+                    payload
+                } else {
+                    let Some(message) = reader.next().await else {
                         yield Ok(ChainUpdate::Gap {
                             cursor: last_head.as_ref().map(|head| head.cursor.clone()),
-                            reason: format!("RPC WebSocket read failed; canonical recovery required: {error}"),
+                            reason: "RPC WebSocket closed; canonical recovery required".into(),
                         });
                         break;
-                    }
-                };
-                let payload = match websocket_payload(message, &mut writer).await {
-                    Ok(Some(payload)) => payload,
-                    Ok(None) => continue,
-                    Err(error) => {
-                        yield Ok(ChainUpdate::Gap {
-                            cursor: last_head.as_ref().map(|head| head.cursor.clone()),
-                            reason: error.to_string(),
-                        });
-                        break;
+                    };
+                    let message = match message {
+                        Ok(message) => message,
+                        Err(error) => {
+                            yield Ok(ChainUpdate::Gap {
+                                cursor: last_head.as_ref().map(|head| head.cursor.clone()),
+                                reason: format!("RPC WebSocket read failed; canonical recovery required: {error}"),
+                            });
+                            break;
+                        }
+                    };
+                    match websocket_payload(message, &mut writer).await {
+                        Ok(Some(payload)) => payload,
+                        Ok(None) => continue,
+                        Err(error) => {
+                            yield Ok(ChainUpdate::Gap {
+                                cursor: last_head.as_ref().map(|head| head.cursor.clone()),
+                                reason: error.to_string(),
+                            });
+                            break;
+                        }
                     }
                 };
                 if payload.len() > config.max_frame_bytes {
@@ -244,14 +240,7 @@ impl ChainDataSource for WsRpcBackend {
                     yield Err(SourceError::Unavailable(format!("RPC subscription error: {error}")));
                     break;
                 }
-                if let (Some(id), Some(result)) = (value.get("id"), value.get("result")) {
-                    if result.as_str().is_some() {
-                        match id.as_u64() {
-                            Some(1) => logs_subscription = result.as_str().map(str::to_owned),
-                            Some(2) => heads_subscription = result.as_str().map(str::to_owned),
-                            _ => {}
-                        }
-                    }
+                if value.get("id").is_some() {
                     continue;
                 }
                 let Some(params) = value.get("params").and_then(Value::as_object) else {
@@ -275,7 +264,7 @@ impl ChainDataSource for WsRpcBackend {
                     break;
                 };
 
-                if logs_subscription.as_deref() == Some(subscription) {
+                if logs_subscription == subscription {
                     let mut log = match parse_rpc_log(result, chain_id, Commitment::Realtime) {
                         Ok(log) => log,
                         Err(error) => {
@@ -285,6 +274,12 @@ impl ChainDataSource for WsRpcBackend {
                     };
                     source_sequence = source_sequence.saturating_add(1);
                     log.cursor.source_sequence = Some(source_sequence);
+                    if let Some(head) = last_head.as_ref()
+                        && head.cursor.block_number == log.cursor.block_number
+                    {
+                        log.cursor.execution_block_number =
+                            head.cursor.execution_block_number;
+                    }
                     let update = ChainUpdate::Log(log);
                     match reorder.push(update) {
                         Ok(_) => {}
@@ -295,12 +290,12 @@ impl ChainDataSource for WsRpcBackend {
                     }
                     if let Some(head) = last_head.as_ref() {
                         for update in reorder.drain_through(&head.cursor) {
-                            yield Ok(update);
+                            yield Ok(with_execution_context(update, &head.cursor));
                         }
                     }
                     continue;
                 }
-                if heads_subscription.as_deref() == Some(subscription) {
+                if heads_subscription == subscription {
                     let mut head = match parse_ws_head(result, chain_id) {
                         Ok(head) => head,
                         Err(error) => {
@@ -340,7 +335,7 @@ impl ChainDataSource for WsRpcBackend {
                         break;
                     }
                     for update in reorder.drain_through(&head.cursor) {
-                        yield Ok(update);
+                        yield Ok(with_execution_context(update, &head.cursor));
                     }
                 }
             }
@@ -357,99 +352,13 @@ impl ChainDataSource for WsRpcBackend {
     }
 }
 
-#[derive(Clone, Debug)]
-struct WsHead {
-    cursor: ChainCursor,
-    parent_hash: Option<B256>,
-}
-
-fn head_discontinuity(previous: &WsHead, next: &WsHead, progressive: bool) -> bool {
-    let same_height = next.cursor.block_number == previous.cursor.block_number;
-    let same_height_discontinuity = same_height
-        && (!progressive
-            || (next.parent_hash.is_some()
-                && previous.parent_hash.is_some()
-                && next.parent_hash != previous.parent_hash));
-    next.cursor.block_number < previous.cursor.block_number
-        || same_height_discontinuity
-        || (next.cursor.block_number == previous.cursor.block_number.saturating_add(1)
-            && next.parent_hash.is_some()
-            && previous.cursor.block_hash.is_some()
-            && next.parent_hash != previous.cursor.block_hash)
-}
-
-fn subscription_request(id: u64, filter: &ContractFilter, kind: &str) -> String {
-    let mut options = serde_json::Map::new();
-    options.insert(
-        "address".into(),
-        Value::String(format!("{:#x}", filter.address)),
-    );
-    if !filter.topics.is_empty() {
-        options.insert(
-            "topics".into(),
-            Value::Array(vec![Value::Array(
-                filter
-                    .topics
-                    .iter()
-                    .map(|topic| Value::String(format!("{topic:#x}")))
-                    .collect(),
-            )]),
-        );
+fn with_execution_context(mut update: ChainUpdate, head: &ChainCursor) -> ChainUpdate {
+    if let ChainUpdate::Log(log) = &mut update
+        && log.cursor.block_number == head.block_number
+    {
+        log.cursor.execution_block_number = head.execution_block_number;
     }
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": "eth_subscribe",
-        "params": [kind, Value::Object(options)],
-    })
-    .to_string()
-}
-
-fn parse_ws_head(value: &Value, chain_id: u64) -> Result<WsHead, RpcError> {
-    let head = parse_rpc_head(value)?;
-    Ok(WsHead {
-        cursor: ChainCursor {
-            chain_id,
-            block_number: head.number,
-            execution_block_number: head.l1_block_number.unwrap_or(head.number),
-            block_hash: head.hash,
-            transaction_index: None,
-            log_index: None,
-            source_sequence: None,
-            source_sub_index: None,
-            commitment: Commitment::Realtime,
-        },
-        parent_hash: head.parent_hash,
-    })
-}
-
-async fn websocket_payload<S>(
-    message: Message,
-    writer: &mut S,
-) -> Result<Option<Vec<u8>>, SourceError>
-where
-    S: futures_util::Sink<Message> + Unpin,
-    S::Error: std::fmt::Display,
-{
-    match message {
-        Message::Text(text) => Ok(Some(text.as_bytes().to_vec())),
-        Message::Binary(bytes) => Ok(Some(bytes.to_vec())),
-        Message::Ping(bytes) => {
-            writer.send(Message::Pong(bytes)).await.map_err(|error| {
-                SourceError::Unavailable(format!("RPC WebSocket pong failed: {error}"))
-            })?;
-            Ok(None)
-        }
-        Message::Pong(_) => Ok(None),
-        Message::Close(frame) => Err(SourceError::Gap(match frame {
-            Some(frame) => format!(
-                "RPC WebSocket closed ({}); canonical recovery required",
-                frame.reason
-            ),
-            None => "RPC WebSocket closed; canonical recovery required".into(),
-        })),
-        _ => Ok(None),
-    }
+    update
 }
 
 #[cfg(test)]

@@ -11,4 +11,5 @@ description = "Experimental Arbitrum Nitro runtime client for LunarBase"
 workspace = true
 
 [dependencies]
+futures-util.workspace = true
 lunarbase-client-core.workspace = true

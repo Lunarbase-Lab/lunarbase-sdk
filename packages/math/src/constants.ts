@@ -37,7 +37,7 @@ export function assertU256(value: bigint, label = "value"): bigint {
 /** Canonicalizes and validates a 20-byte EVM address. */
 export function parseAddress(value: string): Address {
   try {
-    return EvmAddress.from(value, { checksum: false });
+    return EvmAddress.from(value, { checksum: false }).toLowerCase() as Address;
   } catch {
     throw new MathError("INVALID_ADDRESS", "invalid EVM address");
   }

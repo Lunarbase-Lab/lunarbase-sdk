@@ -11,17 +11,19 @@ import type {
   Network,
 } from "../model.js";
 import type { Hex } from "ox/Hex";
-import { Commitment as CommitmentValue } from "../model.js";
+import { Commitment } from "../model.js";
 import { CursorReorderBuffer } from "../state/ordering.js";
+import { JsonRpcHttpClient, parseRpcLog, RpcError, RpcHttpBackend, RpcSnapshotProvider } from "./rpc.js";
 import {
-  JsonRpcHttpClient,
-  parseHash,
-  parseHexU64,
-  parseRpcLog,
-  RpcError,
-  RpcHttpBackend,
-  RpcSnapshotProvider,
-} from "./rpc.js";
+  defaultWebSocketFactory,
+  establishSocket,
+  type EstablishedSocket,
+  type WebSocketFactory,
+} from "./ws/connection.js";
+import { gap, parseHead } from "./ws/protocol.js";
+
+export { BoundedFrameQueue, defaultWebSocketFactory } from "./ws/connection.js";
+export type { SocketEvent, WebSocketFactory, WebSocketLike } from "./ws/connection.js";
 
 /** Resource bounds for generic Ethereum WebSocket ingestion. */
 export interface WsRpcConfig {
@@ -44,23 +46,6 @@ export const DEFAULT_WS_RPC_CONFIG: WsRpcConfig = Object.freeze({
   logsSubscription: "logs",
   progressiveHeads: false,
 });
-
-export interface WebSocketLike {
-  /** Browser-compatible numeric socket state, when exposed by the implementation. */
-  readonly readyState?: number;
-  /** Sends one text subscription or control frame. */
-  send(data: string): void;
-  /** Requests an orderly socket close. */
-  close(code?: number, reason?: string): void;
-  /** Registers a browser-compatible socket event listener. */
-  addEventListener(type: "open" | "message" | "error" | "close", listener: (event: SocketEvent) => void): void;
-  /** Removes a previously registered listener when supported. */
-  removeEventListener?(type: "open" | "message" | "error" | "close", listener: (event: SocketEvent) => void): void;
-}
-
-export type SocketEvent = { data?: unknown; error?: unknown; reason?: string };
-/** WebSocket factory abstraction used for browser, Node, and test transports. */
-export type WebSocketFactory = (url: string) => WebSocketLike;
 
 /**
  * Standard Ethereum JSON-RPC WebSocket source. HTTP remains authoritative
@@ -88,7 +73,7 @@ export class WsRpcBackend implements ChainDataSource {
     /** EIP-155 chain identifier attached to normalized cursors. */
     readonly chainId: bigint,
     /** Canonical block tag used for snapshot and recovery reads. */
-    readonly snapshotTag = "finalized",
+    readonly snapshotTag = "latest",
     config: Partial<WsRpcConfig> = {},
     factory: WebSocketFactory = defaultWebSocketFactory,
   ) {
@@ -110,11 +95,23 @@ export class WsRpcBackend implements ChainDataSource {
     return this.http.backfill(request);
   }
 
-  /** Opens logs and new-head subscriptions and emits normalized updates/gaps. */
-  subscribe(filter: ContractFilter, signal?: AbortSignal): AsyncIterable<ChainUpdate> {
-    const config = this.config;
-    const socket = this.factory(this.wsEndpoint);
-    return this.readSocket(socket, filter, config, signal);
+  /**
+   * Opens and acknowledges logs/new-head subscriptions before exposing the
+   * stream. A client therefore cannot become ready while the socket is merely
+   * connecting or while the node has rejected either subscription.
+   */
+  async subscribe(filter: ContractFilter, signal?: AbortSignal): Promise<AsyncIterable<ChainUpdate>> {
+    const connection = await establishSocket(
+      this.wsEndpoint,
+      this.factory,
+      filter,
+      this.config.logsSubscription,
+      this.chainId,
+      this.config.queueCapacity,
+      this.config.maxFrameBytes,
+      signal,
+    );
+    return this.readSocket(connection, signal);
   }
 
   /** Returns the canonical HTTP recovery head. */
@@ -127,64 +124,20 @@ export class WsRpcBackend implements ChainDataSource {
     return this.http.validateCheckpoint(checkpoint);
   }
 
-  private async *readSocket(
-    socket: WebSocketLike,
-    filter: ContractFilter,
-    config: WsRpcConfig,
-    signal?: AbortSignal,
-  ): AsyncIterable<ChainUpdate> {
-    const queue = new BoundedFrameQueue(config.queueCapacity);
-    const onOpen = () => queue.open();
-    const onMessage = (event: SocketEvent) => {
-      const frame = decodeFrame(event.data);
-      if (frame === undefined) {
-        queue.fail(new Error("RPC WebSocket delivered a non-text frame"));
-      } else if (new TextEncoder().encode(frame).byteLength > config.maxFrameBytes) {
-        queue.fail(new Error("RPC WebSocket frame exceeded configured bound"));
-      } else {
-        queue.push(frame);
-      }
-    };
-    const onError = (event: SocketEvent) =>
-      queue.fail(event.error instanceof Error ? event.error : new Error("RPC WebSocket error"));
-    const onClose = (event: SocketEvent) => (event.reason ? queue.fail(new Error(event.reason)) : queue.close());
-    socket.addEventListener("open", onOpen);
-    socket.addEventListener("message", onMessage);
-    socket.addEventListener("error", onError);
-    socket.addEventListener("close", onClose);
-
-    const cleanup = () => {
-      socket.removeEventListener?.("open", onOpen);
-      socket.removeEventListener?.("message", onMessage);
-      socket.removeEventListener?.("error", onError);
-      socket.removeEventListener?.("close", onClose);
-      if (!signal?.aborted) socket.close(1000, "source consumer stopped");
-    };
-    const abort = () => queue.close();
-    signal?.addEventListener("abort", abort, { once: true });
+  private async *readSocket(connection: EstablishedSocket, signal?: AbortSignal): AsyncIterable<ChainUpdate> {
+    const { queue, logsSubscription, headsSubscription, prefetched, close } = connection;
+    let lastHead: ChainCursor | undefined;
+    let lastParentHash: Hex | undefined;
+    let sourceSequence = 0n;
+    let reorder = new CursorReorderBuffer(this.config.reorderCapacity);
 
     try {
-      if (socket.readyState === 1) queue.open();
-      await queue.waitUntilOpen(signal);
-      socket.send(subscriptionRequest(1, filter, config.logsSubscription));
-      socket.send(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "eth_subscribe", params: ["newHeads"] }));
-
-      let logsSubscription: string | undefined;
-      let headsSubscription: string | undefined;
-      let lastHead: ChainCursor | undefined;
-      let lastParentHash: Hex | undefined;
-      let sourceSequence = 0n;
-      let reorder = new CursorReorderBuffer(config.reorderCapacity);
-
       while (!signal?.aborted) {
         let frame: string | undefined;
         try {
-          frame = await queue.next(signal);
+          frame = prefetched.shift() ?? (await queue.next(signal));
         } catch (error) {
-          yield gap(
-            `RPC WebSocket failed; canonical recovery required: ${error instanceof Error ? error.message : String(error)}`,
-            lastHead,
-          );
+          yield gap(`RPC WebSocket failed; canonical recovery required: ${message(error)}`, lastHead);
           return;
         }
         if (frame === undefined) {
@@ -195,20 +148,12 @@ export class WsRpcBackend implements ChainDataSource {
         try {
           value = JSON.parse(frame) as Record<string, unknown>;
         } catch (error) {
-          yield gap(
-            `invalid RPC WebSocket JSON; canonical recovery required: ${error instanceof Error ? error.message : String(error)}`,
-            lastHead,
-          );
+          yield gap(`invalid RPC WebSocket JSON; canonical recovery required: ${message(error)}`, lastHead);
           return;
         }
         if (value.error) {
           yield gap(`RPC subscription error: ${JSON.stringify(value.error)}`, lastHead);
           return;
-        }
-        if (value.id !== undefined && typeof value.result === "string") {
-          if (Number(value.id) === 1) logsSubscription = value.result;
-          if (Number(value.id) === 2) headsSubscription = value.result;
-          continue;
         }
         if (value.method !== "eth_subscription" || !value.params || typeof value.params !== "object") continue;
         const params = value.params as Record<string, unknown>;
@@ -221,77 +166,52 @@ export class WsRpcBackend implements ChainDataSource {
         if (subscription === logsSubscription) {
           let log: ContractLog;
           try {
-            log = parseRpcLog(params.result, this.chainId, CommitmentValue.Realtime);
+            log = parseRpcLog(params.result, this.chainId, Commitment.Realtime);
           } catch (error) {
-            yield gap(
-              `invalid RPC log notification: ${error instanceof Error ? error.message : String(error)}`,
-              lastHead,
-            );
+            yield gap(`invalid RPC log notification: ${message(error)}`, lastHead);
             return;
           }
           sourceSequence += 1n;
           log = { ...log, cursor: { ...log.cursor, sourceSequence } };
+          if (lastHead?.blockNumber === log.cursor.blockNumber)
+            log = withExecutionContext(log, lastHead.executionBlockNumber);
           try {
             reorder.push({ kind: "Log", log });
           } catch (error) {
-            yield gap(`RPC reorder buffer failed: ${error instanceof Error ? error.message : String(error)}`, lastHead);
+            yield gap(`RPC reorder buffer failed: ${message(error)}`, lastHead);
             return;
           }
-          if (lastHead) for (const update of reorder.drainThrough(lastHead)) yield update;
+          if (lastHead)
+            for (const update of reorder.drainThrough(lastHead)) yield annotateExecutionContext(update, lastHead);
           continue;
         }
 
-        if (subscription === headsSubscription) {
-          let parsed: { cursor: ChainCursor; parentHash?: Hex };
-          try {
-            parsed = parseHead(params.result, this.chainId);
-          } catch (error) {
-            yield gap(
-              `invalid RPC head notification: ${error instanceof Error ? error.message : String(error)}`,
-              lastHead,
-            );
-            return;
-          }
-          sourceSequence += 1n;
-          parsed.cursor = { ...parsed.cursor, sourceSequence };
-          if (lastHead) {
-            if (parsed.cursor.blockNumber > lastHead.blockNumber + 1n) {
-              yield gap("RPC WebSocket skipped one or more block heads; canonical recovery required", lastHead);
-              return;
-            }
-            const sameHeight = parsed.cursor.blockNumber === lastHead.blockNumber;
-            const sameHeightDiscontinuity =
-              sameHeight &&
-              (!config.progressiveHeads ||
-                (parsed.parentHash !== undefined &&
-                  lastParentHash !== undefined &&
-                  parsed.parentHash !== lastParentHash));
-            const discontinuity =
-              parsed.cursor.blockNumber < lastHead.blockNumber ||
-              sameHeightDiscontinuity ||
-              (parsed.cursor.blockNumber === lastHead.blockNumber + 1n &&
-                parsed.parentHash !== undefined &&
-                lastHead.blockHash !== undefined &&
-                parsed.parentHash !== lastHead.blockHash);
-            if (discontinuity) {
-              yield { kind: "Reorg", oldHead: lastHead, newHead: parsed.cursor };
-              reorder = new CursorReorderBuffer(config.reorderCapacity);
-            }
-          }
-          lastHead = parsed.cursor;
-          lastParentHash = parsed.parentHash;
-          try {
-            reorder.push({ kind: "Head", cursor: parsed.cursor });
-          } catch (error) {
-            yield gap(`RPC reorder buffer failed: ${error instanceof Error ? error.message : String(error)}`, lastHead);
-            return;
-          }
-          for (const update of reorder.drainThrough(parsed.cursor)) yield update;
+        if (subscription !== headsSubscription) continue;
+        let parsed: { cursor: ChainCursor; parentHash?: Hex };
+        try {
+          parsed = parseHead(params.result, this.chainId);
+        } catch (error) {
+          yield gap(`invalid RPC head notification: ${message(error)}`, lastHead);
+          return;
         }
+        sourceSequence += 1n;
+        parsed.cursor = { ...parsed.cursor, sourceSequence };
+        if (lastHead && headDiscontinuity(lastHead, lastParentHash, parsed, this.config.progressiveHeads)) {
+          yield { kind: "Reorg", oldHead: lastHead, newHead: parsed.cursor };
+          reorder = new CursorReorderBuffer(this.config.reorderCapacity);
+        }
+        lastHead = parsed.cursor;
+        lastParentHash = parsed.parentHash;
+        try {
+          reorder.push({ kind: "Head", cursor: parsed.cursor });
+        } catch (error) {
+          yield gap(`RPC reorder buffer failed: ${message(error)}`, lastHead);
+          return;
+        }
+        for (const update of reorder.drainThrough(parsed.cursor)) yield annotateExecutionContext(update, parsed.cursor);
       }
     } finally {
-      signal?.removeEventListener("abort", abort);
-      cleanup();
+      close();
     }
   }
 }
@@ -306,141 +226,35 @@ function validateConfig(config: WsRpcConfig): WsRpcConfig {
   return Object.freeze(config);
 }
 
-function subscriptionRequest(id: number, filter: ContractFilter, kind: "logs" | "pendingLogs"): string {
-  const options: Record<string, unknown> = { address: filter.address };
-  if (filter.topics.length > 0) options.topics = [filter.topics];
-  return JSON.stringify({ jsonrpc: "2.0", id, method: "eth_subscribe", params: [kind, options] });
+function headDiscontinuity(
+  lastHead: ChainCursor,
+  lastParentHash: Hex | undefined,
+  next: { cursor: ChainCursor; parentHash?: Hex },
+  progressiveHeads: boolean,
+): boolean {
+  if (next.cursor.blockNumber > lastHead.blockNumber + 1n) return true;
+  const sameHeight = next.cursor.blockNumber === lastHead.blockNumber;
+  const changedParent =
+    next.parentHash !== undefined && lastParentHash !== undefined && next.parentHash !== lastParentHash;
+  return (
+    next.cursor.blockNumber < lastHead.blockNumber ||
+    (sameHeight && (!progressiveHeads || changedParent)) ||
+    (next.cursor.blockNumber === lastHead.blockNumber + 1n &&
+      next.parentHash !== undefined &&
+      lastHead.blockHash !== undefined &&
+      next.parentHash !== lastHead.blockHash)
+  );
 }
 
-function parseHead(value: unknown, chainId: bigint): { cursor: ChainCursor; parentHash?: Hex } {
-  if (!value || typeof value !== "object") throw new RpcError("INVALID", "newHeads result is not an object");
-  const object = value as Record<string, unknown>;
-  const blockHash = object.hash === null || object.hash === undefined ? undefined : parseHash(object.hash, "head.hash");
-  const parentHash =
-    object.parentHash === null || object.parentHash === undefined
-      ? undefined
-      : parseHash(object.parentHash, "head.parentHash");
-  return {
-    cursor: {
-      chainId,
-      blockNumber: parseHexU64(object.number, "head.number"),
-      executionBlockNumber:
-        object.l1BlockNumber === undefined || object.l1BlockNumber === null
-          ? parseHexU64(object.number, "head.number")
-          : parseHexU64(object.l1BlockNumber, "head.l1BlockNumber"),
-      blockHash,
-      commitment: CommitmentValue.Realtime,
-    },
-    parentHash,
-  };
+function annotateExecutionContext(update: ChainUpdate, head: ChainCursor): ChainUpdate {
+  if (update.kind !== "Log" || update.log.cursor.blockNumber !== head.blockNumber) return update;
+  return { kind: "Log", log: withExecutionContext(update.log, head.executionBlockNumber) };
 }
 
-function gap(reason: string, cursor?: ChainCursor): ChainUpdate {
-  return { kind: "Gap", cursor, reason };
+function withExecutionContext(log: ContractLog, executionBlockNumber: bigint): ContractLog {
+  return { ...log, cursor: { ...log.cursor, executionBlockNumber } };
 }
 
-function decodeFrame(data: unknown): string | undefined {
-  if (typeof data === "string") return data;
-  if (data instanceof ArrayBuffer) return new TextDecoder().decode(data);
-  if (ArrayBuffer.isView(data))
-    return new TextDecoder().decode(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
-  return undefined;
-}
-
-/** Creates the platform WebSocket or throws an actionable injection error. */
-export function defaultWebSocketFactory(url: string): WebSocketLike {
-  const constructor = (globalThis as typeof globalThis & { WebSocket?: new (url: string) => WebSocketLike }).WebSocket;
-  if (!constructor) throw new RpcError("INVALID", "global WebSocket is unavailable; inject a WebSocketFactory");
-  return new constructor(url);
-}
-
-export class BoundedFrameQueue {
-  /** Decoded text frames waiting for the socket consumer. */
-  private readonly values: string[] = [];
-  /** Pending consumers released when data or terminal state arrives. */
-  private readonly waiters: Array<(value: string | undefined) => void> = [];
-  /** Whether the underlying socket emitted its open event. */
-  private opened = false;
-  /** Whether close, failure, or cancellation terminated the queue. */
-  private ended = false;
-  /** Terminal transport failure propagated to pending and future readers. */
-  private failure?: Error;
-
-  /** Creates a bounded frame queue for one socket reader. */
-  constructor(
-    /** Maximum decoded frames retained before fail-closed recovery. */
-    private readonly capacity: number,
-  ) {}
-
-  /** Marks the socket open and releases open waiters. */
-  open(): void {
-    this.opened = true;
-    this.resolveWaiters();
-  }
-
-  /** Enqueues one frame or fails closed on overflow. */
-  push(value: string): void {
-    if (this.ended) return;
-    if (this.values.length >= this.capacity) {
-      this.fail(new Error("RPC WebSocket frame queue overflow; canonical recovery required"));
-      return;
-    }
-    this.values.push(value);
-    this.resolveWaiters();
-  }
-
-  /** Terminates the queue with a transport error. */
-  fail(error: Error): void {
-    if (this.ended) return;
-    this.failure = error;
-    this.ended = true;
-    this.resolveWaiters();
-  }
-
-  /** Terminates the queue normally. */
-  close(): void {
-    if (this.ended) return;
-    this.ended = true;
-    this.resolveWaiters();
-  }
-
-  /** Waits for socket open or propagates close/failure. */
-  async waitUntilOpen(signal?: AbortSignal): Promise<void> {
-    if (this.opened) return;
-    await this.wait(signal);
-    if (!this.opened) throw this.failure ?? new Error("RPC WebSocket closed before open");
-  }
-
-  /** Reads the next frame, waiting until data or terminal state exists. */
-  async next(signal?: AbortSignal): Promise<string | undefined> {
-    if (this.failure) throw this.failure;
-    const value = this.values.shift();
-    if (value !== undefined) return value;
-    if (this.ended) return undefined;
-    return this.wait(signal);
-  }
-
-  private wait(signal?: AbortSignal): Promise<string | undefined> {
-    if (signal?.aborted) return Promise.resolve(undefined);
-    return new Promise((resolve, reject) => {
-      const onAbort = () => {
-        signal?.removeEventListener("abort", onAbort);
-        resolve(undefined);
-      };
-      signal?.addEventListener("abort", onAbort, { once: true });
-      this.waiters.push((value) => {
-        signal?.removeEventListener("abort", onAbort);
-        if (this.failure) reject(this.failure);
-        else resolve(value);
-      });
-    });
-  }
-
-  private resolveWaiters(): void {
-    while (this.waiters.length > 0 && (this.values.length > 0 || this.ended || this.opened)) {
-      const waiter = this.waiters.shift();
-      waiter?.(this.values.shift());
-      if (!this.values.length && !this.ended && !this.opened) break;
-    }
-  }
+function message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

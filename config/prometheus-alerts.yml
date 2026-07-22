@@ -26,6 +26,15 @@ groups:
           summary: LunarBase realtime source is unstable
           description: More than five source gaps were observed in ten minutes.
 
+      - alert: LunarBaseIndexerSourceStalled
+        expr: lunarbase_ready == 1 and lunarbase_source_update_age_seconds > 30
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: LunarBase realtime source is not advancing
+          description: A ready replica has received no realtime update for more than 30 seconds.
+
       - alert: LunarBaseIndexerQueueSaturation
         expr: lunarbase_queue_depth / lunarbase_queue_capacity > 0.8
         for: 1m

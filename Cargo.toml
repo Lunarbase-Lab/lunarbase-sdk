@@ -15,7 +15,7 @@ resolver = "2"
 edition = "2024"
 version = "0.2.0"
 license = "MIT OR Apache-2.0"
-rust-version = "1.95"
+rust-version = "1.97"
 repository = "https://github.com/Lunarbase-Lab/lunarbase-sdk"
 
 [workspace.lints.rust]
@@ -36,11 +36,10 @@ lunarbase-client-base = { version = "0.2.0", path = "crates/lunarbase-client-bas
 lunarbase-client-monad = { version = "0.2.0", path = "crates/lunarbase-client-monad" }
 lunarbase-client-arbitrum = { version = "0.2.0", path = "crates/lunarbase-client-arbitrum" }
 alloy-primitives = { version = "=1.6.1", default-features = false, features = ["std", "serde"] }
-alloy-eips = { version = "=2.2.0", default-features = false }
-alloy-provider = { version = "=2.2.0", default-features = false, features = ["reqwest", "reqwest-rustls-tls"] }
-alloy-rpc-types-eth = { version = "=2.2.0", default-features = false, features = ["serde"] }
+alloy-rpc-client = { version = "=2.2.0", default-features = false, features = ["reqwest"] }
 alloy-serde = { version = "=2.2.0", default-features = false }
 alloy-sol-types = "=1.6.1"
+alloy-transport = { version = "=2.2.0", default-features = false }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -48,10 +47,10 @@ thiserror = "2"
 futures-core = "0.3"
 futures-util = "0.3"
 async-stream = "0.3"
-redis = "0.27"
+redis = { version = "0.27", default-features = false }
 tokio = { version = "1", features = ["macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
-tokio-tungstenite = "0.24"
-axum = { version = "0.7.9", features = ["ws"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+axum = { version = "0.7.9", default-features = false, features = ["http1", "json", "tokio"] }
 clap = { version = "4.5.60", features = ["derive", "env"] }
 toml = "0.8.23"
 tracing = "0.1"
@@ -63,3 +62,9 @@ url = "2.5"
 lto = true
 codegen-units = 1
 strip = true
+
+[profile.dev]
+debug = 1
+
+[profile.test]
+debug = 1

@@ -33,7 +33,7 @@ export class BaseDataSource extends WsRpcBackend {
       config.deployment.realtimeSource,
       Network.Base,
       config.deployment.chainId,
-      options.snapshotTag ?? "finalized",
+      options.snapshotTag ?? "latest",
       {
         ...options.wsConfig,
         logsSubscription: "pendingLogs",

@@ -10,7 +10,7 @@ CARGO ?= cargo
 PNPM ?= pnpm
 PNPM_VERSION ?= 9.15.0
 NODE ?= node
-CONTRACTS_DIR ?= ../lunarbase-contracts
+CONTRACTS_DIR ?=
 RUSTDOCFLAGS ?= -D warnings
 NETWORK ?= base
 CONFIG ?= config/$(NETWORK).toml
@@ -25,7 +25,7 @@ PNPM_CMD := $(shell if command -v corepack >/dev/null 2>&1; then printf '%s' "co
 
 .PHONY: help install build build-rust build-ts build-release build-indexer run run-indexer \
 	check check-rust check-ts fmt fmt-rust fmt-ts fmt-check fmt-check-rust fmt-check-ts lint lint-rust lint-ts \
-	test test-rust test-ts test-runtime test-process-e2e load monad-live-validate docs docs-rust ffi \
+	test test-rust test-ts test-runtime test-process-e2e audit audit-rust audit-ts load monad-live-validate docs docs-rust ffi \
 	quote-logger quote-logger-rust quote-logger-ts monad-parser-smoke docker-build docker-build-monad-native docker-up docker-down release-artifacts release-check source-size-check verify ci clean check-pnpm
 
 help:
@@ -42,6 +42,7 @@ help:
 	@echo "  make load           Benchmark 15 lanes / 100 pairs by default"
 	@echo "  make monad-live-validate  Run the real Monad parser/RPC/indexer soak"
 	@echo "  make lint           Run Rust clippy and TypeScript ESLint"
+	@echo "  make audit          Check Rust advisories/licenses/sources and npm advisories"
 	@echo "  make fmt            Format Rust and TypeScript sources"
 	@echo "  make fmt-check      Verify Rust and TypeScript formatting"
 	@echo "  make docs           Build Rust API documentation with warnings as errors"
@@ -111,13 +112,22 @@ lint-rust:
 lint-ts: check-pnpm
 	$(PNPM_CMD) exec eslint packages examples/typescript --max-warnings=0
 
+audit: audit-rust audit-ts
+
+audit-rust:
+	$(CARGO) deny check
+	$(CARGO) machete
+
+audit-ts: check-pnpm
+	$(PNPM_CMD) audit --prod --audit-level high
+
 test: test-rust test-ts
 
 test-rust:
 	$(CARGO) test --workspace
 
 test-ts: build-ts
-	$(PNPM_CMD) test
+	$(PNPM_CMD) test:compiled
 
 test-runtime: build-ts
 	$(CARGO) test -p lunarbase-client-core -p lunarbase-client-base -p lunarbase-client-monad -p lunarbase-client-arbitrum
@@ -147,6 +157,11 @@ docs-rust:
 	RUSTDOCFLAGS="$(RUSTDOCFLAGS)" $(CARGO) doc --workspace --no-deps
 
 ffi:
+	@if [ -z "$(CONTRACTS_DIR)" ]; then \
+		echo "CONTRACTS_DIR is required because the private contracts repository is not a local SDK dependency."; \
+		echo "Example: make ffi CONTRACTS_DIR=/absolute/path/to/lunarbase-contracts"; \
+		exit 2; \
+	fi
 	$(MAKE) -C "$(CONTRACTS_DIR)" differential-ffi
 
 quote-logger: quote-logger-rust

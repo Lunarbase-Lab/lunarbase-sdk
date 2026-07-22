@@ -37,7 +37,7 @@ pub struct RawConfig {
     pub expect_whitelisted: bool,
     /// First deployment block included in lane discovery.
     pub deployment_block: u64,
-    /// Pinned Core runtime bytecode hash, or the configured compatibility sentinel.
+    /// Exact non-zero hash of the expected Core runtime bytecode.
     pub expected_runtime_code_hash: String,
     /// Contracts revision expected by the runtime and checkpoint schema.
     #[serde(default = "default_compatibility")]
@@ -58,6 +58,9 @@ pub struct RawConfig {
     /// Delay before reopening a failed realtime subscription.
     #[serde(default = "default_reconnect_milliseconds")]
     pub reconnect_delay_milliseconds: u64,
+    /// Maximum interval without a source update before fail-closed recovery.
+    #[serde(default = "default_source_stall_milliseconds")]
+    pub source_stall_timeout_milliseconds: u64,
     /// Optional Redis URL used solely to accelerate restarts.
     #[serde(default)]
     pub redis_url: Option<String>,
@@ -139,6 +142,7 @@ impl RawConfig {
             })?;
         if self.queue_bound == 0
             || self.reconnect_delay_milliseconds == 0
+            || self.source_stall_timeout_milliseconds == 0
             || self.checkpoint_interval_seconds == 0
             || self.shutdown_timeout_seconds == 0
         {
@@ -168,6 +172,7 @@ impl RawConfig {
             deployment,
             buffer_capacity: self.queue_bound,
             reconnect_delay: Duration::from_millis(self.reconnect_delay_milliseconds),
+            source_stall_timeout: Duration::from_millis(self.source_stall_timeout_milliseconds),
         };
         client.validate().map_err(|error| ConfigError::Invalid {
             field: "deployment",
@@ -218,6 +223,9 @@ fn default_queue_bound() -> usize {
 }
 fn default_reconnect_milliseconds() -> u64 {
     1_000
+}
+fn default_source_stall_milliseconds() -> u64 {
+    30_000
 }
 fn default_checkpoint_seconds() -> u64 {
     30

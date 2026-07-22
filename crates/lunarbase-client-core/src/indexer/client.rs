@@ -6,14 +6,21 @@ use crate::indexer::client_types::{
 use crate::indexer::engine::QuoteIndexer;
 use crate::indexer::errors::{ClientRuntimeEvent, IndexerError};
 use crate::indexer::quote_types::{ClientBatchQuote, ClientQuote, IndexerHealth};
-use crate::indexer::tasks::{ReducerRuntime, recover_checkpoint, reducer_loop, source_pump};
+use crate::indexer::tasks::{
+    ReducerRuntime, SourcePumpRuntime, recover_checkpoint, reducer_loop, source_pump,
+    wait_for_source_active,
+};
 use crate::model::{Checkpoint, Commitment, SourceError};
 use crate::source::ChainDataSource;
+use futures_util::FutureExt;
 use lunarbase_math::state::{QuoteRequest, QuoteState};
-use std::sync::Arc;
+use std::any::Any;
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, broadcast, mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
@@ -52,20 +59,43 @@ impl ConnectedQuoteClient {
         if source.network() != config.deployment.network {
             return Err(SourceError::NetworkMismatch.into());
         }
+        let shared = Arc::new(SharedQuoteState::new_not_ready(QuoteIndexer::new(
+            QuoteState::default(),
+            config.deployment.clone(),
+        )));
         let (updates_tx, mut updates_rx) = mpsc::channel(config.buffer_capacity);
         let (cancel, pump_cancel) = watch::channel(false);
+        let (source_active_tx, mut source_active_rx) = watch::channel(false);
         let (runtime_events, _) = broadcast::channel(RUNTIME_EVENT_CAPACITY);
         let stats = Arc::new(ClientRuntimeStats::new(config.buffer_capacity));
-        let pump = tokio::spawn(source_pump(
+        let pump_future = source_pump(
             source.clone(),
             config.filter.clone(),
             updates_tx,
-            config.reconnect_delay,
-            pump_cancel,
+            SourcePumpRuntime {
+                reconnect_delay: config.reconnect_delay,
+                stall_timeout: config.source_stall_timeout,
+                source_active: source_active_tx,
+                cancel: pump_cancel,
+                events: runtime_events.clone(),
+                stats: stats.clone(),
+            },
+        );
+        let pump = tokio::spawn(supervise_task(
+            "source-pump",
+            pump_future,
+            shared.clone(),
             runtime_events.clone(),
-            stats.clone(),
+            cancel.subscribe(),
         ));
         let mut bootstrap_pump = BootstrapPump::new(cancel.clone(), pump);
+        let mut bootstrap_cancel = cancel.subscribe();
+        if !wait_for_source_active(&mut source_active_rx, &mut bootstrap_cancel).await {
+            return Err(SourceError::Unavailable(
+                "realtime source stopped before subscription was established".into(),
+            )
+            .into());
+        }
 
         let mut initial = if let Some(checkpoint) = optional_checkpoint {
             if checkpoint.is_compatible(&config.deployment)
@@ -98,17 +128,29 @@ impl ConnectedQuoteClient {
         }
         initial.apply_handoff(buffered)?;
 
-        let shared = Arc::new(SharedQuoteState::new(initial));
-        let reducer = tokio::spawn(reducer_loop(
+        *shared
+            .indexer
+            .write()
+            .map_err(|_| IndexerError::LockPoisoned)? = initial;
+        shared.available.store(true, Ordering::Release);
+        let reducer_future = reducer_loop(
             shared.clone(),
             source,
             config,
             updates_rx,
             cancel.subscribe(),
+            source_active_rx,
             ReducerRuntime {
                 events: runtime_events.clone(),
                 stats: stats.clone(),
             },
+        );
+        let reducer = tokio::spawn(supervise_task(
+            "reducer",
+            reducer_future,
+            shared.clone(),
+            runtime_events.clone(),
+            cancel.subscribe(),
         ));
         let source_pump = bootstrap_pump.disarm();
 
@@ -131,13 +173,21 @@ impl ConnectedQuoteClient {
 
     /// Waits until the current state reaches at least `minimum` commitment.
     pub async fn await_ready(&self, minimum: Commitment) -> Result<(), IndexerError> {
+        let mut cancel = self.cancel.subscribe();
         loop {
             let notified = self.shared.ready.notified();
             let health = self.health()?;
             if health.ready && health.commitment >= minimum {
                 return Ok(());
             }
-            notified.await;
+            tokio::select! {
+                () = notified => {}
+                changed = cancel.changed() => {
+                    if changed.is_err() || *cancel.borrow() {
+                        return Err(IndexerError::NotReady);
+                    }
+                }
+            }
         }
     }
 
@@ -179,6 +229,9 @@ impl ConnectedQuoteClient {
 
     /// Returns a durable checkpoint. The clone is explicit and off hot path.
     pub fn checkpoint(&self) -> Result<Option<Checkpoint>, IndexerError> {
+        if !self.is_ready() {
+            return Ok(None);
+        }
         Ok(self
             .shared
             .indexer
@@ -215,7 +268,7 @@ impl ConnectedQuoteClient {
         self.shared.ready.notify_waiters();
 
         let (mut reducer, mut source_pump) = {
-            let mut tasks = self.tasks.lock().await;
+            let mut tasks = self.tasks.lock().map_err(|_| IndexerError::LockPoisoned)?;
             (tasks.reducer.take(), tasks.source_pump.take())
         };
         let joined = timeout(deadline, async {
@@ -323,6 +376,44 @@ fn collect_join(
     Ok(())
 }
 
+async fn supervise_task<F>(
+    name: &'static str,
+    future: F,
+    shared: Arc<SharedQuoteState>,
+    events: broadcast::Sender<ClientRuntimeEvent>,
+    cancel: watch::Receiver<bool>,
+) where
+    F: Future<Output = ()> + Send,
+{
+    let result = AssertUnwindSafe(future).catch_unwind().await;
+    shared.available.store(false, Ordering::Release);
+    shared.ready.notify_waiters();
+    match result {
+        Err(payload) => publish(
+            &events,
+            ClientRuntimeEvent::BackgroundTaskPanicked {
+                task: name,
+                detail: panic_detail(payload),
+            },
+        ),
+        Ok(()) if !*cancel.borrow() => publish(
+            &events,
+            ClientRuntimeEvent::BackgroundTaskStopped { task: name },
+        ),
+        Ok(()) => {}
+    }
+}
+
+fn panic_detail(payload: Box<dyn Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "non-string panic payload".into()
+    }
+}
+
 pub(super) fn publish(sender: &broadcast::Sender<ClientRuntimeEvent>, event: ClientRuntimeEvent) {
     let _ = sender.send(event);
 }
@@ -330,13 +421,15 @@ pub(super) fn publish(sender: &broadcast::Sender<ClientRuntimeEvent>, event: Cli
 impl Drop for ConnectedQuoteClient {
     fn drop(&mut self) {
         let _ = self.cancel.send(true);
-        if let Ok(tasks) = self.tasks.try_lock() {
-            if let Some(task) = tasks.reducer.as_ref() {
-                task.abort();
-            }
-            if let Some(task) = tasks.source_pump.as_ref() {
-                task.abort();
-            }
+        let tasks = match self.tasks.get_mut() {
+            Ok(tasks) => tasks,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(task) = tasks.reducer.as_ref() {
+            task.abort();
+        }
+        if let Some(task) = tasks.source_pump.as_ref() {
+            task.abort();
         }
     }
 }

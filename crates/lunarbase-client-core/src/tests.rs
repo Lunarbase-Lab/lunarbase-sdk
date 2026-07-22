@@ -3,6 +3,8 @@
 use crate::bootstrap::BootstrapSnapshot;
 use crate::indexer::client::ConnectedQuoteClient;
 use crate::indexer::client_types::ClientConnectConfig;
+use crate::indexer::engine::QuoteIndexer;
+use crate::indexer::errors::IndexerError;
 use crate::model::{
     BackfillRequest, ChainCursor, ChainUpdate, Checkpoint, Commitment, ContractFilter, ContractLog,
     DeploymentConfig, MATH_COMPATIBILITY_VERSION, Network, SourceError,
@@ -130,6 +132,11 @@ async fn quote_and_batch_never_call_the_source() {
             .all(|outcome| outcome == &single.outcome)
     );
     assert_eq!(source_calls(&source), calls);
+    let oversized = vec![request(); 257];
+    assert!(matches!(
+        client.quote_many(&oversized),
+        Err(IndexerError::InvalidRequest(_))
+    ));
     client.shutdown().await;
 }
 
@@ -213,6 +220,32 @@ fn realtime_source_sequence_allows_progressive_hashes_at_one_height() {
     assert_eq!(reducer.cursor(), Some(&second));
 }
 
+#[test]
+fn same_height_handoff_with_another_hash_fails_closed() {
+    let deployment = config().deployment;
+    let mut indexer = QuoteIndexer::new(QuoteState::default(), deployment);
+    indexer.bootstrap(snapshot(100)).unwrap();
+    let mut conflicting = cursor(100, Commitment::Realtime);
+    conflicting.block_hash = Some(B256::new([2; 32]));
+    conflicting.source_sequence = Some(1);
+
+    assert!(matches!(
+        indexer.apply_handoff(vec![ChainUpdate::Head(conflicting)]),
+        Err(IndexerError::Reducer(
+            crate::state::reducer::ReducerError::BlockHashMismatch
+        ))
+    ));
+}
+
+#[test]
+fn deployment_rejects_duplicate_or_zero_explicit_lanes() {
+    let mut deployment = config().deployment;
+    deployment.explicit_lane_assets = vec![ASSET, ASSET];
+    assert!(deployment.validate().is_err());
+    deployment.explicit_lane_assets = vec![Address::ZERO];
+    assert!(deployment.validate().is_err());
+}
+
 fn config() -> ClientConnectConfig {
     ClientConnectConfig {
         deployment: DeploymentConfig {
@@ -234,6 +267,7 @@ fn config() -> ClientConnectConfig {
         },
         buffer_capacity: 16,
         reconnect_delay: Duration::from_millis(10),
+        source_stall_timeout: Duration::from_secs(1),
     }
 }
 

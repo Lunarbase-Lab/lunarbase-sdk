@@ -161,8 +161,14 @@ export interface ChainDataSource {
   snapshot(deployment: DeploymentConfig): Promise<BootstrapSnapshot>;
   /** Reads canonical logs over an inclusive recovery range. */
   backfill(request: BackfillRequest): Promise<readonly ContractLog[]>;
-  /** Opens a realtime normalized update stream. */
-  subscribe(filter: ContractFilter, signal?: AbortSignal): AsyncIterable<ChainUpdate>;
+  /**
+   * Opens and acknowledges a realtime normalized update stream.
+   *
+   * The promise resolves only after the transport has completed its protocol
+   * handshake, so a runtime cannot report readiness for a merely connecting
+   * socket.
+   */
+  subscribe(filter: ContractFilter, signal?: AbortSignal): Promise<AsyncIterable<ChainUpdate>>;
   /** Returns the latest canonical chain position known to the source. */
   canonicalHead(): Promise<ChainCursor>;
   /** Confirms that a checkpoint cursor still belongs to the canonical chain. */
@@ -215,7 +221,7 @@ export class ReducerError extends Error {
 /** Runtime lifecycle or source-continuity error. */
 export class IndexerError extends Error {
   constructor(
-    readonly code: "NOT_READY" | "GAP" | "CODE_HASH_MISMATCH" | "NO_CURSOR" | "REDUCER" | "SOURCE",
+    readonly code: "NOT_READY" | "GAP" | "CODE_HASH_MISMATCH" | "NO_CURSOR" | "INVALID_REQUEST" | "REDUCER" | "SOURCE",
     message: string,
   ) {
     super(message);
@@ -234,6 +240,10 @@ export interface ClientQuote {
   cursor: ChainCursor;
   /** EVM-visible block supplied to time-dependent quote math. */
   executionBlockNumber: bigint;
+  /** Core runtime bytecode hash associated with the state snapshot. */
+  contractCodeHash: Hex;
+  /** Pinned Solidity math revision implemented by this client. */
+  mathCompatibilityVersion: string;
 }
 
 /** Batch results calculated synchronously from one state cursor. */
@@ -244,6 +254,10 @@ export interface ClientBatchQuote {
   executionBlockNumber: bigint;
   /** Results evaluated synchronously without yielding between items. */
   results: readonly QuoteOutcome[];
+  /** Core runtime bytecode hash associated with the shared snapshot. */
+  contractCodeHash: Hex;
+  /** Pinned Solidity math revision implemented by this client. */
+  mathCompatibilityVersion: string;
 }
 
 /** Observable runtime state. */

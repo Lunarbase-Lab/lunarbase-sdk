@@ -251,13 +251,33 @@ impl DeploymentConfig {
                 "Core and configured router must be non-zero".into(),
             ));
         }
-        if self.http_rpc_url.is_empty()
-            || self.realtime_source.is_empty()
-            || self.contract_compatibility_version.is_empty()
-        {
+        if self.expected_runtime_code_hash == B256::ZERO {
             return Err(SourceError::Unavailable(
-                "RPC, realtime source, and compatibility version are required".into(),
+                "expected Core runtime code hash must be non-zero".into(),
             ));
+        }
+        if self.contract_compatibility_version != MATH_COMPATIBILITY_VERSION {
+            return Err(SourceError::Unavailable(format!(
+                "contract compatibility mismatch: expected {MATH_COMPATIBILITY_VERSION}"
+            )));
+        }
+        if self.http_rpc_url.is_empty() || self.realtime_source.is_empty() {
+            return Err(SourceError::Unavailable(
+                "RPC and realtime source are required".into(),
+            ));
+        }
+        let mut lanes = std::collections::HashSet::with_capacity(self.explicit_lane_assets.len());
+        for asset in &self.explicit_lane_assets {
+            if *asset == Address::ZERO {
+                return Err(SourceError::Unavailable(
+                    "explicit lane assets must be non-zero".into(),
+                ));
+            }
+            if !lanes.insert(*asset) {
+                return Err(SourceError::Unavailable(
+                    "explicit lane assets must be unique".into(),
+                ));
+            }
         }
         Ok(())
     }

@@ -32,6 +32,9 @@ pub enum IndexerError {
     /// No verified chain position is available for a quote or checkpoint.
     #[error("no canonical cursor")]
     NoCursor,
+    /// A public quote request violates a runtime API bound.
+    #[error("invalid request: {0}")]
+    InvalidRequest(String),
     /// A thread panicked while holding the synchronous quote-state lock.
     #[error("runtime state lock was poisoned")]
     LockPoisoned,

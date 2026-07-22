@@ -9,7 +9,7 @@ use lunarbase_client_core::prelude::{
     DeploymentConfig, Network, RpcHttpClient,
 };
 use lunarbase_client_core::protocol::abi::quote_critical_topics;
-use lunarbase_math::prelude::{Address, B256, QuoteMode, QuoteOutcome, QuoteRequest, U256};
+use lunarbase_math::prelude::{Address, QuoteMode, QuoteOutcome, QuoteRequest, U256};
 use std::{error::Error, io, num::NonZeroU64, path::Path, str::FromStr, time::Duration};
 use tokio::{sync::broadcast, time::MissedTickBehavior};
 use tracing::{error, info, warn};
@@ -55,7 +55,8 @@ async fn main() -> Result<(), AnyError> {
         None => derive_ws_url(&args.rpc_url)?,
     };
     let rpc = RpcHttpClient::new(args.rpc_url.to_string())?;
-    let chain_id = rpc.chain_id().await?;
+    let (chain_id, runtime_code_hash) =
+        tokio::try_join!(rpc.chain_id(), rpc.runtime_code_hash(args.core, "latest"))?;
     let uses_demo_router = args.router.is_none();
     let router = args
         .router
@@ -76,7 +77,7 @@ async fn main() -> Result<(), AnyError> {
         router,
         expect_whitelisted: args.expect_whitelisted,
         deployment_block: args.deployment_block,
-        expected_runtime_code_hash: B256::ZERO,
+        expected_runtime_code_hash: runtime_code_hash,
         contract_compatibility_version: MATH_COMPATIBILITY_VERSION.into(),
         http_rpc_url: args.rpc_url.to_string(),
         realtime_source: ws_url.to_string(),
@@ -90,6 +91,7 @@ async fn main() -> Result<(), AnyError> {
         deployment,
         buffer_capacity: 4096,
         reconnect_delay: Duration::from_secs(1),
+        source_stall_timeout: Duration::from_secs(30),
     };
     info!(
         chain_id,

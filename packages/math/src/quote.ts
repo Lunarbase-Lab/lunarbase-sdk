@@ -22,11 +22,11 @@ import {
 } from "./types.js";
 
 function partnerFee(state: QuoteState, asset: Address): bigint {
-  return BigInt(state.feeProfile.partnerFeeBps.get(asset) ?? 0);
+  return BigInt(state.feeProfile.partnerFeeBps.get(asset.toLowerCase() as Address) ?? 0);
 }
 
 function laneOrReason(state: QuoteState, asset: Address, executionBlockNumber: bigint): LaneState | UnavailableReason {
-  const lane = state.lanes.get(asset);
+  const lane = state.lanes.get(asset.toLowerCase() as Address);
   if (!lane || !laneExists(lane)) return { kind: "MissingLane", asset };
   if (lanePaused(lane)) return { kind: "PausedLane", asset };
   const readyAt = checkedAdd(laneSlot0LatestUpdateBlock(lane.slot0), BigInt(lane.blockDelay));

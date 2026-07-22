@@ -2,8 +2,7 @@
 
 use crate::model::{ChainCursor, Commitment, ContractLog};
 use crate::transport::rpc::client::RpcError;
-use alloy_rpc_types_eth::Log;
-use lunarbase_math::types::B256;
+use lunarbase_math::types::{Address, B256, Bytes};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -21,6 +20,25 @@ struct RpcHead {
     l1_block_number: Option<u64>,
 }
 
+/// Minimal standard JSON-RPC log DTO backed entirely by Alloy EVM primitives.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RpcLog {
+    address: Address,
+    topics: Vec<B256>,
+    data: Bytes,
+    #[serde(default, with = "alloy_serde::quantity::opt")]
+    block_number: Option<u64>,
+    #[serde(default)]
+    block_hash: Option<B256>,
+    #[serde(default, with = "alloy_serde::quantity::opt")]
+    transaction_index: Option<u64>,
+    #[serde(default, with = "alloy_serde::quantity::opt")]
+    log_index: Option<u64>,
+    #[serde(default)]
+    removed: bool,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ParsedRpcHead {
     pub number: u64,
@@ -29,19 +47,19 @@ pub(crate) struct ParsedRpcHead {
     pub l1_block_number: Option<u64>,
 }
 
-/// Decodes one standard Ethereum JSON-RPC log with Alloy's serde model.
+/// Decodes one standard Ethereum JSON-RPC log into Alloy primitives.
 pub fn parse_rpc_log(
     value: &Value,
     chain_id: u64,
     commitment: Commitment,
 ) -> Result<ContractLog, RpcError> {
-    let log = serde_json::from_value::<Log>(value.clone())
+    let log = serde_json::from_value::<RpcLog>(value.clone())
         .map_err(|error| RpcError::Invalid(format!("invalid RPC log: {error}")))?;
     normalize_rpc_log(log, chain_id, commitment)
 }
 
-pub(super) fn normalize_rpc_log(
-    log: Log,
+fn normalize_rpc_log(
+    log: RpcLog,
     chain_id: u64,
     commitment: Commitment,
 ) -> Result<ContractLog, RpcError> {
@@ -59,9 +77,9 @@ pub(super) fn normalize_rpc_log(
         .try_into()
         .map_err(|_| RpcError::Invalid("log index exceeds uint32".into()))?;
     Ok(ContractLog {
-        address: log.address(),
-        topics: log.topics().to_vec(),
-        data: log.data().data.clone(),
+        address: log.address,
+        topics: log.topics,
+        data: log.data,
         removed: log.removed,
         cursor: ChainCursor {
             chain_id,

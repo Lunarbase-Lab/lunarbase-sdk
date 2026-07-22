@@ -2,8 +2,9 @@ use crate::model::{BackfillRequest, Commitment, ContractFilter};
 use crate::protocol::abi::{core, quote_critical_topics};
 use crate::transport::rpc::client::{RpcHttpClient, backfill_filter};
 use alloy_primitives::Bytes;
-use alloy_provider::{ProviderBuilder, transport::mock::Asserter};
+use alloy_rpc_client::RpcClient;
 use alloy_sol_types::SolCall;
+use alloy_transport::mock::Asserter;
 use lunarbase_math::types::Address;
 
 #[test]
@@ -26,8 +27,7 @@ fn alloy_filter_serializes_topics_as_topic0_or_values() {
 #[tokio::test]
 async fn read_only_provider_makes_no_hidden_or_retry_requests() {
     let asserter = Asserter::new();
-    let provider = ProviderBuilder::default().connect_mocked_client(asserter.clone());
-    let client = RpcHttpClient::from_provider(provider);
+    let client = RpcHttpClient::from_client(RpcClient::mocked(asserter.clone()));
 
     assert!(
         asserter.read_q().is_empty(),
@@ -52,9 +52,8 @@ async fn read_only_provider_makes_no_hidden_or_retry_requests() {
 #[tokio::test]
 async fn backfill_consumes_exactly_one_rpc_response() {
     let asserter = Asserter::new();
-    let provider = ProviderBuilder::default().connect_mocked_client(asserter.clone());
-    let client = RpcHttpClient::from_provider(provider);
-    asserter.push_success(&Vec::<alloy_rpc_types_eth::Log>::new());
+    let client = RpcHttpClient::from_client(RpcClient::mocked(asserter.clone()));
+    asserter.push_success(&Vec::<serde_json::Value>::new());
     asserter.push_failure_msg("must remain queued");
 
     let logs = client
@@ -63,6 +62,24 @@ async fn backfill_consumes_exactly_one_rpc_response() {
         .unwrap();
     assert!(logs.is_empty());
     assert_eq!(asserter.read_q().len(), 1);
+}
+
+#[tokio::test]
+async fn backfill_splits_ranges_larger_than_ten_thousand_blocks() {
+    let asserter = Asserter::new();
+    let client = RpcHttpClient::from_client(RpcClient::mocked(asserter.clone()));
+    asserter.push_success(&Vec::<serde_json::Value>::new());
+    asserter.push_success(&Vec::<serde_json::Value>::new());
+
+    let mut request = request();
+    request.to_block = request.from_block + 10_000;
+    let logs = client
+        .get_logs(&request, 8453, Commitment::Canonical)
+        .await
+        .unwrap();
+
+    assert!(logs.is_empty());
+    assert!(asserter.read_q().is_empty());
 }
 
 fn request() -> BackfillRequest {

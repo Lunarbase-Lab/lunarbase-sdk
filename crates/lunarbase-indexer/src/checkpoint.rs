@@ -56,6 +56,7 @@ impl RedisCheckpointStore {
             let mut connection = client
                 .get_connection_with_timeout(REDIS_TIMEOUT)
                 .map_err(redis_error)?;
+            configure_connection(&connection)?;
             redis::cmd("GET")
                 .arg(key)
                 .query::<Option<Vec<u8>>>(&mut connection)
@@ -78,6 +79,7 @@ impl RedisCheckpointStore {
             let mut connection = client
                 .get_connection_with_timeout(REDIS_TIMEOUT)
                 .map_err(redis_error)?;
+            configure_connection(&connection)?;
             redis::cmd("SET")
                 .arg(key)
                 .arg(payload)
@@ -87,6 +89,15 @@ impl RedisCheckpointStore {
         .await
         .map_err(|error| CheckpointError::Worker(error.to_string()))?
     }
+}
+
+fn configure_connection(connection: &redis::Connection) -> Result<(), CheckpointError> {
+    connection
+        .set_read_timeout(Some(REDIS_TIMEOUT))
+        .map_err(redis_error)?;
+    connection
+        .set_write_timeout(Some(REDIS_TIMEOUT))
+        .map_err(redis_error)
 }
 
 fn redis_error(error: redis::RedisError) -> CheckpointError {

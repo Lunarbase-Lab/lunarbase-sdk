@@ -14,6 +14,7 @@ import {
   ConnectedQuoteClient,
   MATH_COMPATIBILITY_VERSION,
   Network,
+  QuoteIndexer,
   type BackfillRequest,
   type BootstrapSnapshot,
   type ChainCursor,
@@ -58,8 +59,12 @@ class MockSource implements ChainDataSource {
     return [];
   }
 
-  async *subscribe(_filter: ContractFilter, signal?: AbortSignal): AsyncIterable<ChainUpdate> {
+  async subscribe(_filter: ContractFilter, signal?: AbortSignal): Promise<AsyncIterable<ChainUpdate>> {
     this.subscribeCalls += 1;
+    return this.stream(signal);
+  }
+
+  private async *stream(signal?: AbortSignal): AsyncIterable<ChainUpdate> {
     while (!signal?.aborted) {
       if (this.updates.length === 0)
         await new Promise<void>((resolve) => {
@@ -101,6 +106,9 @@ test("quote and quoteMany use one in-memory snapshot without source I/O", async 
   assert.deepEqual(batch.cursor, single.cursor);
   assert.deepEqual(batch.results, [single.outcome, single.outcome, single.outcome]);
   assert.deepEqual(sourceCalls(source), calls);
+  assert.throws(() => client.quoteMany(Array.from({ length: 257 }, request)), {
+    code: "INVALID_REQUEST",
+  });
   await client.shutdown();
 });
 
@@ -154,12 +162,28 @@ test("gap stays fail-closed until retrying snapshot recovery succeeds", async ()
   await client.shutdown();
 });
 
+test("same-height handoff with another block hash fails closed", () => {
+  const indexer = QuoteIndexer.fromSnapshot(snapshot(), deployment());
+  const conflicting: ChainCursor = {
+    ...cursor(),
+    blockHash: `0x${"22".repeat(32)}` as Hex,
+    commitment: Commitment.Realtime,
+    sourceSequence: 1n,
+  };
+
+  assert.throws(() => indexer.replayHandoff([{ kind: "Head", cursor: conflicting }], cursor()), {
+    code: "REDUCER",
+  });
+  assert.equal(indexer.health().ready, false);
+});
+
 function connectConfig(): ClientConnectConfig {
   return {
     deployment: deployment(),
     filter: { address: CORE, topics: [] },
     queueBound: 16,
     reconnectDelayMilliseconds: 10,
+    sourceStallTimeoutMilliseconds: 1_000,
   };
 }
 

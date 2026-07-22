@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { Network, type ClientConnectConfig } from "@lunarbase/client-core";
+import { MATH_COMPATIBILITY_VERSION, Network, type ClientConnectConfig } from "@lunarbase/client-core";
 import { ArbitrumDataSource } from "./index.js";
 
 test("Arbitrum keeps standard logs and explicit execution context", () => {
@@ -12,8 +12,8 @@ test("Arbitrum keeps standard logs and explicit execution context", () => {
       router: "0x0000000000000000000000000000000000000002",
       expectWhitelisted: true,
       deploymentBlock: 1n,
-      expectedRuntimeCodeHash: `0x${"00".repeat(32)}`,
-      contractCompatibilityVersion: "test",
+      expectedRuntimeCodeHash: `0x${"11".repeat(32)}`,
+      contractCompatibilityVersion: MATH_COMPATIBILITY_VERSION,
       httpRpcUrl: "http://unused",
       realtimeSource: "ws://unused",
       explicitLaneAssets: [],
@@ -24,6 +24,7 @@ test("Arbitrum keeps standard logs and explicit execution context", () => {
     },
     queueBound: 16,
     reconnectDelayMilliseconds: 10,
+    sourceStallTimeoutMilliseconds: 1_000,
   };
   const source = new ArbitrumDataSource(config, {
     fetcher: (() => Promise.reject(new Error("unused"))) as typeof fetch,

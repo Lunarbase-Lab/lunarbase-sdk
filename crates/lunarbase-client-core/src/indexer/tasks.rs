@@ -1,7 +1,9 @@
 //! Background source and single-writer reducer tasks for a connected client.
 
 use crate::indexer::client::publish;
-use crate::indexer::client_types::{ClientConnectConfig, ClientRuntimeStats, SharedQuoteState};
+use crate::indexer::client_types::{
+    ClientConnectConfig, ClientRuntimeStats, SharedQuoteState, unix_millis,
+};
 use crate::indexer::engine::QuoteIndexer;
 use crate::indexer::errors::{ClientRuntimeEvent, IndexerError};
 use crate::model::{BackfillRequest, ChainUpdate, ContractFilter};
@@ -12,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, watch};
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 
 /// Operational event and counter handles used by the reducer task.
 pub(super) struct ReducerRuntime {
@@ -22,18 +24,41 @@ pub(super) struct ReducerRuntime {
     pub stats: Arc<ClientRuntimeStats>,
 }
 
+/// Source-specific timing, lifecycle, and observability handles.
+pub(super) struct SourcePumpRuntime {
+    /// Delay before opening another transport after a terminated attempt.
+    pub reconnect_delay: Duration,
+    /// Maximum interval without one normalized source update.
+    pub stall_timeout: Duration,
+    /// Handshake state observed by bootstrap and recovery.
+    pub source_active: watch::Sender<bool>,
+    /// Cooperative cancellation receiver owned by the source task.
+    pub cancel: watch::Receiver<bool>,
+    /// Bounded broadcast channel for operational lifecycle events.
+    pub events: broadcast::Sender<ClientRuntimeEvent>,
+    /// Lock-free queue, reconnect, and source-activity counters.
+    pub stats: Arc<ClientRuntimeStats>,
+}
+
 pub(super) async fn source_pump<S>(
     source: Arc<S>,
     filter: ContractFilter,
     sender: mpsc::Sender<ChainUpdate>,
-    reconnect_delay: Duration,
-    mut cancel: watch::Receiver<bool>,
-    events: broadcast::Sender<ClientRuntimeEvent>,
-    stats: Arc<ClientRuntimeStats>,
+    runtime: SourcePumpRuntime,
 ) where
     S: ChainDataSource + 'static,
 {
+    let SourcePumpRuntime {
+        reconnect_delay,
+        stall_timeout,
+        source_active,
+        mut cancel,
+        events,
+        stats,
+    } = runtime;
+    let mut ever_active = false;
     loop {
+        let _ = source_active.send(false);
         let stream = tokio::select! {
             biased;
             () = cancellation_requested(&mut cancel) => return,
@@ -41,26 +66,15 @@ pub(super) async fn source_pump<S>(
         };
         match stream {
             Ok(stream) => {
-                if !consume_stream(stream, &sender, &mut cancel, &events, &stats).await {
-                    return;
-                }
-            }
-            Err(error) => {
-                stats.source_reconnects.fetch_add(1, Ordering::Relaxed);
-                let detail = error.to_string();
-                publish(
-                    &events,
-                    ClientRuntimeEvent::SourceSubscribeFailed {
-                        detail: detail.clone(),
-                    },
-                );
-                if !send_update(
+                ever_active = true;
+                let _ = source_active.send(true);
+                if !consume_stream(
+                    stream,
                     &sender,
+                    stall_timeout,
+                    &source_active,
                     &mut cancel,
-                    ChainUpdate::Gap {
-                        cursor: None,
-                        reason: format!("source subscribe failed: {detail}"),
-                    },
+                    &events,
                     &stats,
                 )
                 .await
@@ -68,7 +82,31 @@ pub(super) async fn source_pump<S>(
                     return;
                 }
             }
+            Err(error) => {
+                let detail = error.to_string();
+                publish(
+                    &events,
+                    ClientRuntimeEvent::SourceSubscribeFailed {
+                        detail: detail.clone(),
+                    },
+                );
+                if ever_active
+                    && !send_update(
+                        &sender,
+                        &mut cancel,
+                        ChainUpdate::Gap {
+                            cursor: None,
+                            reason: format!("source subscribe failed: {detail}"),
+                        },
+                        &stats,
+                    )
+                    .await
+                {
+                    return;
+                }
+            }
         }
+        let _ = source_active.send(false);
         stats.source_reconnects.fetch_add(1, Ordering::Relaxed);
         if sleep_or_cancel(reconnect_delay, &mut cancel).await {
             return;
@@ -79,6 +117,8 @@ pub(super) async fn source_pump<S>(
 async fn consume_stream(
     mut stream: SourceStream,
     sender: &mpsc::Sender<ChainUpdate>,
+    stall_timeout: Duration,
+    source_active: &watch::Sender<bool>,
     cancel: &mut watch::Receiver<bool>,
     events: &broadcast::Sender<ClientRuntimeEvent>,
     stats: &ClientRuntimeStats,
@@ -87,9 +127,35 @@ async fn consume_stream(
         let item = tokio::select! {
             biased;
             () = cancellation_requested(cancel) => return false,
-            item = stream.next() => item,
+            item = timeout(stall_timeout, stream.next()) => item,
+        };
+        let item = match item {
+            Ok(item) => item,
+            Err(_) => {
+                let _ = source_active.send(false);
+                publish(
+                    events,
+                    ClientRuntimeEvent::SourceStreamFailed {
+                        detail: format!(
+                            "source produced no updates for {} ms",
+                            stall_timeout.as_millis()
+                        ),
+                    },
+                );
+                return send_update(
+                    sender,
+                    cancel,
+                    ChainUpdate::Gap {
+                        cursor: None,
+                        reason: "realtime source stalled; canonical recovery required".into(),
+                    },
+                    stats,
+                )
+                .await;
+            }
         };
         let Some(item) = item else {
+            let _ = source_active.send(false);
             publish(events, ClientRuntimeEvent::SourceStreamClosed);
             return send_update(
                 sender,
@@ -119,6 +185,9 @@ async fn consume_stream(
             }
         };
         let terminal = matches!(update, ChainUpdate::Gap { .. });
+        if terminal {
+            let _ = source_active.send(false);
+        }
         if !send_update(sender, cancel, update, stats).await {
             return false;
         }
@@ -146,6 +215,9 @@ async fn send_update(
     // Increment before publishing: `Permit::send` is synchronous, so the
     // receiver cannot decrement the counter before this update becomes visible.
     stats.queue_depth.fetch_add(1, Ordering::Relaxed);
+    stats
+        .last_source_update_unix_millis
+        .store(unix_millis(), Ordering::Relaxed);
     permit.send(update);
     true
 }
@@ -156,6 +228,7 @@ pub(super) async fn reducer_loop<S>(
     config: ClientConnectConfig,
     mut updates: mpsc::Receiver<ChainUpdate>,
     mut cancel: watch::Receiver<bool>,
+    mut source_active: watch::Receiver<bool>,
     runtime: ReducerRuntime,
 ) where
     S: ChainDataSource + 'static,
@@ -167,6 +240,8 @@ pub(super) async fn reducer_loop<S>(
             update = updates.recv() => update,
         };
         let Some(update) = update else {
+            shared.available.store(false, Ordering::Release);
+            shared.ready.notify_waiters();
             publish(
                 &runtime.events,
                 ClientRuntimeEvent::BackgroundTaskStopped { task: "reducer" },
@@ -194,6 +269,7 @@ pub(super) async fn reducer_loop<S>(
                 &config,
                 &mut updates,
                 &mut cancel,
+                &mut source_active,
                 &runtime,
             )
             .await
@@ -210,10 +286,14 @@ async fn recover_until_ready<S: ChainDataSource>(
     config: &ClientConnectConfig,
     updates: &mut mpsc::Receiver<ChainUpdate>,
     cancel: &mut watch::Receiver<bool>,
+    source_active: &mut watch::Receiver<bool>,
     runtime: &ReducerRuntime,
 ) -> bool {
     loop {
         publish(&runtime.events, ClientRuntimeEvent::RecoveryStarted);
+        if !wait_for_source_active(source_active, cancel).await {
+            return false;
+        }
         let snapshot = tokio::select! {
             biased;
             () = cancellation_requested(cancel) => return false,
@@ -300,6 +380,9 @@ pub(super) async fn recover_checkpoint<S: ChainDataSource>(
             .await?;
         logs.sort_by_key(|log| log.cursor.event_order());
         for log in logs {
+            if log.cursor.event_order() <= checkpoint_cursor.event_order() {
+                continue;
+            }
             indexer.apply_core_update(ChainUpdate::Log(log))?;
         }
     }
@@ -324,6 +407,26 @@ async fn sleep_or_cancel(delay: Duration, cancel: &mut watch::Receiver<bool>) ->
         biased;
         () = cancellation_requested(cancel) => true,
         () = sleep(delay) => false,
+    }
+}
+
+pub(super) async fn wait_for_source_active(
+    active: &mut watch::Receiver<bool>,
+    cancel: &mut watch::Receiver<bool>,
+) -> bool {
+    loop {
+        if *active.borrow() {
+            return true;
+        }
+        tokio::select! {
+            biased;
+            () = cancellation_requested(cancel) => return false,
+            changed = active.changed() => {
+                if changed.is_err() {
+                    return false;
+                }
+            }
+        }
     }
 }
 

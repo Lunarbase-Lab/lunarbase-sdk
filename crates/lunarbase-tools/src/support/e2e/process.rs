@@ -44,7 +44,7 @@ pub(super) fn spawn_indexer(binary: &Path, config: &Path) -> Result<Child, E2eEr
     command
         .arg("--config")
         .arg(config)
-        .env("RUST_LOG", "lunarbase_indexer=warn")
+        .env("RUST_LOG", "lunarbase_indexer=info")
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .kill_on_drop(true);

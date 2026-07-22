@@ -13,12 +13,22 @@ use lunarbase_client_core::transport::rpc::client::RpcHttpClient;
 use lunarbase_client_core::transport::rpc::snapshot::RpcSnapshotProvider;
 use lunarbase_math::types::{Address, B256};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    time::Duration,
+};
+use tokio::{net::TcpStream, time::timeout};
+use tokio_tungstenite::{
+    MaybeTlsStream, WebSocketStream, connect_async_with_config,
+    tungstenite::{Message, protocol::WebSocketConfig},
+};
 use url::Url;
 
 use crate::execution::{ExecutionEvent, ExecutionEventStream, MonadExecutionNormalizer};
 use crate::protocol::{ParserMessage, decode_parser_message};
+
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+type ParserSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 /// Resource and identity settings for the local Monad parser connection.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -55,20 +65,20 @@ impl MonadParserConfig {
                 "Monad parser URL must use ws or wss".into(),
             ));
         }
-        if self.chain_id == 0 || self.max_frame_bytes == 0 {
+        if self.chain_id == 0 || self.core == Address::ZERO || self.max_frame_bytes == 0 {
             return Err(SourceError::Unavailable(
-                "Monad parser chain id and frame bound must be non-zero".into(),
+                "Monad parser chain id, Core, and frame bound must be non-zero".into(),
             ));
         }
         Ok(())
     }
 }
 
-/// Portable parser-WebSocket source with finalized RPC recovery.
+/// Portable parser-WebSocket source with pinned latest-state RPC recovery.
 pub struct MonadParserSource {
     /// Validated identity and resource limits for the portable parser.
     config: MonadParserConfig,
-    /// Finalized HTTP source used for snapshots, backfill, and checkpoint validation.
+    /// Latest executed HTTP source used for snapshots, backfill, and checkpoint validation.
     canonical: RpcHttpBackend,
 }
 
@@ -83,7 +93,7 @@ impl MonadParserSource {
             RpcHttpClient::new(rpc_endpoint).map_err(SourceError::from)?,
             Network::Monad,
             config.chain_id,
-            "finalized",
+            "latest",
         );
         Ok(Self { config, canonical })
     }
@@ -143,11 +153,17 @@ pub async fn connect_parser_stream(
     if filter.address != config.core {
         return Err(SourceError::NetworkMismatch);
     }
-    let (socket, _) = connect_async(&config.ws_url).await.map_err(|error| {
-        SourceError::Unavailable(format!("Monad parser connect failed: {error}"))
-    })?;
-    let (mut writer, mut reader) = socket.split();
-    writer
+    let bounds = WebSocketConfig {
+        max_message_size: Some(config.max_frame_bytes),
+        max_frame_size: Some(config.max_frame_bytes),
+        ..Default::default()
+    };
+    let (mut socket, _) = connect_async_with_config(&config.ws_url, Some(bounds), false)
+        .await
+        .map_err(|error| {
+            SourceError::Unavailable(format!("Monad parser connect failed: {error}"))
+        })?;
+    socket
         .send(Message::Text(subscription_request(
             1,
             "logs",
@@ -157,49 +173,46 @@ pub async fn connect_parser_stream(
         .map_err(|error| {
             SourceError::Unavailable(format!("Monad parser subscribe failed: {error}"))
         })?;
-    writer
+    socket
         .send(Message::Text(subscription_request(2, "all", None)))
         .await
         .map_err(|error| {
             SourceError::Unavailable(format!("Monad parser subscribe failed: {error}"))
         })?;
+    let mut buffered = timeout(
+        HANDSHAKE_TIMEOUT,
+        read_acknowledgements(&mut socket, config.max_frame_bytes),
+    )
+    .await
+    .map_err(|_| {
+        SourceError::Unavailable("Monad parser subscription handshake timed out".into())
+    })??;
+    let (mut writer, mut reader) = socket.split();
 
     let output = stream! {
         let mut commitments = BTreeMap::new();
-        while let Some(message) = reader.next().await {
-            let message = match message {
-                Ok(message) => message,
-                Err(error) => {
+        loop {
+            let payload = if let Some(payload) = buffered.pop_front() {
+                payload
+            } else {
+                let Some(message) = reader.next().await else {
                     yield Ok(ExecutionEvent::Gap {
                         cursor: None,
-                        reason: format!("Monad parser websocket error; resubscribe required: {error}"),
+                        reason: "Monad parser connection closed; resubscribe required".into(),
                     });
                     break;
-                }
-            };
-            let payload = match message {
-                Message::Text(text) => text.as_bytes().to_vec(),
-                Message::Binary(bytes) => bytes.to_vec(),
-                Message::Ping(bytes) => {
-                    if let Err(error) = writer.send(Message::Pong(bytes)).await {
-                        yield Err(SourceError::Unavailable(format!("Monad parser pong failed: {error}")));
+                };
+                match parser_payload(message, &mut writer).await {
+                    Ok(Some(payload)) => payload,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        yield Ok(ExecutionEvent::Gap {
+                            cursor: None,
+                            reason: format!("Monad parser websocket error; resubscribe required: {error}"),
+                        });
                         break;
                     }
-                    continue;
                 }
-                Message::Pong(_) => continue,
-                Message::Close(frame) => {
-                    let reason = frame.map_or_else(
-                        || "connection closed".to_owned(),
-                        |frame| format!("connection closed: {}", frame.reason),
-                    );
-                    yield Ok(ExecutionEvent::Gap {
-                        cursor: None,
-                        reason: format!("Monad parser {reason}; resubscribe required"),
-                    });
-                    break;
-                }
-                _ => continue,
             };
             if payload.len() > config.max_frame_bytes {
                 yield Ok(ExecutionEvent::Gap {
@@ -244,6 +257,78 @@ pub async fn connect_parser_stream(
     Ok(Box::pin(output))
 }
 
+async fn read_acknowledgements(
+    socket: &mut ParserSocket,
+    max_frame_bytes: usize,
+) -> Result<VecDeque<Vec<u8>>, SourceError> {
+    let mut logs_acknowledged = false;
+    let mut all_acknowledged = false;
+    let mut buffered = VecDeque::new();
+    while !logs_acknowledged || !all_acknowledged {
+        let message = socket
+            .next()
+            .await
+            .ok_or_else(|| SourceError::Unavailable("Monad parser closed during handshake".into()))?
+            .map_err(|error| {
+                SourceError::Unavailable(format!("Monad parser handshake failed: {error}"))
+            })?;
+        let Some(payload) = parser_payload(Ok(message), socket).await? else {
+            continue;
+        };
+        if payload.len() > max_frame_bytes {
+            return Err(SourceError::Unavailable(
+                "Monad parser handshake frame exceeded configured bound".into(),
+            ));
+        }
+        let value: Value = serde_json::from_slice(&payload).map_err(|error| {
+            SourceError::Unavailable(format!("invalid Monad parser handshake JSON: {error}"))
+        })?;
+        if let Some(error) = value.get("error") {
+            return Err(SourceError::Unavailable(format!(
+                "Monad parser subscription rejected: {error}"
+            )));
+        }
+        match value.get("id").and_then(Value::as_u64) {
+            Some(1) if value.get("result").and_then(Value::as_str).is_some() => {
+                logs_acknowledged = true;
+            }
+            Some(2) if value.get("result").and_then(Value::as_str).is_some() => {
+                all_acknowledged = true;
+            }
+            _ => buffered.push_back(payload),
+        }
+    }
+    Ok(buffered)
+}
+
+async fn parser_payload<S>(
+    message: Result<Message, tokio_tungstenite::tungstenite::Error>,
+    writer: &mut S,
+) -> Result<Option<Vec<u8>>, SourceError>
+where
+    S: futures_util::Sink<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    let message = message
+        .map_err(|error| SourceError::Unavailable(format!("Monad parser read failed: {error}")))?;
+    match message {
+        Message::Text(text) => Ok(Some(text.as_bytes().to_vec())),
+        Message::Binary(bytes) => Ok(Some(bytes.to_vec())),
+        Message::Ping(bytes) => {
+            writer.send(Message::Pong(bytes)).await.map_err(|error| {
+                SourceError::Unavailable(format!("Monad parser pong failed: {error}"))
+            })?;
+            Ok(None)
+        }
+        Message::Pong(_) => Ok(None),
+        Message::Close(frame) => Err(SourceError::Gap(frame.map_or_else(
+            || "Monad parser connection closed".into(),
+            |frame| format!("Monad parser connection closed: {}", frame.reason),
+        ))),
+        _ => Ok(None),
+    }
+}
+
 fn subscription_request(
     id: u64,
     kind: &str,
@@ -256,13 +341,11 @@ fn subscription_request(
             if !filter.topics.is_empty() {
                 options.insert(
                     "topics".into(),
-                    Value::Array(
-                        filter
-                            .topics
-                            .iter()
-                            .map(|topic| Value::String(word_hex(*topic)))
-                            .collect(),
-                    ),
+                    json!([filter
+                        .topics
+                        .iter()
+                        .map(|topic| word_hex(*topic))
+                        .collect::<Vec<_>>()]),
                 );
             }
             json!([kind, Value::Object(options)])
@@ -306,7 +389,7 @@ mod tests {
             value["params"][1]["address"],
             "0x0000000000000000000000000000000000000001"
         );
-        assert_eq!(value["params"][1]["topics"][0], format!("0x{:064x}", 1));
+        assert_eq!(value["params"][1]["topics"][0][0], format!("0x{:064x}", 1));
     }
 
     #[test]
