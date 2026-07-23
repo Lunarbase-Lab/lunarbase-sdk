@@ -143,8 +143,6 @@ pub enum UnavailableReason {
     PausedLane(Address),
     /// The lane has not passed its configured post-update block delay.
     DelayedLane(Address),
-    /// The required lane has no usable price.
-    ZeroPrice(Address),
     /// Slippage cannot be evaluated because principal is zero.
     ZeroPrincipal(Address),
     /// Price conversion produced a zero pre-fee anchor amount.

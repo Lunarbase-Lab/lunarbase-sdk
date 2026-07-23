@@ -441,12 +441,15 @@ return these exact values:
 | amount is zero | `0` | `0` |
 | `assetIn == assetOut` | `0` | `U256_MAX` |
 | missing/paused/delayed lane | `0` | `U256_MAX` |
-| zero price | `0` | `U256_MAX` |
+| zero price after preceding arithmetic succeeds | `0` | `U256_MAX` |
 | required principal CASH value is zero | `0` | `U256_MAX` |
 | exact-in spread consumes anchor | `0` | not applicable |
 
 The internal `LanesLib` reverts for equal assets, but the module intercepts equal assets before calling it.
 The external client should mirror the module because that is the user-facing contract behavior.
+Lane validation does not preflight a zero price. Route conversions must retain
+Solidity evaluation order, so an earlier opposite-leg overflow still reverts
+instead of being hidden by a later zero-price sentinel.
 
 Recommended internal result:
 

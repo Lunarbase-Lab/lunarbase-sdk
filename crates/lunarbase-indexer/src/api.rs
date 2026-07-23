@@ -315,7 +315,6 @@ fn unavailable(reason: UnavailableReason) -> ApiQuoteOutcome {
         UnavailableReason::MissingLane(asset) => ("missingLane", Some(address_hex(asset))),
         UnavailableReason::PausedLane(asset) => ("pausedLane", Some(address_hex(asset))),
         UnavailableReason::DelayedLane(asset) => ("delayedLane", Some(address_hex(asset))),
-        UnavailableReason::ZeroPrice(asset) => ("zeroPrice", Some(address_hex(asset))),
         UnavailableReason::ZeroPrincipal(asset) => ("zeroPrincipal", Some(address_hex(asset))),
         UnavailableReason::ZeroAnchor => ("zeroAnchor", None),
         UnavailableReason::SpreadConsumesAnchor => ("spreadConsumesAnchor", None),

@@ -224,6 +224,37 @@ test("reserve boundary matches exact-in and exact-out settlement", () => {
   });
 });
 
+test("route preserves contract evaluation order before zero-price sentinel", () => {
+  const cash = address("1");
+  const assetIn = address("2");
+  const assetOut = address("3");
+  const state: QuoteState = {
+    cash,
+    cashReserve: (1n << 128n) - 1n,
+    lanes: new Map([
+      [assetIn, createLaneState(encodeLaneSlot0({ ...EMPTY_SLOT0, price: 0n, exists: true }), (1n << 128n) - 1n, 1n)],
+      [
+        assetOut,
+        createLaneState(
+          encodeLaneSlot0({ ...EMPTY_SLOT0, price: (1n << 112n) - 1n, exists: true }),
+          (1n << 128n) - 1n,
+          1n,
+        ),
+      ],
+    ]),
+    feeProfile: {
+      whitelisted: true,
+      blacklistFeeMultiplier: 1n,
+      partnerFeeBps: new Map(),
+    },
+  };
+
+  assert.throws(
+    () => quote({ assetIn, assetOut, amount: U256_MAX, mode: "ExactOut" }, 1n, state),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "OVERFLOW",
+  );
+});
+
 test("shared golden vectors match TypeScript engine", () => {
   const fixture = JSON.parse(
     readFileSync(new URL("../../../fixtures/quote-vectors.json", import.meta.url), "utf8"),

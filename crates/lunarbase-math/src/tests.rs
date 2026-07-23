@@ -289,6 +289,40 @@ fn reserve_boundary_matches_exact_in_and_exact_out_settlement() {
     );
 }
 
+#[test]
+fn route_preserves_contract_evaluation_order_before_zero_price_sentinel() {
+    let cash = address(1);
+    let asset_in = address(2);
+    let asset_out = address(3);
+    let mut state = QuoteState {
+        cash,
+        cash_reserve: u128::MAX,
+        ..Default::default()
+    };
+    for (asset, price) in [(&asset_in, 0), (&asset_out, (1u128 << 112) - 1)] {
+        let slot0 = encode_lane_slot0(&LaneSlot0 {
+            price,
+            exists: true,
+            ..Default::default()
+        })
+        .unwrap();
+        state
+            .lanes
+            .insert(*asset, LaneState::new(slot0, u128::MAX, 1));
+    }
+    let request = QuoteRequest {
+        asset_in,
+        asset_out,
+        amount: U256::MAX,
+        mode: QuoteMode::ExactOut,
+    };
+
+    assert_eq!(
+        quote(&request, 1, &state).unwrap_err(),
+        QuoteError::Arithmetic(MathError::Overflow)
+    );
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GoldenFile {

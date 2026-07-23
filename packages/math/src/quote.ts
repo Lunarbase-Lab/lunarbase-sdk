@@ -38,7 +38,6 @@ function laneOrReason(state: QuoteState, asset: Address, executionBlockNumber: b
   if (lanePaused(lane)) return { kind: "PausedLane", asset };
   const readyAt = checkedAdd(laneSlot0LatestUpdateBlock(lane.slot0), BigInt(laneSlot0BlockDelay(lane.slot0)));
   if (executionBlockNumber < readyAt) return { kind: "DelayedLane", asset };
-  if (laneSlot0Price(lane.slot0) === 0n) return { kind: "ZeroPrice", asset };
   return lane;
 }
 

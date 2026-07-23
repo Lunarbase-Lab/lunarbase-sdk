@@ -36,9 +36,6 @@ fn lane_or_reason(
     if execution_block_number < ready_at {
         return Err(UnavailableReason::DelayedLane(asset));
     }
-    if lane_slot0_price(lane.slot0) == U256::ZERO {
-        return Err(UnavailableReason::ZeroPrice(asset));
-    }
     Ok(lane)
 }
 fn principal_cash_value(lane: &LaneState) -> Result<U256, MathError> {

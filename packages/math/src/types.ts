@@ -132,7 +132,6 @@ export type UnavailableReason =
   | { kind: "MissingLane"; asset: Address }
   | { kind: "PausedLane"; asset: Address }
   | { kind: "DelayedLane"; asset: Address }
-  | { kind: "ZeroPrice"; asset: Address }
   | { kind: "ZeroPrincipal"; asset: Address }
   | { kind: "ZeroAnchor" }
   | { kind: "SpreadConsumesAnchor" }
