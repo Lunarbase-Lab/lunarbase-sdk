@@ -1,11 +1,11 @@
 //! Minimal production configuration for one Core/router deployment.
 
 use clap::Parser;
-use lunarbase_client_core::indexer::client_types::ClientConnectConfig;
-use lunarbase_client_core::model::{
+use lunarbase_client::indexer::client_types::ClientConnectConfig;
+use lunarbase_client::model::{
     ContractFilter, DeploymentConfig, MATH_COMPATIBILITY_VERSION, Network,
 };
-use lunarbase_client_core::protocol::abi::quote_critical_topics;
+use lunarbase_client::protocol::abi::quote_critical_topics;
 use lunarbase_math::types::{Address, B256};
 use serde::Deserialize;
 use std::{net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
@@ -46,7 +46,7 @@ pub struct RawConfig {
     pub contract_compatibility_version: String,
     /// HTTP JSON-RPC endpoint used only for bootstrap and recovery.
     pub http_rpc_url: String,
-    /// Network-adapter realtime endpoint or native event-ring locator.
+    /// Network-source realtime endpoint or native event-ring locator.
     pub realtime_url: String,
     /// Optional lane allowlist that avoids a full discovery replay.
     #[serde(default)]
@@ -79,6 +79,10 @@ pub struct RawConfig {
 pub struct Config {
     /// Validated embeddable client identity and runtime bounds.
     pub client: ClientConnectConfig,
+    /// Canonical HTTP JSON-RPC endpoint used for bootstrap and recovery.
+    pub http_rpc_url: String,
+    /// Realtime endpoint or native event-ring locator used by the selected source.
+    pub realtime_url: String,
     /// Parsed HTTP listen address.
     pub bind: SocketAddr,
     /// Optional Redis checkpoint endpoint.
@@ -155,6 +159,9 @@ impl RawConfig {
         if self.redis_url.as_deref().is_some_and(str::is_empty) {
             return invalid("redis_url", "empty URL is not valid");
         }
+        if self.http_rpc_url.is_empty() || self.realtime_url.is_empty() {
+            return invalid("source", "HTTP RPC and realtime endpoints are required");
+        }
         let deployment = DeploymentConfig {
             network,
             chain_id: self.chain_id,
@@ -165,8 +172,6 @@ impl RawConfig {
             expected_implementation,
             expected_implementation_code_hash,
             contract_compatibility_version: self.contract_compatibility_version,
-            http_rpc_url: self.http_rpc_url,
-            realtime_source: self.realtime_url,
             explicit_lane_assets,
         };
         let client = ClientConnectConfig {
@@ -185,6 +190,8 @@ impl RawConfig {
         })?;
         Ok(Config {
             client,
+            http_rpc_url: self.http_rpc_url,
+            realtime_url: self.realtime_url,
             bind,
             redis_url: self.redis_url,
             checkpoint_interval: Duration::from_secs(self.checkpoint_interval_seconds),

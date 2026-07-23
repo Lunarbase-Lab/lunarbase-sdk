@@ -17,8 +17,8 @@ Build one `lunarbase-sdk` repository containing:
 2. A pure TypeScript quoting library.
 3. A Rust client that indexes every contract component needed for fully off-chain quoting.
 4. A TypeScript client with the same public concepts and behavior.
-5. Network-specific real-time adapters for Base, Monad, and Arbitrum hidden behind one common source
-   interface.
+5. A generic EVM source plus Monad and Arbitrum real-time sources implementing
+   one common interface. Base is a profile of the generic EVM source.
 6. Bounded client update streams plus optional Redis restart checkpoints owned only by the runnable indexer.
 7. Shared golden vectors and differential tests proving bit-for-bit parity with Solidity.
 
@@ -676,13 +676,19 @@ export interface ChainDataSource {
 }
 ```
 
-The network-independent `QuoteIndexer` owns bootstrap, ABI decoding, reducer order, state publication,
-and recovery. Persistence is outside `client-core`; each network package
-exports a high-level constructor around its concrete source.
+The network-independent `QuoteIndexer` owns bootstrap, ABI decoding, reducer
+order, state publication, and recovery. Persistence is outside
+`lunarbase-client`. Source packages export concrete `ChainDataSource`
+implementations and source constructors; they do not wrap or duplicate the
+common client lifecycle. `DeploymentConfig` contains only chain/Core/router
+identity and quote policy; endpoint configuration belongs to each source and
+to the runnable indexer composition root.
 
 ## 18. Base source
 
-Preferred implementation: `BaseFlashblocksSource`.
+Preferred implementation: the Base Flashblocks profile of `EvmRpcSource`
+(`EvmRpcSource::base_flashblocks` in Rust and
+`createBaseFlashblocksSource` in TypeScript).
 
 Use a Flashblocks-aware WebSocket/RPC endpoint:
 
@@ -705,7 +711,7 @@ public endpoints are rate limited.
 
 ## 19. Monad source
 
-All Monad-specific code belongs to `lunarbase-client-monad`. The Rust package
+All Monad-specific code belongs to `lunarbase-source-monad`. The Rust package
 provides both the portable parser WebSocket and a Linux native shared-memory
 reader for deployment beside the execution node.
 
@@ -737,7 +743,7 @@ ordered processing, health metrics, and WebSocket subscriptions for `logs`, `new
 execution events. Its server retains no replay history: a sequence gap or close code `1013` requires a client
 resnapshot from an authoritative RPC source.
 
-TypeScript uses `@lunarbase/client-monad` to consume the parser/sidecar over
+TypeScript uses `@lunarbase/source-monad` to consume the parser/sidecar over
 WebSocket. It does not independently bind hugetlbfs or the native event ring.
 
 On `EventNextResult::Gap` or expired payload, emit normalized `Gap`, reset the ring reader, discard the
@@ -844,19 +850,19 @@ lunarbase-math/
 
   crates/
     lunarbase-math/             # pure Rust U256 math and quote engine
-    lunarbase-client-core/      # universal Rust runtime and reducer
-    lunarbase-client-base/      # Base Flashblocks client
-    lunarbase-client-monad/     # parser/native Monad execution readers
-    lunarbase-client-arbitrum/  # executed Nitro client
+    lunarbase-client/           # universal Rust runtime and reducer
+    lunarbase-source-evm/       # generic EVM source + Base profile
+    lunarbase-source-monad/     # parser/native Monad sources
+    lunarbase-source-arbitrum/  # executed Nitro source
     lunarbase-indexer/          # runnable Rust HTTP service
     lunarbase-tools/            # E2E, load, and live validators
 
   packages/
     math/                       # pure TypeScript bigint math and quote engine
-    client-core/                # universal TypeScript runtime
-    client-base/                # Base client
-    client-monad/               # Monad sidecar client
-    client-arbitrum/            # Arbitrum client
+    client/                     # universal TypeScript runtime
+    source-evm/                 # generic EVM source + Base profile
+    source-monad/               # Monad parser source
+    source-arbitrum/            # executed Nitro source
 
   abi/
     Core.json                   # ABI pinned to contract commit/code version
@@ -1030,7 +1036,8 @@ Math v2 is complete when:
 
 Client v1 is complete when:
 
-- the high-level API and source contract are shared across network packages;
+- one high-level client API consumes every source through the shared
+  `ChainDataSource` contract;
 - a real deployment can bootstrap from a block-tagged snapshot and quote without `eth_call` per request;
 - every quote carries a cursor and commitment;
 - all quote-critical events update in-memory state atomically/in order;
@@ -1100,7 +1107,7 @@ Client v1 is complete when:
 
 1. Re-run the canonical Solidity/Rust/TypeScript FFI whenever math or the
    pinned contract revision changes.
-2. Require a Base deployment smoke test before declaring the Base adapter
+2. Require a Base deployment smoke test before declaring the Base source
    stable.
 3. Require a native execution-event-ring soak before publishing Monad as
    production-ready.

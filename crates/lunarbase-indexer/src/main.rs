@@ -9,7 +9,7 @@ mod runtime;
 use checkpoint::RedisCheckpointStore;
 use clap::Parser;
 use config::{Cli, Config};
-use lunarbase_client_core::indexer::errors::ClientRuntimeEvent;
+use lunarbase_client::indexer::errors::ClientRuntimeEvent;
 use metrics::Metrics;
 use std::{
     error::Error,

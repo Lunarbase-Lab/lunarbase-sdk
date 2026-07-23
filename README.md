@@ -16,7 +16,7 @@ Repository: `lunarbase-sdk`
 ## About
 
 LunarBase SDK is the integration monorepository for bit-exact off-chain quote
-math, embeddable realtime clients, network data-source adapters, and the
+math, embeddable realtime clients, network data sources, and the
 production-oriented Rust indexer.
 
 The hot path is intentionally small:
@@ -39,17 +39,18 @@ Canonical Solidity/Rust/TypeScript differential tests live in
 | Layer                      | Rust                                                                      | TypeScript                                                         | Status              |
 | -------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------ | ------------------- |
 | Pure quote math            | [`lunarbase-math`](crates/lunarbase-math/README.md)                       | [`@lunarbase/math`](packages/math/README.md)                       | parity-gated        |
-| Common reducer and runtime | [`lunarbase-client-core`](crates/lunarbase-client-core/README.md)         | [`@lunarbase/client-core`](packages/client-core/README.md)         | integration-ready   |
-| Base adapter               | [`lunarbase-client-base`](crates/lunarbase-client-base/README.md)         | [`@lunarbase/client-base`](packages/client-base/README.md)         | release candidate   |
-| Monad adapter              | [`lunarbase-client-monad`](crates/lunarbase-client-monad/README.md)       | [`@lunarbase/client-monad`](packages/client-monad/README.md)       | experimental        |
-| Arbitrum adapter           | [`lunarbase-client-arbitrum`](crates/lunarbase-client-arbitrum/README.md) | [`@lunarbase/client-arbitrum`](packages/client-arbitrum/README.md) | experimental        |
+| Common reducer and runtime | [`lunarbase-client`](crates/lunarbase-client/README.md)                   | [`@lunarbase/client`](packages/client/README.md)                   | integration-ready   |
+| Generic EVM + Base profile | [`lunarbase-source-evm`](crates/lunarbase-source-evm/README.md)           | [`@lunarbase/source-evm`](packages/source-evm/README.md)           | release candidate   |
+| Monad sources              | [`lunarbase-source-monad`](crates/lunarbase-source-monad/README.md)       | [`@lunarbase/source-monad`](packages/source-monad/README.md)       | experimental        |
+| Arbitrum Nitro source      | [`lunarbase-source-arbitrum`](crates/lunarbase-source-arbitrum/README.md) | [`@lunarbase/source-arbitrum`](packages/source-arbitrum/README.md) | experimental        |
 | Runnable indexer           | [`lunarbase-indexer`](crates/lunarbase-indexer/README.md)                 | —                                                                  | Base is the default |
 | Validation tooling         | [`lunarbase-tools`](crates/lunarbase-tools/README.md)                     | —                                                                  | internal            |
 
-There are no aggregate facade packages. Integrators depend only on the pure
-math, common client, and network adapter they use. Monad and Arbitrum packages
-must remain behind an explicit experimental gate until their node-level live
-validation is complete.
+There are no per-network client wrappers or aggregate facade packages.
+Integrators depend only on the pure math, the common client, and the source
+implementation they use. Monad and Arbitrum packages must remain behind an
+explicit experimental gate until their node-level live validation is
+complete.
 
 ## Who this repository is for
 
@@ -57,7 +58,7 @@ validation is complete.
   Rust or TypeScript service.
 - Integrators that need a ready-to-run HTTP indexer with health, readiness, and
   Prometheus endpoints.
-- Network-adapter authors connecting a new ordered data stream to the common
+- Source authors connecting a new ordered data stream to the common
   reducer.
 - LunarBase maintainers verifying bit-for-bit parity against the pinned
   Solidity implementation.
@@ -90,8 +91,8 @@ packages needed by the application:
 ```toml
 [dependencies]
 lunarbase-math = { git = "https://github.com/Lunarbase-Lab/lunarbase-sdk.git", rev = "<approved-revision>" }
-lunarbase-client-core = { git = "https://github.com/Lunarbase-Lab/lunarbase-sdk.git", rev = "<approved-revision>" }
-lunarbase-client-base = { git = "https://github.com/Lunarbase-Lab/lunarbase-sdk.git", rev = "<approved-revision>" }
+lunarbase-client = { git = "https://github.com/Lunarbase-Lab/lunarbase-sdk.git", rev = "<approved-revision>" }
+lunarbase-source-evm = { git = "https://github.com/Lunarbase-Lab/lunarbase-sdk.git", rev = "<approved-revision>" }
 ```
 
 See the linked crate README files above for constructors, features, and
@@ -102,10 +103,10 @@ runtime guarantees.
 After the `0.2.0` packages are published to the configured npm registry:
 
 ```bash
-pnpm add @lunarbase/math @lunarbase/client-core @lunarbase/client-base
+pnpm add @lunarbase/math @lunarbase/client @lunarbase/source-evm
 ```
 
-Use `@lunarbase/client-monad` or `@lunarbase/client-arbitrum` only for
+Use `@lunarbase/source-monad` or `@lunarbase/source-arbitrum` only for
 experimental validation. Package-specific imports and examples are documented
 in each package README.
 

@@ -28,11 +28,11 @@ For exact partner fees, set `ROUTER_ADDRESS` and its actual
 `EXPECT_WHITELISTED` value. Without a router, the example uses a fixed
 non-whitelisted demonstration address.
 
-The high-level `lunarbase-client-base` constructor discovers chain ID, cash,
-and all active lanes and uses Base's official `pendingLogs + newHeads` stream.
-`DEPLOYMENT_BLOCK`
-is optional but strongly recommended for production deployments because it
-limits the lane-discovery log range.
+The example reads chain and implementation identity through
+`lunarbase-source-evm`, builds the Base Flashblocks source, and injects it into
+`lunarbase-client`. The common client then discovers cash and active lanes.
+`DEPLOYMENT_BLOCK` is optional but strongly recommended for production
+deployments because it limits the lane-discovery log range.
 
 ## Run
 

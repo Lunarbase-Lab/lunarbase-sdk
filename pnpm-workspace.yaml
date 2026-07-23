@@ -1,7 +1,7 @@
 packages:
   - packages/math
-  - packages/client-core
-  - packages/client-base
-  - packages/client-monad
-  - packages/client-arbitrum
+  - packages/client
+  - packages/source-evm
+  - packages/source-monad
+  - packages/source-arbitrum
   - examples/typescript/quote-logger

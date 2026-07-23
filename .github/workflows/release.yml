@@ -65,12 +65,12 @@ jobs:
             return 1
           }
           publish_crate lunarbase-math
-          publish_crate lunarbase-client-core
-          publish_crate lunarbase-client-base
+          publish_crate lunarbase-client
+          publish_crate lunarbase-source-evm
       - name: Publish npm packages
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           pnpm --filter @lunarbase/math publish --access public --no-git-checks
-          pnpm --filter @lunarbase/client-core publish --access public --no-git-checks
-          pnpm --filter @lunarbase/client-base publish --access public --no-git-checks
+          pnpm --filter @lunarbase/client publish --access public --no-git-checks
+          pnpm --filter @lunarbase/source-evm publish --access public --no-git-checks

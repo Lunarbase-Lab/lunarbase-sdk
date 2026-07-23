@@ -49,7 +49,7 @@ help:
 	@echo "  make ffi            Run Solidity differential FFI from lunarbase-contracts"
 	@echo "  make quote-logger-rust  Run the Rust realtime quote example"
 	@echo "  make quote-logger-ts    Run the TypeScript realtime quote example"
-	@echo "  make monad-parser-smoke  Connect the Rust Monad client to a local parser"
+	@echo "  make monad-parser-smoke  Connect the Rust Monad source to a local parser"
 	@echo "  make docker-up      Build and start indexer + Redis"
 	@echo "  make docker-build-monad-native  Build the x86_64 native Monad image"
 	@echo "  make release-check  Validate Rust/npm package contents"
@@ -130,8 +130,8 @@ test-ts: build-ts
 	$(PNPM_CMD) test:compiled
 
 test-runtime: build-ts
-	$(CARGO) test -p lunarbase-client-core -p lunarbase-client-base -p lunarbase-client-monad -p lunarbase-client-arbitrum
-	$(NODE) --test packages/client-core/dist/*.test.js packages/client-core/dist/**/*.test.js packages/client-base/dist/*.test.js packages/client-monad/dist/*.test.js packages/client-arbitrum/dist/*.test.js
+	$(CARGO) test -p lunarbase-client -p lunarbase-source-evm -p lunarbase-source-monad -p lunarbase-source-arbitrum
+	$(NODE) --test packages/client/dist/*.test.js packages/client/dist/**/*.test.js packages/source-evm/dist/*.test.js packages/source-monad/dist/*.test.js packages/source-arbitrum/dist/*.test.js
 
 test-process-e2e:
 	$(CARGO) build -p lunarbase-indexer -p lunarbase-tools
@@ -174,7 +174,7 @@ quote-logger-ts: check-pnpm
 	$(PNPM_CMD) --filter @lunarbase/example-quote-logger start
 
 monad-parser-smoke:
-	$(CARGO) run -p lunarbase-client-monad --example monad-parser-smoke
+	$(CARGO) run -p lunarbase-source-monad --example monad-parser-smoke
 
 docker-build:
 	docker compose build
@@ -198,16 +198,16 @@ release-artifacts:
 release-check: build-ts
 	mkdir -p dist
 	$(CARGO) package --locked --offline --no-verify -p lunarbase-math --allow-dirty
-	$(CARGO) package --offline --list -p lunarbase-client-core --allow-dirty
-	$(CARGO) package --offline --list -p lunarbase-client-base --allow-dirty
-	$(CARGO) package --offline --list -p lunarbase-client-monad --allow-dirty
-	$(CARGO) package --offline --list -p lunarbase-client-arbitrum --allow-dirty
+	$(CARGO) package --offline --list -p lunarbase-client --allow-dirty
+	$(CARGO) package --offline --list -p lunarbase-source-evm --allow-dirty
+	$(CARGO) package --offline --list -p lunarbase-source-monad --allow-dirty
+	$(CARGO) package --offline --list -p lunarbase-source-arbitrum --allow-dirty
 	$(NODE) scripts/check-release-dist.mjs
 	$(PNPM_CMD) --dir packages/math pack --pack-destination "$(CURDIR)/dist"
-	$(PNPM_CMD) --dir packages/client-core pack --pack-destination "$(CURDIR)/dist"
-	$(PNPM_CMD) --dir packages/client-base pack --pack-destination "$(CURDIR)/dist"
-	$(PNPM_CMD) --dir packages/client-monad pack --pack-destination "$(CURDIR)/dist"
-	$(PNPM_CMD) --dir packages/client-arbitrum pack --pack-destination "$(CURDIR)/dist"
+	$(PNPM_CMD) --dir packages/client pack --pack-destination "$(CURDIR)/dist"
+	$(PNPM_CMD) --dir packages/source-evm pack --pack-destination "$(CURDIR)/dist"
+	$(PNPM_CMD) --dir packages/source-monad pack --pack-destination "$(CURDIR)/dist"
+	$(PNPM_CMD) --dir packages/source-arbitrum pack --pack-destination "$(CURDIR)/dist"
 
 source-size-check:
 	$(NODE) scripts/check-source-lines.mjs
@@ -218,7 +218,7 @@ ci: verify
 
 clean: check-pnpm
 	$(CARGO) clean
-	$(PNPM_CMD) exec tsc -b packages/math/tsconfig.json packages/client-core/tsconfig.json packages/client-base/tsconfig.json packages/client-monad/tsconfig.json packages/client-arbitrum/tsconfig.json examples/typescript/quote-logger/tsconfig.json --clean
+	$(PNPM_CMD) exec tsc -b packages/math/tsconfig.json packages/client/tsconfig.json packages/source-evm/tsconfig.json packages/source-monad/tsconfig.json packages/source-arbitrum/tsconfig.json examples/typescript/quote-logger/tsconfig.json --clean
 
 check-pnpm:
 	@if [ -n "$(PNPM_CMD)" ]; then :; else \

@@ -14,8 +14,8 @@
     "test": "node --test dist/*.test.js"
   },
   "dependencies": {
-    "@lunarbase/client-base": "workspace:*",
-    "@lunarbase/client-core": "workspace:*",
+    "@lunarbase/source-evm": "workspace:*",
+    "@lunarbase/client": "workspace:*",
     "@lunarbase/math": "workspace:*",
     "ox": "0.14.30",
     "zod": "4.3.6"

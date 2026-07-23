@@ -5,9 +5,9 @@
   "repository": "git+https://github.com/Lunarbase-Lab/lunarbase-sdk.git",
   "packageManager": "pnpm@9.15.0",
   "scripts": {
-    "build": "node scripts/clean-dist.mjs packages/math/dist packages/client-core/dist packages/client-base/dist packages/client-monad/dist packages/client-arbitrum/dist examples/typescript/quote-logger/dist && tsc -p packages/math/tsconfig.json && tsc -p packages/client-core/tsconfig.json && tsc -p packages/client-base/tsconfig.json && tsc -p packages/client-monad/tsconfig.json && tsc -p packages/client-arbitrum/tsconfig.json && tsc -p examples/typescript/quote-logger/tsconfig.json",
+    "build": "node scripts/clean-dist.mjs packages/math/dist packages/client/dist packages/source-evm/dist packages/source-monad/dist packages/source-arbitrum/dist examples/typescript/quote-logger/dist && tsc -p packages/math/tsconfig.json && tsc -p packages/client/tsconfig.json && tsc -p packages/source-evm/tsconfig.json && tsc -p packages/source-monad/tsconfig.json && tsc -p packages/source-arbitrum/tsconfig.json && tsc -p examples/typescript/quote-logger/tsconfig.json",
     "test": "pnpm build && pnpm test:compiled",
-    "test:compiled": "node --test packages/math/dist/*.test.js packages/client-core/dist/*.test.js packages/client-core/dist/**/*.test.js packages/client-base/dist/*.test.js packages/client-monad/dist/*.test.js packages/client-arbitrum/dist/*.test.js examples/typescript/quote-logger/dist/*.test.js",
+    "test:compiled": "node --test packages/math/dist/*.test.js packages/client/dist/*.test.js packages/client/dist/**/*.test.js packages/source-evm/dist/*.test.js packages/source-monad/dist/*.test.js packages/source-arbitrum/dist/*.test.js examples/typescript/quote-logger/dist/*.test.js",
     "format": "prettier --write \"packages/**/*.ts\" \"examples/typescript/**/*.ts\"",
     "format:check": "prettier --check \"packages/**/*.ts\" \"examples/typescript/**/*.ts\"",
     "lint": "eslint packages examples/typescript --max-warnings=0"

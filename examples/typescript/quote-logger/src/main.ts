@@ -1,15 +1,15 @@
-import { connectBase } from "@lunarbase/client-base";
+import { createBaseFlashblocksSource, JsonRpcHttpClient } from "@lunarbase/source-evm";
 import {
-  JsonRpcHttpClient,
   MATH_COMPATIBILITY_VERSION,
   Commitment,
   ERC1967_IMPLEMENTATION_SLOT,
   Network,
+  connect,
   decodeImplementation,
   quoteCriticalTopics,
   type ClientConnectConfig,
   type ConnectedQuoteClient,
-} from "@lunarbase/client-core";
+} from "@lunarbase/client";
 import { laneExists } from "@lunarbase/math";
 import { readEnvironment } from "./config.js";
 import { logQuoteBatch, writeLog } from "./logging.js";
@@ -35,8 +35,6 @@ async function main(): Promise<void> {
     expectedImplementation: implementation,
     expectedImplementationCodeHash: implementationCodeHash,
     contractCompatibilityVersion: MATH_COMPATIBILITY_VERSION,
-    httpRpcUrl: environment.rpcUrl,
-    realtimeSource: environment.wsUrl,
     explicitLaneAssets: [],
   };
   const config: ClientConnectConfig = {
@@ -58,7 +56,12 @@ async function main(): Promise<void> {
     rpcWs: environment.wsUrl,
   });
 
-  const client = await connectBase(config);
+  const source = createBaseFlashblocksSource({
+    httpRpcUrl: environment.rpcUrl,
+    realtimeUrl: environment.wsUrl,
+    chainId,
+  });
+  const client = await connect(config, source);
   const checkpoint = client.checkpoint();
   if (checkpoint === undefined) {
     await client.shutdown();

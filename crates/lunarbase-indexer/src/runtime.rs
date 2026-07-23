@@ -1,9 +1,9 @@
 //! Network client construction and best-effort checkpoint scheduling.
 
 use crate::{checkpoint::RedisCheckpointStore, config::Config, metrics::Metrics};
-use lunarbase_client_core::indexer::client::ConnectedQuoteClient;
-use lunarbase_client_core::indexer::errors::IndexerError;
-use lunarbase_client_core::model::{Checkpoint, Network};
+use lunarbase_client::indexer::client::ConnectedQuoteClient;
+use lunarbase_client::indexer::errors::IndexerError;
+use lunarbase_client::model::{Checkpoint, Network};
 use std::{sync::Arc, time::Duration};
 use thiserror::Error;
 use tokio::{sync::watch, task::JoinHandle, time::interval};
@@ -14,13 +14,13 @@ pub enum RuntimeError {
     /// The embeddable client failed deployment validation, bootstrap, or recovery.
     #[error(transparent)]
     Client(#[from] IndexerError),
-    /// The binary was compiled without the adapter selected by configuration.
+    /// The binary was compiled without the source selected by configuration.
     #[cfg(not(all(feature = "base", feature = "monad", feature = "arbitrum")))]
     #[error("network support is not compiled: {0:?}")]
     UnsupportedNetwork(Network),
 }
 
-/// Connects the high-level network package selected by deployment identity.
+/// Composes the common client with the source selected by deployment identity.
 pub async fn connect_client(
     config: &Config,
     checkpoint: Option<Checkpoint>,
@@ -37,7 +37,15 @@ async fn connect_base(
     config: &Config,
     checkpoint: Option<Checkpoint>,
 ) -> Result<ConnectedQuoteClient, RuntimeError> {
-    Ok(lunarbase_client_base::connect_base(config.client.clone(), checkpoint).await?)
+    let rpc = lunarbase_source_evm::rpc::client::RpcHttpClient::new(config.http_rpc_url.clone())
+        .map_err(lunarbase_client::model::SourceError::from)
+        .map_err(IndexerError::from)?;
+    let source = Arc::new(lunarbase_source_evm::ws::EvmRpcSource::base_flashblocks(
+        rpc,
+        config.realtime_url.clone(),
+        config.client.deployment.chain_id,
+    ));
+    Ok(ConnectedQuoteClient::connect(config.client.clone(), source, checkpoint).await?)
 }
 
 #[cfg(not(feature = "base"))]
@@ -55,14 +63,36 @@ async fn connect_monad(
 ) -> Result<ConnectedQuoteClient, RuntimeError> {
     #[cfg(all(feature = "monad-native", target_os = "linux"))]
     {
-        Ok(
-            lunarbase_client_monad::connect_monad_event_ring(config.client.clone(), checkpoint)
-                .await?,
-        )
+        let source = Arc::new(
+            lunarbase_source_monad::native::MonadEventRingSource::new(
+                lunarbase_source_monad::native::MonadEventRingConfig {
+                    event_ring_path: config.realtime_url.clone().into(),
+                    core: config.client.deployment.core,
+                    chain_id: config.client.deployment.chain_id,
+                    queue_bound: config.client.buffer_capacity,
+                    poll_interval: Duration::from_micros(100),
+                },
+                config.http_rpc_url.clone(),
+            )
+            .map_err(IndexerError::from)?,
+        );
+        Ok(ConnectedQuoteClient::connect(config.client.clone(), source, checkpoint).await?)
     }
     #[cfg(not(all(feature = "monad-native", target_os = "linux")))]
     {
-        Ok(lunarbase_client_monad::connect_monad_parser(config.client.clone(), checkpoint).await?)
+        let source = Arc::new(
+            lunarbase_source_monad::parser::MonadParserSource::new(
+                lunarbase_source_monad::parser::MonadParserConfig {
+                    ws_url: config.realtime_url.clone(),
+                    core: config.client.deployment.core,
+                    chain_id: config.client.deployment.chain_id,
+                    ..Default::default()
+                },
+                config.http_rpc_url.clone(),
+            )
+            .map_err(IndexerError::from)?,
+        );
+        Ok(ConnectedQuoteClient::connect(config.client.clone(), source, checkpoint).await?)
     }
 }
 
@@ -79,7 +109,15 @@ async fn connect_arbitrum(
     config: &Config,
     checkpoint: Option<Checkpoint>,
 ) -> Result<ConnectedQuoteClient, RuntimeError> {
-    Ok(lunarbase_client_arbitrum::connect_arbitrum(config.client.clone(), checkpoint).await?)
+    let source = Arc::new(
+        lunarbase_source_arbitrum::source::ArbitrumNitroSource::from_urls(
+            config.http_rpc_url.clone(),
+            config.realtime_url.clone(),
+            config.client.deployment.chain_id,
+        )
+        .map_err(IndexerError::from)?,
+    );
+    Ok(ConnectedQuoteClient::connect(config.client.clone(), source, checkpoint).await?)
 }
 
 #[cfg(not(feature = "arbitrum"))]

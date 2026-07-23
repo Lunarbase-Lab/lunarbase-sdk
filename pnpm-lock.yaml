@@ -26,15 +26,15 @@ importers:
 
   examples/typescript/quote-logger:
     dependencies:
-      '@lunarbase/client-base':
+      '@lunarbase/client':
         specifier: workspace:*
-        version: link:../../../packages/client-base
-      '@lunarbase/client-core':
-        specifier: workspace:*
-        version: link:../../../packages/client-core
+        version: link:../../../packages/client
       '@lunarbase/math':
         specifier: workspace:*
         version: link:../../../packages/math
+      '@lunarbase/source-evm':
+        specifier: workspace:*
+        version: link:../../../packages/source-evm
       ox:
         specifier: 0.14.30
         version: 0.14.30(typescript@6.0.3)(zod@4.3.6)
@@ -49,47 +49,8 @@ importers:
         specifier: 6.0.3
         version: 6.0.3
 
-  packages/client-arbitrum:
+  packages/client:
     dependencies:
-      '@lunarbase/client-core':
-        specifier: workspace:*
-        version: link:../client-core
-    devDependencies:
-      typescript:
-        specifier: 6.0.3
-        version: 6.0.3
-
-  packages/client-base:
-    dependencies:
-      '@lunarbase/client-core':
-        specifier: workspace:*
-        version: link:../client-core
-    devDependencies:
-      typescript:
-        specifier: 6.0.3
-        version: 6.0.3
-
-  packages/client-core:
-    dependencies:
-      '@lunarbase/math':
-        specifier: workspace:*
-        version: link:../math
-      ox:
-        specifier: 0.14.30
-        version: 0.14.30(typescript@6.0.3)(zod@4.3.6)
-      viem:
-        specifier: 2.55.2
-        version: 2.55.2(typescript@6.0.3)(zod@4.3.6)
-    devDependencies:
-      typescript:
-        specifier: 6.0.3
-        version: 6.0.3
-
-  packages/client-monad:
-    dependencies:
-      '@lunarbase/client-core':
-        specifier: workspace:*
-        version: link:../client-core
       '@lunarbase/math':
         specifier: workspace:*
         version: link:../math
@@ -110,6 +71,57 @@ importers:
       '@types/node':
         specifier: 22.20.1
         version: 22.20.1
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
+
+  packages/source-arbitrum:
+    dependencies:
+      '@lunarbase/client':
+        specifier: workspace:*
+        version: link:../client
+      '@lunarbase/source-evm':
+        specifier: workspace:*
+        version: link:../source-evm
+    devDependencies:
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
+
+  packages/source-evm:
+    dependencies:
+      '@lunarbase/client':
+        specifier: workspace:*
+        version: link:../client
+      '@lunarbase/math':
+        specifier: workspace:*
+        version: link:../math
+      ox:
+        specifier: 0.14.30
+        version: 0.14.30(typescript@6.0.3)(zod@4.3.6)
+      viem:
+        specifier: 2.55.2
+        version: 2.55.2(typescript@6.0.3)(zod@4.3.6)
+    devDependencies:
+      typescript:
+        specifier: 6.0.3
+        version: 6.0.3
+
+  packages/source-monad:
+    dependencies:
+      '@lunarbase/client':
+        specifier: workspace:*
+        version: link:../client
+      '@lunarbase/math':
+        specifier: workspace:*
+        version: link:../math
+      '@lunarbase/source-evm':
+        specifier: workspace:*
+        version: link:../source-evm
+      ox:
+        specifier: 0.14.30
+        version: 0.14.30(typescript@6.0.3)(zod@4.3.6)
+    devDependencies:
       typescript:
         specifier: 6.0.3
         version: 6.0.3

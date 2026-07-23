@@ -2,16 +2,16 @@
 
 use clap::Parser;
 use dotenvy::from_path;
-use lunarbase_client_base::prelude::connect_base;
-use lunarbase_client_core::model::MATH_COMPATIBILITY_VERSION;
-use lunarbase_client_core::prelude::{
+use lunarbase_client::model::MATH_COMPATIBILITY_VERSION;
+use lunarbase_client::prelude::{
     ClientConnectConfig, ClientRuntimeEvent, Commitment, ConnectedQuoteClient, ContractFilter,
-    DeploymentConfig, Network, RpcHttpClient,
+    DeploymentConfig, Network,
 };
-use lunarbase_client_core::protocol::abi::quote_critical_topics;
-use lunarbase_client_core::protocol::proxy::{ERC1967_IMPLEMENTATION_SLOT, decode_implementation};
+use lunarbase_client::protocol::abi::quote_critical_topics;
+use lunarbase_client::protocol::proxy::{ERC1967_IMPLEMENTATION_SLOT, decode_implementation};
 use lunarbase_math::prelude::{Address, QuoteMode, QuoteOutcome, QuoteRequest, U256};
-use std::{error::Error, io, num::NonZeroU64, path::Path, str::FromStr, time::Duration};
+use lunarbase_source_evm::prelude::{EvmRpcSource, RpcHttpClient};
+use std::{error::Error, io, num::NonZeroU64, path::Path, str::FromStr, sync::Arc, time::Duration};
 use tokio::{sync::broadcast, time::MissedTickBehavior};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -94,8 +94,6 @@ async fn main() -> Result<(), AnyError> {
         expected_implementation: implementation,
         expected_implementation_code_hash: implementation_code_hash,
         contract_compatibility_version: MATH_COMPATIBILITY_VERSION.into(),
-        http_rpc_url: args.rpc_url.to_string(),
-        realtime_source: ws_url.to_string(),
         explicit_lane_assets: Vec::new(),
     };
     let config = ClientConnectConfig {
@@ -115,7 +113,12 @@ async fn main() -> Result<(), AnyError> {
         rpc_ws = %ws_url,
         "connecting LunarBase Base client"
     );
-    let client = connect_base(config, None).await?;
+    let source = Arc::new(EvmRpcSource::base_flashblocks(
+        rpc,
+        ws_url.to_string(),
+        chain_id,
+    ));
+    let client = ConnectedQuoteClient::connect(config, source, None).await?;
     client.await_ready(Commitment::Realtime).await?;
 
     let checkpoint = client

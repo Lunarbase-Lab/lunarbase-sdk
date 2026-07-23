@@ -14,8 +14,8 @@ workspace = true
 [dependencies]
 clap.workspace = true
 dotenvy.workspace = true
-lunarbase-client-base.workspace = true
-lunarbase-client-core.workspace = true
+lunarbase-source-evm.workspace = true
+lunarbase-client.workspace = true
 lunarbase-math.workspace = true
 tokio.workspace = true
 tracing.workspace = true

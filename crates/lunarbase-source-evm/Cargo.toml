@@ -1,0 +1,31 @@
+[package]
+name = "lunarbase-source-evm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Generic EVM RPC and WebSocket data source for LunarBase"
+
+[lints]
+workspace = true
+
+[dependencies]
+alloy-primitives.workspace = true
+alloy-rpc-client.workspace = true
+alloy-serde.workspace = true
+alloy-sol-types.workspace = true
+async-stream.workspace = true
+futures-util.workspace = true
+lunarbase-client.workspace = true
+lunarbase-math.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+alloy-transport.workspace = true

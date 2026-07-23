@@ -1,4 +1,4 @@
-import type { ClientBatchQuote } from "@lunarbase/client-core";
+import type { ClientBatchQuote } from "@lunarbase/client";
 import type { QuoteRequest } from "@lunarbase/math";
 
 /**

@@ -1,0 +1,24 @@
+[package]
+name = "lunarbase-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Network-independent LunarBase reducer and realtime client runtime"
+
+[lints]
+workspace = true
+
+[dependencies]
+alloy-sol-types.workspace = true
+futures-core.workspace = true
+futures-util.workspace = true
+lunarbase-math.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+async-stream.workspace = true
+serde_json.workspace = true

@@ -9,8 +9,9 @@ pure math
   └─ no async, RPC, persistence, or network semantics
 
 embeddable clients
-  ├─ common ordered reducer/runtime
-  └─ one package per network source
+  ├─ one common ordered reducer/runtime
+  ├─ generic EVM HTTP/WS source
+  └─ network-specific sources only where stream semantics differ
 
 lunarbase-indexer
   └─ HTTP + metrics + optional Redis restart checkpoint
@@ -25,19 +26,19 @@ indexer is the only ready-to-run service.
 ```text
 crates/
   lunarbase-math/
-  lunarbase-client-core/
-  lunarbase-client-base/
-  lunarbase-client-monad/
-  lunarbase-client-arbitrum/
+  lunarbase-client/
+  lunarbase-source-evm/
+  lunarbase-source-monad/
+  lunarbase-source-arbitrum/
   lunarbase-indexer/
   lunarbase-tools/
 
 packages/
   math/
-  client-core/
-  client-base/
-  client-monad/
-  client-arbitrum/
+  client/
+  source-evm/
+  source-monad/
+  source-arbitrum/
 
 fixtures/
   quote-vectors.json
@@ -50,8 +51,10 @@ config/
   prometheus-alerts.yml
 ```
 
-There are no all-network facade packages. This prevents a Base-only
-integration from pulling Monad or Arbitrum dependencies.
+There are no per-network client wrappers or all-network facade packages.
+Applications always use the one common client and inject a concrete source.
+This prevents a Base-only integration from pulling Monad or Arbitrum
+dependencies while keeping lifecycle and reducer behavior identical.
 
 ## Data path
 
@@ -76,6 +79,10 @@ The source exposes one contract:
 - `subscribe(filter)`
 - `canonical_head()`
 - `validate_checkpoint(checkpoint)`
+
+Deployment identity passed to the common client contains no RPC or WebSocket
+URLs. Endpoints and transport resource limits belong to the selected source;
+the runnable indexer owns their service-level configuration.
 
 Normalized updates are only `Head`, `Log`, `Reorg`, and `Gap`.
 `sourceSequence` orders source messages; `executionBlockNumber` independently
@@ -107,11 +114,12 @@ once, computes every result from the same state, and returns that one cursor.
 
 ## Network sources
 
-Base uses the documented `pendingLogs + newHeads` subscriptions. Base emits
-`newHeads` at Flashblock cadence, so the client avoids decoding the larger
-`newFlashblocks` payload.
+`lunarbase-source-evm` owns reusable HTTP snapshot/backfill and WebSocket
+`logs + newHeads` behavior. Base is its `pendingLogs + progressive newHeads`
+profile, not another client package. Base emits `newHeads` at Flashblock
+cadence, so the source avoids decoding the larger `newFlashblocks` payload.
 
-Monad has two Rust inputs in the same network package:
+Monad has two Rust source implementations in the same network package:
 
 - portable parser WebSocket for development and remote deployments;
 - Linux native event-ring reader using official `monad-exec-events` and
@@ -119,8 +127,9 @@ Monad has two Rust inputs in the same network package:
 
 TypeScript consumes the parser/RPC WebSocket and does not bind hugetlbfs.
 
-Arbitrum consumes logs from executed Nitro state and records parent-chain
-execution context separately from the L2 stream height.
+Arbitrum extends the generic EVM source with Nitro execution-context
+resolution and records parent-chain execution context separately from the L2
+stream height.
 
 Monad and Arbitrum are experimental until their node-based soak gates pass.
 

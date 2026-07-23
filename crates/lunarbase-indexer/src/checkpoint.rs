@@ -1,6 +1,6 @@
 //! Best-effort v4 Redis checkpoint acceleration.
 
-use lunarbase_client_core::model::{ChainCursor, Checkpoint, Commitment, DeploymentConfig};
+use lunarbase_client::model::{ChainCursor, Checkpoint, Commitment, DeploymentConfig};
 use lunarbase_math::state::{FeeProfile, LaneState, QuoteState};
 use lunarbase_math::types::{Address, B256, U256};
 use serde::{Deserialize, Serialize};
@@ -343,7 +343,7 @@ fn hash_hex(value: B256) -> String {
 #[cfg(test)]
 mod tests {
     use crate::checkpoint::{CheckpointDto, RedisCheckpointStore};
-    use lunarbase_client_core::model::{
+    use lunarbase_client::model::{
         ChainCursor, Checkpoint, Commitment, DeploymentConfig, MATH_COMPATIBILITY_VERSION, Network,
         SCHEMA_VERSION,
     };
@@ -367,8 +367,6 @@ mod tests {
             expected_implementation: address(3),
             expected_implementation_code_hash: B256::new([3; 32]),
             contract_compatibility_version: MATH_COMPATIBILITY_VERSION.into(),
-            http_rpc_url: "http://rpc".into(),
-            realtime_source: "ws://stream".into(),
             explicit_lane_assets: vec![address(4)],
         }
     }

@@ -4,9 +4,9 @@ The examples are grouped by language and implement the same realtime quote
 logger:
 
 - [`rust/quote-logger`](rust/quote-logger/README.md) is a binary crate built on
-  `lunarbase-client-core`.
+  `lunarbase-client`.
 - [`typescript/quote-logger`](typescript/quote-logger/README.md) is a private
-  pnpm workspace package built on `@lunarbase/client-core`.
+  pnpm workspace package built on `@lunarbase/client`.
 
 Both load `RPC_URL` and `CORE_ADDRESS` from `.env`, bootstrap state through
 RPC, subscribe to WebSocket updates, and log exact-input quotes in both
@@ -41,14 +41,15 @@ Rust Monad parser smoke test:
 ```sh
 LUNARBASE_CORE=0x... \
 LUNARBASE_MONAD_PARSER_WS=ws://127.0.0.1:8080/ws/subscriptions \
-cargo run -p lunarbase-client-monad --example monad-parser-smoke
+cargo run -p lunarbase-source-monad --example monad-parser-smoke
 ```
 
-TypeScript selects `MonadExecutionEventsSource`, `BaseFlashblocksSource`, or
-`ArbitrumNitroSource`. Their backends accept a bounded `WebSocketFactory`
-appropriate to the runtime. Canonical state still comes from
-`RpcSnapshotProvider`; a source gap is a recovery signal, never a reason to
-serve an unverified stale quote.
+TypeScript composes the common `connect` runtime with
+`createBaseFlashblocksSource`, `createMonadParserSource`, or
+`ArbitrumNitroSource`. The source packages accept a bounded
+`WebSocketFactory` appropriate to the runtime. Canonical state still comes
+from RPC snapshots; a source gap is a recovery signal, never a reason to serve
+an unverified stale quote.
 
 The production Rust composition is available as `lunarbase-indexer`. After
 editing `config/base.toml`, run the default Base service with:
@@ -57,7 +58,7 @@ editing `config/base.toml`, run the default Base service with:
 make run
 ```
 
-Select another compiled adapter with `make run NETWORK=monad` or
+Select another compiled source with `make run NETWORK=monad` or
 `make run NETWORK=arbitrum`.
 
 Production deployments should scrape `/metrics` and load

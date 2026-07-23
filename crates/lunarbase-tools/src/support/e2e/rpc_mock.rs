@@ -4,7 +4,7 @@ use crate::support::e2e::{ASSET, CASH, CORE, IMPLEMENTATION};
 use alloy_sol_types::{SolCall, SolValue};
 use axum::Json;
 use axum::extract::State;
-use lunarbase_client_core::protocol::abi::{TOPIC_LANE_ADDED, core};
+use lunarbase_client::protocol::abi::{TOPIC_LANE_ADDED, core};
 use lunarbase_math::types::{Address, B256, Bytes, U256};
 use serde_json::{Value, json};
 use std::sync::Arc;

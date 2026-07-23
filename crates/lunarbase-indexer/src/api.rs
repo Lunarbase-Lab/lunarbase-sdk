@@ -8,10 +8,10 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use lunarbase_client_core::indexer::client::ConnectedQuoteClient;
-use lunarbase_client_core::indexer::errors::IndexerError;
-use lunarbase_client_core::indexer::quote_types::{ClientBatchQuote, ClientQuote};
-use lunarbase_client_core::model::{ChainCursor, Commitment};
+use lunarbase_client::indexer::client::ConnectedQuoteClient;
+use lunarbase_client::indexer::errors::IndexerError;
+use lunarbase_client::indexer::quote_types::{ClientBatchQuote, ClientQuote};
+use lunarbase_client::model::{ChainCursor, Commitment};
 use lunarbase_math::state::{
     QuoteMode, QuoteOutcome, QuoteRequest, QuoteResult, UnavailableReason,
 };

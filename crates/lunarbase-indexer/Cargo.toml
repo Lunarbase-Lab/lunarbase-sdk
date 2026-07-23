@@ -10,10 +10,10 @@ publish = false
 
 [features]
 default = ["base"]
-base = ["dep:lunarbase-client-base"]
-monad = ["dep:lunarbase-client-monad"]
-monad-native = ["monad", "lunarbase-client-monad/native-event-ring"]
-arbitrum = ["dep:lunarbase-client-arbitrum"]
+base = ["dep:lunarbase-source-evm"]
+monad = ["dep:lunarbase-source-monad"]
+monad-native = ["monad", "lunarbase-source-monad/native-event-ring"]
+arbitrum = ["dep:lunarbase-source-arbitrum"]
 all-networks = ["base", "monad", "arbitrum"]
 
 [lints]
@@ -22,10 +22,10 @@ workspace = true
 [dependencies]
 axum.workspace = true
 clap.workspace = true
-lunarbase-client-arbitrum = { workspace = true, optional = true }
-lunarbase-client-base = { workspace = true, optional = true }
-lunarbase-client-core.workspace = true
-lunarbase-client-monad = { workspace = true, optional = true }
+lunarbase-source-arbitrum = { workspace = true, optional = true }
+lunarbase-source-evm = { workspace = true, optional = true }
+lunarbase-client.workspace = true
+lunarbase-source-monad = { workspace = true, optional = true }
 lunarbase-math.workspace = true
 redis.workspace = true
 serde.workspace = true

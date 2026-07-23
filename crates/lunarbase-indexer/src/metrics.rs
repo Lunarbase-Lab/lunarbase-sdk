@@ -1,7 +1,7 @@
 //! Small Prometheus exposition surface for runtime-critical signals.
 
-use lunarbase_client_core::indexer::client::ConnectedQuoteClient;
-use lunarbase_client_core::model::Commitment;
+use lunarbase_client::indexer::client::ConnectedQuoteClient;
+use lunarbase_client::model::Commitment;
 use std::{
     fmt::Write,
     sync::atomic::{AtomicU64, Ordering},

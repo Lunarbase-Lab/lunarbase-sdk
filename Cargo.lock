@@ -2088,57 +2088,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
-name = "lunarbase-client-arbitrum"
+name = "lunarbase-client"
 version = "0.2.0"
 dependencies = [
- "futures-util",
- "lunarbase-client-core",
-]
-
-[[package]]
-name = "lunarbase-client-base"
-version = "0.2.0"
-dependencies = [
- "lunarbase-client-core",
-]
-
-[[package]]
-name = "lunarbase-client-core"
-version = "0.2.0"
-dependencies = [
- "alloy-primitives",
- "alloy-rpc-client",
- "alloy-serde",
  "alloy-sol-types",
- "alloy-transport",
  "async-stream",
  "futures-core",
  "futures-util",
  "lunarbase-math",
- "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
- "tokio-tungstenite",
- "url",
-]
-
-[[package]]
-name = "lunarbase-client-monad"
-version = "0.2.0"
-dependencies = [
- "async-stream",
- "futures-util",
- "lunarbase-client-core",
- "lunarbase-math",
- "monad-event-ring",
- "monad-exec-events",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite",
- "url",
 ]
 
 [[package]]
@@ -2147,11 +2108,11 @@ version = "0.2.0"
 dependencies = [
  "axum",
  "clap",
- "lunarbase-client-arbitrum",
- "lunarbase-client-base",
- "lunarbase-client-core",
- "lunarbase-client-monad",
+ "lunarbase-client",
  "lunarbase-math",
+ "lunarbase-source-arbitrum",
+ "lunarbase-source-evm",
+ "lunarbase-source-monad",
  "redis",
  "serde",
  "serde_json",
@@ -2178,12 +2139,61 @@ version = "0.2.0"
 dependencies = [
  "clap",
  "dotenvy",
- "lunarbase-client-base",
- "lunarbase-client-core",
+ "lunarbase-client",
  "lunarbase-math",
+ "lunarbase-source-evm",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
+]
+
+[[package]]
+name = "lunarbase-source-arbitrum"
+version = "0.2.0"
+dependencies = [
+ "futures-util",
+ "lunarbase-client",
+ "lunarbase-source-evm",
+]
+
+[[package]]
+name = "lunarbase-source-evm"
+version = "0.2.0"
+dependencies = [
+ "alloy-primitives",
+ "alloy-rpc-client",
+ "alloy-serde",
+ "alloy-sol-types",
+ "alloy-transport",
+ "async-stream",
+ "futures-util",
+ "lunarbase-client",
+ "lunarbase-math",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite",
+ "url",
+]
+
+[[package]]
+name = "lunarbase-source-monad"
+version = "0.2.0"
+dependencies = [
+ "async-stream",
+ "futures-util",
+ "lunarbase-client",
+ "lunarbase-math",
+ "lunarbase-source-evm",
+ "monad-event-ring",
+ "monad-exec-events",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite",
  "url",
 ]
 
@@ -2196,7 +2206,7 @@ dependencies = [
  "axum",
  "clap",
  "futures-util",
- "lunarbase-client-core",
+ "lunarbase-client",
  "lunarbase-math",
  "redis",
  "reqwest",

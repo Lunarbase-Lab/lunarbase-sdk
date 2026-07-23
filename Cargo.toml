@@ -1,10 +1,10 @@
 [workspace]
 members = [
     "crates/lunarbase-math",
-    "crates/lunarbase-client-core",
-    "crates/lunarbase-client-base",
-    "crates/lunarbase-client-monad",
-    "crates/lunarbase-client-arbitrum",
+    "crates/lunarbase-client",
+    "crates/lunarbase-source-evm",
+    "crates/lunarbase-source-monad",
+    "crates/lunarbase-source-arbitrum",
     "crates/lunarbase-indexer",
     "crates/lunarbase-tools",
     "examples/rust/quote-logger",
@@ -31,10 +31,10 @@ wildcard_imports = "deny"
 
 [workspace.dependencies]
 lunarbase-math = { version = "0.2.0", path = "crates/lunarbase-math" }
-lunarbase-client-core = { version = "0.2.0", path = "crates/lunarbase-client-core" }
-lunarbase-client-base = { version = "0.2.0", path = "crates/lunarbase-client-base" }
-lunarbase-client-monad = { version = "0.2.0", path = "crates/lunarbase-client-monad" }
-lunarbase-client-arbitrum = { version = "0.2.0", path = "crates/lunarbase-client-arbitrum" }
+lunarbase-client = { version = "0.2.0", path = "crates/lunarbase-client" }
+lunarbase-source-evm = { version = "0.2.0", path = "crates/lunarbase-source-evm" }
+lunarbase-source-monad = { version = "0.2.0", path = "crates/lunarbase-source-monad" }
+lunarbase-source-arbitrum = { version = "0.2.0", path = "crates/lunarbase-source-arbitrum" }
 alloy-primitives = { version = "=1.6.1", default-features = false, features = ["std", "serde"] }
 alloy-rpc-client = { version = "=2.2.0", default-features = false, features = ["reqwest"] }
 alloy-serde = { version = "=2.2.0", default-features = false }
