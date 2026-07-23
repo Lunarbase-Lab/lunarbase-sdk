@@ -13,7 +13,7 @@ pub mod core {
         function lane(address asset)
             external
             view
-            returns (bytes32 slot0, bool exists, bool paused, uint8 blockDelay, uint32 slippageKBps);
+            returns (bytes32 laneWord);
         function reserves(address asset)
             external
             view
@@ -34,7 +34,9 @@ pub mod core {
         event LaneAdded(address indexed asset);
         event LaneRemoved(address indexed asset);
         event LaneUpdated(address indexed asset, bytes32 slot0);
+        event LaneCorruptedSet(address indexed asset, bool previousCorrupted, bool newCorrupted);
         event SlippageKSet(address indexed asset, uint32 previousK, uint32 newK);
+        event BlockDelaySet(address indexed asset, uint8 previousBlockDelay, uint8 newBlockDelay);
         event PartnerInfoSet(
             address indexed router,
             address indexed asset,
@@ -59,6 +61,8 @@ pub mod core {
             uint256 penaltyAmount,
             address principalReceiver
         );
+        event Sync(address indexed lane, uint128 assetReserve, uint128 cashReserve);
+        event Upgraded(address indexed implementation);
     }
 }
 
@@ -67,13 +71,17 @@ pub const TOPIC_LANE_ADDED: B256 = core::LaneAdded::SIGNATURE_HASH;
 /// Event signature used to remove lanes during discovery replay.
 pub const TOPIC_LANE_REMOVED: B256 = core::LaneRemoved::SIGNATURE_HASH;
 const TOPIC_LANE_UPDATED: B256 = core::LaneUpdated::SIGNATURE_HASH;
+const TOPIC_LANE_CORRUPTED_SET: B256 = core::LaneCorruptedSet::SIGNATURE_HASH;
 const TOPIC_SLIPPAGE_K_SET: B256 = core::SlippageKSet::SIGNATURE_HASH;
+const TOPIC_BLOCK_DELAY_SET: B256 = core::BlockDelaySet::SIGNATURE_HASH;
 const TOPIC_PARTNER_INFO_SET: B256 = core::PartnerInfoSet::SIGNATURE_HASH;
 const TOPIC_PARTNER_FEE_SET: B256 = core::PartnerFeeSet::SIGNATURE_HASH;
 const TOPIC_WHITELIST_SET: B256 = core::WhitelistSet::SIGNATURE_HASH;
 const TOPIC_BLACKLIST_MULTIPLIER_SET: B256 = core::BlacklistFeeMultiplierSet::SIGNATURE_HASH;
 const TOPIC_DEPOSIT_EXECUTED: B256 = core::DepositExecuted::SIGNATURE_HASH;
 const TOPIC_WITHDRAWAL_EXECUTED: B256 = core::WithdrawalExecuted::SIGNATURE_HASH;
+const TOPIC_SYNC: B256 = core::Sync::SIGNATURE_HASH;
+const TOPIC_UPGRADED: B256 = core::Upgraded::SIGNATURE_HASH;
 
 /// Returns the `LaneAdded` and `LaneRemoved` topic0 values used for discovery.
 pub fn lane_discovery_topics() -> [B256; 2] {
@@ -81,18 +89,22 @@ pub fn lane_discovery_topics() -> [B256; 2] {
 }
 
 /// Returns every quote-critical Core topic accepted by the reducer.
-pub fn quote_critical_topics() -> [B256; 10] {
+pub fn quote_critical_topics() -> [B256; 14] {
     [
         TOPIC_LANE_ADDED,
         TOPIC_LANE_REMOVED,
         TOPIC_LANE_UPDATED,
+        TOPIC_LANE_CORRUPTED_SET,
         TOPIC_SLIPPAGE_K_SET,
+        TOPIC_BLOCK_DELAY_SET,
         TOPIC_PARTNER_INFO_SET,
         TOPIC_PARTNER_FEE_SET,
         TOPIC_WHITELIST_SET,
         TOPIC_BLACKLIST_MULTIPLIER_SET,
         TOPIC_DEPOSIT_EXECUTED,
         TOPIC_WITHDRAWAL_EXECUTED,
+        TOPIC_SYNC,
+        TOPIC_UPGRADED,
     ]
 }
 
@@ -136,7 +148,21 @@ pub fn decode_core_event(log: &ContractLog) -> Result<Option<QuoteEvent>, LogDec
         let event = decode::<core::SlippageKSet>(log, LogDecodeError::InvalidDataLength)?;
         Some(QuoteEvent::SlippageKSet {
             asset: event.asset,
-            new_k: U256::from(event.newK),
+            new_k: event.newK,
+        })
+    } else if topic0 == TOPIC_LANE_CORRUPTED_SET {
+        expect_shape(log, 2, 2)?;
+        let event = decode::<core::LaneCorruptedSet>(log, LogDecodeError::InvalidBoolean)?;
+        Some(QuoteEvent::LaneCorruptedSet {
+            asset: event.asset,
+            corrupted: event.newCorrupted,
+        })
+    } else if topic0 == TOPIC_BLOCK_DELAY_SET {
+        expect_shape(log, 2, 2)?;
+        let event = decode::<core::BlockDelaySet>(log, LogDecodeError::InvalidDataLength)?;
+        Some(QuoteEvent::BlockDelaySet {
+            asset: event.asset,
+            block_delay: event.newBlockDelay,
         })
     } else if topic0 == TOPIC_PARTNER_INFO_SET {
         expect_shape(log, 4, 1)?;
@@ -144,7 +170,7 @@ pub fn decode_core_event(log: &ContractLog) -> Result<Option<QuoteEvent>, LogDec
         Some(QuoteEvent::PartnerInfoSet {
             router: event.router,
             asset: event.asset,
-            fee: U256::from(event.fee),
+            fee: event.fee,
         })
     } else if topic0 == TOPIC_PARTNER_FEE_SET {
         expect_shape(log, 3, 1)?;
@@ -152,7 +178,7 @@ pub fn decode_core_event(log: &ContractLog) -> Result<Option<QuoteEvent>, LogDec
         Some(QuoteEvent::PartnerFeeSet {
             router: event.router,
             asset: event.asset,
-            fee: U256::from(event.fee),
+            fee: event.fee,
         })
     } else if topic0 == TOPIC_WHITELIST_SET {
         expect_shape(log, 2, 1)?;
@@ -173,14 +199,28 @@ pub fn decode_core_event(log: &ContractLog) -> Result<Option<QuoteEvent>, LogDec
         let event = decode::<core::DepositExecuted>(log, LogDecodeError::InvalidDataLength)?;
         Some(QuoteEvent::DepositExecuted {
             asset: event.asset,
-            principal: U256::from(event.principalAmount),
+            principal: event.principalAmount,
         })
     } else if topic0 == TOPIC_WITHDRAWAL_EXECUTED {
         expect_shape(log, 4, 4)?;
         let event = decode::<core::WithdrawalExecuted>(log, LogDecodeError::InvalidDataLength)?;
         Some(QuoteEvent::WithdrawalExecuted {
             asset: event.asset,
-            principal: U256::from(event.principalAmount),
+            principal: event.principalAmount,
+        })
+    } else if topic0 == TOPIC_SYNC {
+        expect_shape(log, 2, 2)?;
+        let event = decode::<core::Sync>(log, LogDecodeError::InvalidDataLength)?;
+        Some(QuoteEvent::Sync {
+            asset: event.lane,
+            asset_reserve: event.assetReserve,
+            cash_reserve: event.cashReserve,
+        })
+    } else if topic0 == TOPIC_UPGRADED {
+        expect_shape(log, 2, 0)?;
+        let event = decode::<core::Upgraded>(log, LogDecodeError::InvalidAddress)?;
+        Some(QuoteEvent::ImplementationUpgraded {
+            implementation: event.implementation,
         })
     } else {
         None
@@ -242,7 +282,7 @@ mod tests {
             decode_core_event(&log).unwrap(),
             Some(QuoteEvent::WithdrawalExecuted {
                 asset,
-                principal: U256::from(7_u8),
+                principal: 7,
             })
         );
     }

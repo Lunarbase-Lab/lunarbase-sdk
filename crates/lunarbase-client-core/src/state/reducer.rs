@@ -5,8 +5,12 @@ use crate::model::{
     SCHEMA_VERSION,
 };
 use lunarbase_math::arithmetic::BPS;
+use lunarbase_math::slot0::{
+    apply_lane_corrupted_set, set_lane_slot0_block_delay, set_lane_slot0_exists,
+    set_lane_slot0_slippage_k_bps,
+};
 use lunarbase_math::state::QuoteState;
-use lunarbase_math::types::Address;
+use lunarbase_math::types::{Address, U256};
 use thiserror::Error;
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -33,6 +37,9 @@ pub enum ReducerError {
     /// An event value cannot fit the corresponding compact contract field.
     #[error("event value does not fit the contract storage width")]
     InvalidWidth,
+    /// The ERC-1967 implementation changed and must be revalidated before quoting.
+    #[error("Core implementation upgraded")]
+    ImplementationUpgraded,
 }
 
 #[derive(Clone, Debug)]
@@ -173,7 +180,8 @@ impl QuoteReducer {
     fn apply_event(&mut self, event: QuoteEvent) -> Result<(), ReducerError> {
         match event {
             QuoteEvent::LaneAdded { asset } => {
-                self.state.lanes.entry(asset).or_default().set_exists(true);
+                let lane = self.state.lanes.entry(asset).or_default();
+                lane.slot0 = set_lane_slot0_exists(lane.slot0, true);
             }
             QuoteEvent::LaneRemoved { asset } => {
                 self.state.lanes.remove(&asset);
@@ -182,22 +190,29 @@ impl QuoteReducer {
                 self.state.lanes.entry(asset).or_default().slot0 = slot0;
             }
             QuoteEvent::SlippageKSet { asset, new_k } => {
-                if new_k > BPS {
+                if U256::from(new_k) > BPS {
                     return Err(ReducerError::InvalidSlippageK);
                 }
-                let value = u32::try_from(new_k).map_err(|_| ReducerError::InvalidWidth)?;
-                self.state.lanes.entry(asset).or_default().slippage_k_bps = value;
+                let lane = self.state.lanes.entry(asset).or_default();
+                lane.slot0 = set_lane_slot0_slippage_k_bps(lane.slot0, new_k);
+            }
+            QuoteEvent::LaneCorruptedSet { asset, corrupted } => {
+                let lane = self.state.lanes.entry(asset).or_default();
+                lane.slot0 = apply_lane_corrupted_set(lane.slot0, corrupted);
+            }
+            QuoteEvent::BlockDelaySet { asset, block_delay } => {
+                let lane = self.state.lanes.entry(asset).or_default();
+                lane.slot0 = set_lane_slot0_block_delay(lane.slot0, block_delay);
             }
             QuoteEvent::PartnerInfoSet { router, asset, fee }
             | QuoteEvent::PartnerFeeSet { router, asset, fee } => {
                 if router != self.configured_router {
                     return Ok(());
                 }
-                if fee > BPS {
+                if U256::from(fee) > BPS {
                     return Err(ReducerError::InvalidWidth);
                 }
-                let value = u32::try_from(fee).map_err(|_| ReducerError::InvalidWidth)?;
-                self.state.fee_profile.partner_fee_bps.insert(asset, value);
+                self.state.fee_profile.partner_fee_bps.insert(asset, fee);
             }
             QuoteEvent::WhitelistSet {
                 router,
@@ -211,8 +226,6 @@ impl QuoteReducer {
                 self.state.fee_profile.blacklist_fee_multiplier = multiplier;
             }
             QuoteEvent::DepositExecuted { asset, principal } => {
-                let principal =
-                    u128::try_from(principal).map_err(|_| ReducerError::InvalidWidth)?;
                 let lane = self.state.lanes.entry(asset).or_default();
                 let next = lane
                     .total_principal_amount
@@ -221,8 +234,6 @@ impl QuoteReducer {
                 lane.total_principal_amount = next;
             }
             QuoteEvent::WithdrawalExecuted { asset, principal } => {
-                let principal =
-                    u128::try_from(principal).map_err(|_| ReducerError::InvalidWidth)?;
                 let lane = self.state.lanes.entry(asset).or_default();
                 let next = lane
                     .total_principal_amount
@@ -230,16 +241,30 @@ impl QuoteReducer {
                     .ok_or(ReducerError::Arithmetic)?;
                 lane.total_principal_amount = next;
             }
+            QuoteEvent::Sync {
+                asset,
+                asset_reserve,
+                cash_reserve,
+            } => {
+                self.state.cash_reserve = cash_reserve;
+                if asset != self.state.cash {
+                    self.state.lanes.entry(asset).or_default().asset_reserve = asset_reserve;
+                }
+            }
+            QuoteEvent::ImplementationUpgraded { .. } => {
+                return Err(ReducerError::ImplementationUpgraded);
+            }
         }
         Ok(())
     }
 
-    /// Builds a durable v3 checkpoint. This clone is outside the quote path.
+    /// Builds a durable v4 checkpoint. This clone is outside the quote path.
     pub fn checkpoint(&self, deployment: &DeploymentConfig) -> Option<Checkpoint> {
         Some(Checkpoint {
             schema_version: SCHEMA_VERSION,
             math_compatibility_version: MATH_COMPATIBILITY_VERSION.into(),
-            expected_runtime_code_hash: deployment.expected_runtime_code_hash,
+            expected_implementation: deployment.expected_implementation,
+            expected_implementation_code_hash: deployment.expected_implementation_code_hash,
             chain_id: deployment.chain_id,
             core: deployment.core,
             router: deployment.router,
@@ -253,4 +278,89 @@ fn is_realtime_progression(previous: &ChainCursor, next: &ChainCursor) -> bool {
     previous.commitment == crate::model::Commitment::Realtime
         && next.commitment == crate::model::Commitment::Realtime
         && next.source_sequence > previous.source_sequence
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{QuoteReducer, ReducerError};
+    use crate::model::QuoteEvent;
+    use lunarbase_math::slot0::{
+        LaneSlot0, decode_lane_slot0, encode_lane_slot0, lane_slot0_block_delay,
+        lane_slot0_slippage_k_bps,
+    };
+    use lunarbase_math::state::{LaneState, QuoteState};
+    use lunarbase_math::types::Address;
+
+    fn address(value: u8) -> Address {
+        Address::new([value; 20])
+    }
+
+    #[test]
+    fn applies_packed_controls_and_reserve_sync_without_replacing_the_lane() {
+        let cash = address(1);
+        let asset = address(2);
+        let slot0 = encode_lane_slot0(&LaneSlot0 {
+            price: 100,
+            exists: true,
+            ..Default::default()
+        })
+        .unwrap();
+        let mut state = QuoteState {
+            cash,
+            ..Default::default()
+        };
+        state.lanes.insert(asset, LaneState::new(slot0, 0, 500));
+        let mut reducer = QuoteReducer::new(state, address(3));
+
+        reducer
+            .apply_event(QuoteEvent::SlippageKSet {
+                asset,
+                new_k: 1_000,
+            })
+            .unwrap();
+        reducer
+            .apply_event(QuoteEvent::BlockDelaySet {
+                asset,
+                block_delay: 7,
+            })
+            .unwrap();
+        reducer
+            .apply_event(QuoteEvent::Sync {
+                asset,
+                asset_reserve: 11,
+                cash_reserve: 12,
+            })
+            .unwrap();
+
+        let lane = &reducer.state().lanes[&asset];
+        assert_eq!(lane_slot0_slippage_k_bps(lane.slot0), 1_000);
+        assert_eq!(lane_slot0_block_delay(lane.slot0), 7);
+        assert_eq!(lane.asset_reserve, 11);
+        assert_eq!(lane.total_principal_amount, 500);
+        assert_eq!(reducer.state().cash_reserve, 12);
+
+        reducer
+            .apply_event(QuoteEvent::LaneCorruptedSet {
+                asset,
+                corrupted: true,
+            })
+            .unwrap();
+        let fields = decode_lane_slot0(reducer.state().lanes[&asset].slot0);
+        assert_eq!(fields.price, 0);
+        assert!(fields.paused);
+        assert!(fields.corrupted);
+    }
+
+    #[test]
+    fn implementation_upgrade_fails_closed_before_mutating_state() {
+        let mut reducer = QuoteReducer::new(QuoteState::default(), address(3));
+        assert_eq!(
+            reducer.apply_event(QuoteEvent::ImplementationUpgraded {
+                implementation: address(4),
+            }),
+            Err(ReducerError::ImplementationUpgraded)
+        );
+        assert_eq!(reducer.state().cash_reserve, 0);
+        assert!(reducer.state().lanes.is_empty());
+    }
 }

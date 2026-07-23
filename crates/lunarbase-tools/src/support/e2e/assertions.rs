@@ -108,7 +108,7 @@ pub(super) async fn fetch_quote(url: &str) -> Result<Value, E2eError> {
 pub(super) async fn assert_checkpoint(redis_url: &str) -> Result<(), E2eError> {
     let url = redis_url.to_owned();
     let key = format!(
-        "lunarbase:v3:8453:{}:{}",
+        "lunarbase:v4:8453:{}:{}",
         CORE.parse::<Address>()
             .map_err(|error| E2eError::Scenario(error.to_string()))?,
         ROUTER

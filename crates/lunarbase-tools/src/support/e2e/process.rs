@@ -1,5 +1,5 @@
 use crate::support::e2e::environment::{E2eError, MockChain};
-use crate::support::e2e::{ASSET, CORE, EMPTY_CODE_HASH, ROUTER};
+use crate::support::e2e::{ASSET, CORE, EMPTY_CODE_HASH, IMPLEMENTATION, ROUTER};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -22,7 +22,8 @@ core = "{CORE}"
 router = "{ROUTER}"
 expect_whitelisted = true
 deployment_block = 0
-expected_runtime_code_hash = "{EMPTY_CODE_HASH}"
+expected_implementation = "{IMPLEMENTATION}"
+expected_implementation_code_hash = "{EMPTY_CODE_HASH}"
 http_rpc_url = "{}"
 realtime_url = "{}"
 bind = "127.0.0.1:{port}"

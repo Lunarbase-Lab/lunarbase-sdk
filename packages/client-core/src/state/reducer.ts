@@ -1,8 +1,11 @@
 /** Ordered single-writer quote-state reducer. */
 import {
   BPS,
-  LaneFlags,
+  applyLaneCorruptedSet,
   quote as computeQuote,
+  setLaneSlot0BlockDelay,
+  setLaneSlot0Exists,
+  setLaneSlot0SlippageKBps,
   type Address,
   type LaneState,
   type QuoteOutcome,
@@ -26,16 +29,15 @@ const key = (address: Address): Address => address.toLowerCase() as Address;
 function emptyLane(): LaneState {
   return {
     slot0: 0n,
+    assetReserve: 0n,
     totalPrincipalAmount: 0n,
-    slippageKBps: 0,
-    blockDelay: 0,
-    flags: 0,
   };
 }
 
 function cloneState(state: QuoteState): QuoteState {
   return {
     cash: state.cash,
+    cashReserve: state.cashReserve,
     lanes: new Map([...state.lanes].map(([asset, lane]) => [key(asset), { ...lane }])),
     feeProfile: {
       whitelisted: state.feeProfile.whitelisted,
@@ -156,13 +158,14 @@ export class QuoteReducer {
     return requests.map((request) => computeQuote(request, cursor.executionBlockNumber, this.state));
   }
 
-  /** Creates a deep-cloned v3 restart checkpoint outside the quote path. */
+  /** Creates a deep-cloned v4 restart checkpoint outside the quote path. */
   checkpoint(config: DeploymentConfig): Checkpoint | undefined {
     if (!this.cursorValue) return undefined;
     return {
       schemaVersion: SCHEMA_VERSION,
       mathCompatibilityVersion: MATH_COMPATIBILITY_VERSION,
-      expectedRuntimeCodeHash: config.expectedRuntimeCodeHash,
+      expectedImplementation: config.expectedImplementation,
+      expectedImplementationCodeHash: config.expectedImplementationCodeHash,
       chainId: config.chainId,
       core: config.core,
       router: config.router,
@@ -190,9 +193,15 @@ export class QuoteReducer {
   }
 
   private validateEvent(event: QuoteEvent): void {
-    if (event.kind === "SlippageKSet" && (event.newK < 0n || event.newK > BPS))
+    if (
+      event.kind === "SlippageKSet" &&
+      (!Number.isSafeInteger(event.newK) || event.newK < 0 || BigInt(event.newK) > BPS)
+    )
       throw new ReducerError("INVALID_SLIPPAGE_K", "slippage K exceeds BPS");
-    if ((event.kind === "PartnerInfoSet" || event.kind === "PartnerFeeSet") && (event.fee < 0n || event.fee > BPS))
+    if (
+      (event.kind === "PartnerInfoSet" || event.kind === "PartnerFeeSet") &&
+      (!Number.isSafeInteger(event.fee) || event.fee < 0 || BigInt(event.fee) > BPS)
+    )
       throw new ReducerError("INVALID_WIDTH", "partner fee exceeds BPS");
     if (
       (event.kind === "DepositExecuted" || event.kind === "WithdrawalExecuted") &&
@@ -205,7 +214,7 @@ export class QuoteReducer {
     switch (event.kind) {
       case "LaneAdded": {
         const lane = this.lane(event.asset);
-        lane.flags |= LaneFlags.Exists;
+        lane.slot0 = setLaneSlot0Exists(lane.slot0, true);
         this.setLane(event.asset, lane);
         break;
       }
@@ -220,14 +229,26 @@ export class QuoteReducer {
       }
       case "SlippageKSet": {
         const lane = this.lane(event.asset);
-        lane.slippageKBps = Number(event.newK);
+        lane.slot0 = setLaneSlot0SlippageKBps(lane.slot0, event.newK);
+        this.setLane(event.asset, lane);
+        break;
+      }
+      case "LaneCorruptedSet": {
+        const lane = this.lane(event.asset);
+        lane.slot0 = applyLaneCorruptedSet(lane.slot0, event.corrupted);
+        this.setLane(event.asset, lane);
+        break;
+      }
+      case "BlockDelaySet": {
+        const lane = this.lane(event.asset);
+        lane.slot0 = setLaneSlot0BlockDelay(lane.slot0, event.blockDelay);
         this.setLane(event.asset, lane);
         break;
       }
       case "PartnerInfoSet":
       case "PartnerFeeSet":
         if (key(event.router) === key(this.configuredRouter))
-          (this.state.feeProfile.partnerFeeBps as Map<Address, number>).set(key(event.asset), Number(event.fee));
+          (this.state.feeProfile.partnerFeeBps as Map<Address, number>).set(key(event.asset), event.fee);
         break;
       case "WhitelistSet":
         if (key(event.router) === key(this.configuredRouter)) this.state.feeProfile.whitelisted = event.whitelisted;
@@ -250,6 +271,17 @@ export class QuoteReducer {
         this.setLane(event.asset, lane);
         break;
       }
+      case "Sync": {
+        this.state.cashReserve = event.cashReserve;
+        if (key(event.asset) !== key(this.state.cash)) {
+          const lane = this.lane(event.asset);
+          lane.assetReserve = event.assetReserve;
+          this.setLane(event.asset, lane);
+        }
+        break;
+      }
+      case "ImplementationUpgraded":
+        throw new ReducerError("IMPLEMENTATION_UPGRADED", "Core implementation upgraded");
     }
   }
 

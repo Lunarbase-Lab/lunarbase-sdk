@@ -37,6 +37,7 @@ type Vector = {
   blacklistFeeMultiplier: string;
   whitelisted: boolean;
   partnerFeeBps: string;
+  outputReserve?: string;
   laneIn: LaneVector | null;
   laneOut: LaneVector | null;
 };
@@ -58,11 +59,11 @@ type AbiLane = {
 const abiLane =
   "(bool present,uint112 price,uint32 askFeeBps,uint32 bidFeeBps,uint40 latestUpdateBlock,bool exists,bool paused,uint8 blockDelay,uint32 slippageKBps,uint128 principal)";
 const abiFuzzVector = AbiParameters.from(
-  `(address cash,address assetIn,address assetOut,bool exactIn,uint256 amount,uint40 executionBlockNumber,uint256 blacklistFeeMultiplier,bool whitelisted,uint32 partnerFeeBps,${abiLane} laneIn,${abiLane} laneOut) vector`,
+  `(address cash,address assetIn,address assetOut,bool exactIn,uint256 amount,uint40 executionBlockNumber,uint256 blacklistFeeMultiplier,bool whitelisted,uint32 partnerFeeBps,uint128 outputReserve,${abiLane} laneIn,${abiLane} laneOut) vector`,
 );
 
 const value = (input: string): bigint => BigInt(input);
-const lane = (input: LaneVector): LaneState =>
+const lane = (input: LaneVector, assetReserve: bigint): LaneState =>
   createLaneState(
     encodeLaneSlot0({
       price: value(input.price),
@@ -71,20 +72,25 @@ const lane = (input: LaneVector): LaneState =>
       pricePushThreshold: 0n,
       thresholdEnabled: false,
       latestUpdateBlock: value(input.latestUpdateBlock),
+      exists: input.exists,
+      paused: input.paused,
+      blockDelay: Number(input.blockDelay),
+      slippageKBps: Number(input.slippageKBps),
+      corrupted: false,
       reservedHighBits: 0n,
     }),
+    assetReserve,
     value(input.principal),
-    Number(input.slippageKBps),
-    Number(input.blockDelay),
-    input.exists,
-    input.paused,
   );
 function build(vector: Vector): { state: QuoteState; request: QuoteRequest; executionBlockNumber: bigint } {
   const cash = parseAddress(vector.cash);
   const assetIn = parseAddress(vector.assetIn);
   const assetOut = parseAddress(vector.assetOut);
+  const maxReserve = (1n << 128n) - 1n;
+  const outputReserve = vector.outputReserve === undefined ? maxReserve : value(vector.outputReserve);
   const state = {
     cash,
+    cashReserve: assetOut.toLowerCase() === cash.toLowerCase() ? outputReserve : maxReserve,
     lanes: new Map<Address, LaneState>(),
     feeProfile: {
       whitelisted: vector.whitelisted,
@@ -99,7 +105,8 @@ function build(vector: Vector): { state: QuoteState; request: QuoteRequest; exec
     [assetOut, vector.laneOut],
   ] as const)
     if (input) {
-      state.lanes.set(asset, lane(input));
+      const assetReserve = asset.toLowerCase() === assetOut.toLowerCase() ? outputReserve : maxReserve;
+      state.lanes.set(asset, lane(input, assetReserve));
     }
   return {
     state,
@@ -141,6 +148,7 @@ function decodeFuzzVector(encoded: Hex.Hex): Vector {
     blacklistFeeMultiplier: String(input.blacklistFeeMultiplier),
     whitelisted: input.whitelisted,
     partnerFeeBps: String(input.partnerFeeBps),
+    outputReserve: String(input.outputReserve),
     laneIn: decodeLane(input.laneIn),
     laneOut: decodeLane(input.laneOut),
   };

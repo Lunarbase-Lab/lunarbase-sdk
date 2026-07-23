@@ -1,6 +1,13 @@
 import { assertU256, type Address } from "./constants.js";
 import { checkedAdd, checkedSub } from "./arithmetic.js";
-import { laneSlot0AskFeeBps, laneSlot0BidFeeBps, laneSlot0LatestUpdateBlock, laneSlot0Price } from "./slot0.js";
+import {
+  laneSlot0AskFeeBps,
+  laneSlot0BidFeeBps,
+  laneSlot0BlockDelay,
+  laneSlot0LatestUpdateBlock,
+  laneSlot0Price,
+  laneSlot0SlippageKBps,
+} from "./slot0.js";
 import {
   calculateFeeBpsForRouter,
   quoteLaneExactIn,
@@ -29,7 +36,7 @@ function laneOrReason(state: QuoteState, asset: Address, executionBlockNumber: b
   const lane = state.lanes.get(asset.toLowerCase() as Address);
   if (!lane || !laneExists(lane)) return { kind: "MissingLane", asset };
   if (lanePaused(lane)) return { kind: "PausedLane", asset };
-  const readyAt = checkedAdd(laneSlot0LatestUpdateBlock(lane.slot0), BigInt(lane.blockDelay));
+  const readyAt = checkedAdd(laneSlot0LatestUpdateBlock(lane.slot0), BigInt(laneSlot0BlockDelay(lane.slot0)));
   if (executionBlockNumber < readyAt) return { kind: "DelayedLane", asset };
   if (laneSlot0Price(lane.slot0) === 0n) return { kind: "ZeroPrice", asset };
   return lane;
@@ -67,6 +74,15 @@ function assembleQuote(
     amountIn = checkedAdd(anchor, totalSpread);
     amountOut = request.amount;
   }
+  const outputReserve =
+    request.assetOut.toLowerCase() === state.cash.toLowerCase()
+      ? state.cashReserve
+      : state.lanes.get(request.assetOut.toLowerCase() as Address)?.assetReserve;
+  if (outputReserve === undefined)
+    return { kind: "Unavailable", reason: { kind: "MissingLane", asset: request.assetOut } };
+  const insufficient = amountOut > outputReserve || (request.mode === "ExactIn" && fee > outputReserve - amountOut);
+  if (insufficient)
+    return { kind: "Unavailable", reason: { kind: "InsufficientOutputReserve", asset: request.assetOut } };
   const [partner, treasury] = splitFee(anchor, fee, partnerFee(state, feeAsset));
   return {
     kind: "Available",
@@ -102,7 +118,7 @@ function directQuote(
     : request.mode === "ExactIn"
       ? anchor
       : request.amount;
-  const slippage = quoteLaneSlippageBps(swapCash, principal, BigInt(lane.slippageKBps));
+  const slippage = quoteLaneSlippageBps(swapCash, principal, BigInt(laneSlot0SlippageKBps(lane.slot0)));
   const [fee, slippageAmount] = laneSpread(anchor, feeBps, slippage, request.mode === "ExactIn");
   return assembleQuote(state, request, feeAsset, anchor, fee, slippageAmount);
 }
@@ -130,9 +146,9 @@ function routeQuote(
     return { kind: "Unavailable", reason: { kind: "ZeroPrincipal", asset: request.assetOut } };
   const weightedK = quoteLaneWeightedSlippageKBps(
     firstPrincipal,
-    BigInt(inputLane.slippageKBps),
+    BigInt(laneSlot0SlippageKBps(inputLane.slot0)),
     secondPrincipal,
-    BigInt(outputLane.slippageKBps),
+    BigInt(laneSlot0SlippageKBps(outputLane.slot0)),
   );
   const slippage = quoteLaneSlippageBps(intermediateCash, checkedAdd(firstPrincipal, secondPrincipal), weightedK);
   const whitelisted = state.feeProfile.whitelisted;

@@ -2,7 +2,10 @@ import { connectBase } from "@lunarbase/client-base";
 import {
   JsonRpcHttpClient,
   MATH_COMPATIBILITY_VERSION,
+  Commitment,
+  ERC1967_IMPLEMENTATION_SLOT,
   Network,
+  decodeImplementation,
   quoteCriticalTopics,
   type ClientConnectConfig,
   type ConnectedQuoteClient,
@@ -15,10 +18,13 @@ import { buildQuoteRequests } from "./quotes.js";
 async function main(): Promise<void> {
   const environment = readEnvironment();
   const rpc = new JsonRpcHttpClient(environment.rpcUrl);
-  const [chainId, runtimeCodeHash] = await Promise.all([
-    rpc.chainId(),
-    rpc.runtimeCodeHash(environment.core, "latest"),
-  ]);
+  const chainId = await rpc.chainId();
+  const head = await rpc.blockCursor("latest", chainId, Commitment.Canonical);
+  if (head.blockHash === undefined) throw new Error("latest block has no hash");
+  const implementation = decodeImplementation(
+    await rpc.getStorageAtHash(environment.core, ERC1967_IMPLEMENTATION_SLOT, head.blockHash),
+  );
+  const implementationCodeHash = await rpc.runtimeCodeHashAtHash(implementation, head.blockHash);
   const deployment = {
     network: Network.Base,
     chainId,
@@ -26,7 +32,8 @@ async function main(): Promise<void> {
     router: environment.router,
     expectWhitelisted: environment.expectWhitelisted,
     deploymentBlock: environment.deploymentBlock,
-    expectedRuntimeCodeHash: runtimeCodeHash,
+    expectedImplementation: implementation,
+    expectedImplementationCodeHash: implementationCodeHash,
     contractCompatibilityVersion: MATH_COMPATIBILITY_VERSION,
     httpRpcUrl: environment.rpcUrl,
     realtimeSource: environment.wsUrl,

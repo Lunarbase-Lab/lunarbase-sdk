@@ -26,12 +26,12 @@ export class QuoteIndexer {
   /** Builds a ready indexer from one coherent source snapshot. */
   static fromSnapshot(snapshot: BootstrapSnapshot, deployment: DeploymentConfig): QuoteIndexer {
     const indexer = new QuoteIndexer(new QuoteReducer(snapshot.state, deployment.router), deployment);
-    indexer.verifyCodeHash(snapshot.runtimeCodeHash);
+    indexer.verifyImplementation(snapshot);
     indexer.reducer.bootstrap(snapshot.cursor);
     return indexer;
   }
 
-  /** Restores an already validated v3 checkpoint. */
+  /** Restores an already validated v4 checkpoint. */
   static fromCheckpoint(checkpoint: Checkpoint, deployment: DeploymentConfig): QuoteIndexer {
     return new QuoteIndexer(QuoteReducer.fromCheckpoint(checkpoint), deployment);
   }
@@ -94,7 +94,7 @@ export class QuoteIndexer {
       outcome: this.reducer.quote(request),
       cursor,
       executionBlockNumber: cursor.executionBlockNumber,
-      contractCodeHash: this.deployment.expectedRuntimeCodeHash,
+      implementationCodeHash: this.deployment.expectedImplementationCodeHash,
       mathCompatibilityVersion: MATH_COMPATIBILITY_VERSION,
     };
   }
@@ -107,7 +107,7 @@ export class QuoteIndexer {
       cursor,
       executionBlockNumber: cursor.executionBlockNumber,
       results: this.reducer.quoteMany(requests),
-      contractCodeHash: this.deployment.expectedRuntimeCodeHash,
+      implementationCodeHash: this.deployment.expectedImplementationCodeHash,
       mathCompatibilityVersion: MATH_COMPATIBILITY_VERSION,
     };
   }
@@ -119,7 +119,7 @@ export class QuoteIndexer {
       ready: this.reducer.isReady(),
       cursor,
       commitment: cursor?.commitment ?? Commitment.Realtime,
-      contractCodeHash: this.deployment.expectedRuntimeCodeHash,
+      implementationCodeHash: this.deployment.expectedImplementationCodeHash,
       mathCompatibilityVersion: MATH_COMPATIBILITY_VERSION,
     };
   }
@@ -140,9 +140,12 @@ export class QuoteIndexer {
     return cursor;
   }
 
-  private verifyCodeHash(actual: BootstrapSnapshot["runtimeCodeHash"]): void {
-    if (actual !== this.deployment.expectedRuntimeCodeHash)
-      throw new IndexerError("CODE_HASH_MISMATCH", "snapshot code hash mismatch");
+  private verifyImplementation(snapshot: BootstrapSnapshot): void {
+    if (
+      snapshot.implementation.toLowerCase() !== this.deployment.expectedImplementation.toLowerCase() ||
+      snapshot.implementationCodeHash.toLowerCase() !== this.deployment.expectedImplementationCodeHash.toLowerCase()
+    )
+      throw new IndexerError("CODE_HASH_MISMATCH", "snapshot implementation identity mismatch");
   }
 }
 

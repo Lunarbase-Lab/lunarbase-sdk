@@ -16,6 +16,7 @@ import { Commitment as CommitmentValue } from "../model.js";
 import { compareCursor } from "../source.js";
 import { decodeCoreEvent, laneDiscoveryTopics } from "../protocol/abi.js";
 import { CORE_ABI, CORE_EVENTS, CORE_EVENT_TOPICS } from "../protocol/core.js";
+import { decodeImplementation, ERC1967_IMPLEMENTATION_SLOT } from "../protocol/proxy.js";
 
 const BLOCK_TAGS = new Set<BlockTag>(["earliest", "finalized", "latest", "pending", "safe"]);
 const LOG_RANGE_CHUNK_BLOCKS = 10_000n;
@@ -89,6 +90,19 @@ export class JsonRpcHttpClient {
           blockHash,
         }),
       )) ?? "0x"
+    );
+  }
+
+  /** Reads one storage word against an exact EIP-1898 block hash. */
+  async getStorageAtHash(address: Address, slot: Hex.Hex, blockHash: Hex.Hex): Promise<Hex.Hex> {
+    return (
+      (await this.remote(() =>
+        this.client.getStorageAt({
+          address,
+          slot,
+          blockHash,
+        }),
+      )) ?? Hex.padLeft("0x", 32)
     );
   }
 
@@ -212,17 +226,31 @@ export class RpcHttpBackend {
     return this.rpc.getLogs(request, this.chainId, CommitmentValue.Canonical);
   }
 
-  /** Confirms that a checkpoint block hash remains canonical. */
+  /** Confirms checkpoint canonicality and the ERC-1967 implementation identity. */
   async validateCheckpoint(checkpoint: Checkpoint): Promise<boolean> {
     const canonical = await this.rpc.blockCursor(
       Hex.fromNumber(checkpoint.cursor.blockNumber),
       this.chainId,
       CommitmentValue.Canonical,
     );
+    if (
+      canonical.blockHash === undefined ||
+      checkpoint.cursor.blockHash === undefined ||
+      canonical.blockHash.toLowerCase() !== checkpoint.cursor.blockHash.toLowerCase()
+    )
+      return false;
+    let implementation: Address;
+    try {
+      implementation = decodeImplementation(
+        await this.rpc.getStorageAtHash(checkpoint.core, ERC1967_IMPLEMENTATION_SLOT, canonical.blockHash),
+      );
+    } catch {
+      return false;
+    }
+    if (implementation.toLowerCase() !== checkpoint.expectedImplementation.toLowerCase()) return false;
     return (
-      canonical.blockHash !== undefined &&
-      checkpoint.cursor.blockHash !== undefined &&
-      canonical.blockHash === checkpoint.cursor.blockHash
+      (await this.rpc.runtimeCodeHashAtHash(implementation, canonical.blockHash)).toLowerCase() ===
+      checkpoint.expectedImplementationCodeHash.toLowerCase()
     );
   }
 }
@@ -248,9 +276,14 @@ export class RpcSnapshotProvider {
       throw new RpcError("INVALID", "snapshot block precedes deployment block");
 
     const pinnedBlock = Hex.fromNumber(cursor.blockNumber);
-    const code = await this.rpc.getCodeAtHash(config.core, cursor.blockHash);
-    const runtimeCodeHash = Hash.keccak256(code);
-    if (runtimeCodeHash !== config.expectedRuntimeCodeHash) throw new RpcError("INVALID", "runtime code hash mismatch");
+    const implementation = decodeImplementation(
+      await this.rpc.getStorageAtHash(config.core, ERC1967_IMPLEMENTATION_SLOT, cursor.blockHash),
+    );
+    if (implementation.toLowerCase() !== config.expectedImplementation.toLowerCase())
+      throw new RpcError("INVALID", "Core implementation address mismatch");
+    const implementationCodeHash = Hash.keccak256(await this.rpc.getCodeAtHash(implementation, cursor.blockHash));
+    if (implementationCodeHash.toLowerCase() !== config.expectedImplementationCodeHash.toLowerCase())
+      throw new RpcError("INVALID", "implementation code hash mismatch");
 
     const assets = await this.resolveLaneAssets(config, cursor.blockNumber);
     const at = { blockHash: cursor.blockHash } as const;
@@ -286,6 +319,7 @@ export class RpcSnapshotProvider {
     const partnerFeeBps = new Map<Address, number>();
     const state: QuoteState = {
       cash,
+      cashReserve: 0n,
       lanes,
       feeProfile: {
         whitelisted,
@@ -313,14 +347,19 @@ export class RpcSnapshotProvider {
               ...at,
             }),
           ]);
-          return [
-            asset,
-            createLaneState(Hex.toBigInt(lane[0]), reserves[4], lane[4], lane[3], lane[1], lane[2]),
-          ] as const;
+          return [asset, createLaneState(Hex.toBigInt(lane), reserves[0], reserves[4])] as const;
         }),
       );
       for (const [asset, lane] of entries) lanes.set(asset, lane);
     }
+    const cashReserves = await this.rpc.client.readContract({
+      abi: CORE_ABI,
+      address: config.core,
+      functionName: "reserves",
+      args: [cash],
+      ...at,
+    });
+    state.cashReserve = cashReserves[0];
     if (config.explicitLaneAssets.length > 0 && [...lanes.values()].some((lane) => !laneExists(lane)))
       throw new RpcError("INVALID", "explicit lane asset is not active at the snapshot block");
 
@@ -344,7 +383,7 @@ export class RpcSnapshotProvider {
     const verified = await this.rpc.blockCursor(pinnedBlock, config.chainId, commitment);
     if (verified.blockHash?.toLowerCase() !== cursor.blockHash.toLowerCase())
       throw new RpcError("TRANSPORT", "snapshot block changed while state was reconstructed");
-    return { state, cursor, runtimeCodeHash };
+    return { state, cursor, implementation, implementationCodeHash };
   }
 
   private async resolveLaneAssets(config: DeploymentConfig, snapshotBlock: bigint): Promise<Address[]> {

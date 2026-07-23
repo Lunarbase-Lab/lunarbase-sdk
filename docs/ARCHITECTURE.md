@@ -87,13 +87,11 @@ Each lane is one compact object:
 
 ```text
 slot0: U256
+assetReserve: u128
 totalPrincipalAmount: u128
-slippageK: u32
-blockDelay: u8
-flags: exists | paused
 ```
 
-Principal is colocated with `slot0`, avoiding a second map lookup. The runtime
+Reserve and principal are colocated with packed `slot0`, avoiding secondary map lookups. The runtime
 contains exactly one configured router and one `FeeProfile`. Whitelisted
 routers use multiplier `1`; non-whitelisted deployments track the global
 blacklist multiplier. Partner fee events are retained only for the configured
@@ -133,7 +131,7 @@ The runtime fails closed on:
 - stream gap, disconnect, or queue overflow;
 - cursor regression or block-hash discontinuity;
 - reorg or removed log;
-- incompatible Core runtime code hash;
+- incompatible ERC-1967 implementation address or implementation code hash;
 - malformed quote-critical event;
 - arithmetic/state invariant failure.
 
@@ -161,7 +159,7 @@ coordination.
 The indexer stores one no-TTL key per chain/Core/router/schema:
 
 ```text
-lunarbase:v3:{chainId}:{core}:{router}
+lunarbase:v4:{chainId}:{core}:{router}
 ```
 
 Only `GET` and atomic `SET` are used. A missing, malformed, incompatible,

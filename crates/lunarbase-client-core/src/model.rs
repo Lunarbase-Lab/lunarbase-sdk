@@ -6,11 +6,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Current durable checkpoint schema.
-pub const SCHEMA_VERSION: u16 = 3;
+pub const SCHEMA_VERSION: u16 = 4;
 
 /// Pinned Solidity implementation used by both pure math packages.
 pub const MATH_COMPATIBILITY_VERSION: &str =
-    "lunarbase-contracts@24db47b866e8150a0d91cffd80efe49df85179b5:math-v1";
+    "lunarbase-contracts@cfeb6b86f425c5207f3cf80c8b40adde07d6a60b:math-v2";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 /// Supported chain families.
@@ -228,8 +228,10 @@ pub struct DeploymentConfig {
     pub expect_whitelisted: bool,
     /// First block that can contain relevant deployment logs.
     pub deployment_block: u64,
-    /// Pinned hash of the Core runtime bytecode used for compatibility validation.
-    pub expected_runtime_code_hash: B256,
+    /// Pinned ERC-1967 implementation behind the Core proxy.
+    pub expected_implementation: Address,
+    /// Pinned runtime bytecode hash of `expected_implementation`.
+    pub expected_implementation_code_hash: B256,
     /// Human-readable contracts revision expected by the client package.
     pub contract_compatibility_version: String,
     /// HTTP JSON-RPC endpoint used only for bootstrap and canonical recovery.
@@ -251,9 +253,14 @@ impl DeploymentConfig {
                 "Core and configured router must be non-zero".into(),
             ));
         }
-        if self.expected_runtime_code_hash == B256::ZERO {
+        if self.expected_implementation == Address::ZERO {
             return Err(SourceError::Unavailable(
-                "expected Core runtime code hash must be non-zero".into(),
+                "expected Core implementation must be non-zero".into(),
+            ));
+        }
+        if self.expected_implementation_code_hash == B256::ZERO {
+            return Err(SourceError::Unavailable(
+                "expected Core implementation code hash must be non-zero".into(),
             ));
         }
         if self.contract_compatibility_version != MATH_COMPATIBILITY_VERSION {
@@ -290,8 +297,10 @@ pub struct Checkpoint {
     pub schema_version: u16,
     /// Exact pure-math compatibility identifier used to create the state.
     pub math_compatibility_version: String,
-    /// Core runtime bytecode hash verified before this checkpoint was created.
-    pub expected_runtime_code_hash: B256,
+    /// ERC-1967 implementation verified before this checkpoint was created.
+    pub expected_implementation: Address,
+    /// Runtime bytecode hash of the verified implementation.
+    pub expected_implementation_code_hash: B256,
     /// EIP-155 chain identifier that owns the checkpoint.
     pub chain_id: u64,
     /// Core contract whose state is serialized.
@@ -310,7 +319,9 @@ impl Checkpoint {
     pub fn is_compatible(&self, deployment: &DeploymentConfig) -> bool {
         self.schema_version == SCHEMA_VERSION
             && self.math_compatibility_version == MATH_COMPATIBILITY_VERSION
-            && self.expected_runtime_code_hash == deployment.expected_runtime_code_hash
+            && self.expected_implementation == deployment.expected_implementation
+            && self.expected_implementation_code_hash
+                == deployment.expected_implementation_code_hash
             && self.chain_id == deployment.chain_id
             && self.core == deployment.core
             && self.router == deployment.router
@@ -341,8 +352,22 @@ pub enum QuoteEvent {
     SlippageKSet {
         /// ERC-20 asset identifying the lane.
         asset: Address,
-        /// New basis-point coefficient before storage-width validation.
-        new_k: U256,
+        /// New basis-point coefficient decoded at its Solidity width.
+        new_k: u32,
+    },
+    /// Changes the owner-controlled corruption latch and pause state.
+    LaneCorruptedSet {
+        /// ERC-20 asset identifying the lane.
+        asset: Address,
+        /// New corruption state emitted by Core.
+        corrupted: bool,
+    },
+    /// Changes the execution-block delay after a lane update.
+    BlockDelaySet {
+        /// ERC-20 asset identifying the lane.
+        asset: Address,
+        /// New delay decoded at its Solidity width.
+        block_delay: u8,
     },
     /// Initializes or replaces configured-router partner information.
     PartnerInfoSet {
@@ -351,7 +376,7 @@ pub enum QuoteEvent {
         /// Asset lane to which the partner fee applies.
         asset: Address,
         /// New partner fee in contract basis-point units.
-        fee: U256,
+        fee: u32,
     },
     /// Changes the configured router's fee for one asset.
     PartnerFeeSet {
@@ -360,7 +385,7 @@ pub enum QuoteEvent {
         /// Asset lane to which the partner fee applies.
         asset: Address,
         /// New partner fee in contract basis-point units.
-        fee: U256,
+        fee: u32,
     },
     /// Changes whether a router bypasses the global blacklist multiplier.
     WhitelistSet {
@@ -379,13 +404,27 @@ pub enum QuoteEvent {
         /// ERC-20 asset identifying the lane.
         asset: Address,
         /// Principal added to the lane.
-        principal: U256,
+        principal: u128,
     },
     /// Decreases quoteable principal for an asset lane.
     WithdrawalExecuted {
         /// ERC-20 asset identifying the lane.
         asset: Address,
         /// Principal removed from the lane.
-        principal: U256,
+        principal: u128,
+    },
+    /// Replaces free reserves after a settlement or liquidity transition.
+    Sync {
+        /// Lane whose asset reserve changed; may equal the configured cash asset.
+        asset: Address,
+        /// Free reserve of `asset` after liabilities.
+        asset_reserve: u128,
+        /// Free cash reserve after liabilities.
+        cash_reserve: u128,
+    },
+    /// Signals a proxy implementation change that requires compatibility recovery.
+    ImplementationUpgraded {
+        /// Newly installed implementation reported by ERC-1967.
+        implementation: Address,
     },
 }

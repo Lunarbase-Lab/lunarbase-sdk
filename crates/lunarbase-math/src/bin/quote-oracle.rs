@@ -29,6 +29,8 @@ struct Vector {
     blacklist_fee_multiplier: String,
     whitelisted: bool,
     partner_fee_bps: String,
+    #[serde(default = "max_reserve_string")]
+    output_reserve: String,
     lane_in: Option<LaneVector>,
     lane_out: Option<LaneVector>,
 }
@@ -61,12 +63,22 @@ fn address_word(value: Address) -> U256 {
     U256::from_be_bytes::<32>(bytes)
 }
 
+fn max_reserve_string() -> String {
+    u128::MAX.to_string()
+}
+
 fn build_state(vector: &Vector) -> (QuoteState, QuoteRequest, u64) {
     let cash = address(&vector.cash);
     let asset_in = address(&vector.asset_in);
     let asset_out = address(&vector.asset_out);
+    let output_reserve: u128 = vector.output_reserve.parse().unwrap();
     let mut state = QuoteState {
         cash,
+        cash_reserve: if asset_out == cash {
+            output_reserve
+        } else {
+            u128::MAX
+        },
         ..Default::default()
     };
     state.fee_profile.whitelisted = vector.whitelisted;
@@ -87,6 +99,10 @@ fn build_state(vector: &Vector) -> (QuoteState, QuoteRequest, u64) {
             ask_fee_bps: lane.ask_fee_bps.parse().unwrap(),
             bid_fee_bps: lane.bid_fee_bps.parse().unwrap(),
             latest_update_block: lane.latest_update_block.parse().unwrap(),
+            exists: lane.exists,
+            paused: lane.paused,
+            block_delay: lane.block_delay.parse().unwrap(),
+            slippage_k_bps: lane.slippage_k_bps.parse().unwrap(),
             ..Default::default()
         })
         .expect("fixture lane fits slot0");
@@ -94,11 +110,12 @@ fn build_state(vector: &Vector) -> (QuoteState, QuoteRequest, u64) {
             asset,
             LaneState::new(
                 slot0,
+                if asset == asset_out {
+                    output_reserve
+                } else {
+                    u128::MAX
+                },
                 lane.principal.parse().unwrap(),
-                lane.slippage_k_bps.parse().unwrap(),
-                lane.block_delay.parse().unwrap(),
-                lane.exists,
-                lane.paused,
             ),
         );
     }

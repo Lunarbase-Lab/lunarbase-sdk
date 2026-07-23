@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   WAD,
   createLaneState,
+  decodeLaneSlot0,
   encodeLaneSlot0,
   type Address,
   type QuoteRequest,
@@ -15,6 +16,8 @@ import {
   MATH_COMPATIBILITY_VERSION,
   Network,
   QuoteIndexer,
+  QuoteReducer,
+  SCHEMA_VERSION,
   type BackfillRequest,
   type BootstrapSnapshot,
   type ChainCursor,
@@ -112,11 +115,11 @@ test("quote and quoteMany use one in-memory snapshot without source I/O", async 
   await client.shutdown();
 });
 
-test("v3 checkpoint is deployment-bound and reusable", async () => {
+test("v4 checkpoint is deployment-bound and reusable", async () => {
   const source = new MockSource();
   const first = await ConnectedQuoteClient.connect(connectConfig(), source);
   const checkpoint = first.checkpoint();
-  assert.equal(checkpoint?.schemaVersion, 3);
+  assert.equal(checkpoint?.schemaVersion, SCHEMA_VERSION);
   assert.equal(checkpoint?.router, ROUTER);
   await first.shutdown();
 
@@ -177,6 +180,43 @@ test("same-height handoff with another block hash fails closed", () => {
   assert.equal(indexer.health().ready, false);
 });
 
+test("reducer applies packed controls and Sync, then rejects Upgraded", () => {
+  const reducer = new QuoteReducer(snapshot().state, ROUTER);
+  reducer.bootstrap(cursor());
+  const eventCursor = (logIndex: bigint): ChainCursor => ({
+    ...cursor(),
+    transactionIndex: 0n,
+    logIndex,
+  });
+  reducer.apply(eventCursor(0n), { kind: "Sync", asset: ASSET, assetReserve: 11n, cashReserve: 12n });
+  reducer.apply(eventCursor(1n), { kind: "SlippageKSet", asset: ASSET, newK: 1_000 });
+  reducer.apply(eventCursor(2n), { kind: "BlockDelaySet", asset: ASSET, blockDelay: 7 });
+  reducer.apply(eventCursor(3n), { kind: "LaneCorruptedSet", asset: ASSET, corrupted: true });
+
+  const checkpoint = reducer.checkpoint(deployment());
+  assert.ok(checkpoint);
+  const lane = checkpoint?.state.lanes.get(ASSET);
+  assert.ok(lane);
+  assert.equal(checkpoint?.state.cashReserve, 12n);
+  assert.equal(lane?.assetReserve, 11n);
+  assert.equal(lane?.totalPrincipalAmount, 0n);
+  if (!lane) return;
+  const fields = decodeLaneSlot0(lane.slot0);
+  assert.equal(fields.price, 0n);
+  assert.equal(fields.slippageKBps, 1_000);
+  assert.equal(fields.blockDelay, 7);
+  assert.equal(fields.paused, true);
+  assert.equal(fields.corrupted, true);
+  assert.throws(
+    () =>
+      reducer.apply(eventCursor(4n), {
+        kind: "ImplementationUpgraded",
+        implementation: "0x9999999999999999999999999999999999999999",
+      }),
+    { code: "IMPLEMENTATION_UPGRADED" },
+  );
+});
+
 function connectConfig(): ClientConnectConfig {
   return {
     deployment: deployment(),
@@ -195,7 +235,8 @@ function deployment(): DeploymentConfig {
     router: ROUTER,
     expectWhitelisted: true,
     deploymentBlock: 1n,
-    expectedRuntimeCodeHash: HASH,
+    expectedImplementation: "0x8888888888888888888888888888888888888888",
+    expectedImplementationCodeHash: HASH,
     contractCompatibilityVersion: MATH_COMPATIBILITY_VERSION,
     httpRpcUrl: "http://unused",
     realtimeSource: "ws://unused",
@@ -206,6 +247,7 @@ function deployment(): DeploymentConfig {
 function snapshot(): BootstrapSnapshot {
   const state: QuoteState = {
     cash: CASH,
+    cashReserve: 1_000_000n,
     lanes: new Map([
       [
         ASSET,
@@ -217,13 +259,15 @@ function snapshot(): BootstrapSnapshot {
             pricePushThreshold: 0n,
             thresholdEnabled: false,
             latestUpdateBlock: 0n,
+            exists: true,
+            paused: false,
+            blockDelay: 0,
+            slippageKBps: 0,
+            corrupted: false,
             reservedHighBits: 0n,
           }),
           1_000_000n,
-          0,
-          0,
-          true,
-          false,
+          0n,
         ),
       ],
     ]),
@@ -233,7 +277,12 @@ function snapshot(): BootstrapSnapshot {
       partnerFeeBps: new Map(),
     },
   };
-  return { state, cursor: cursor(), runtimeCodeHash: HASH };
+  return {
+    state,
+    cursor: cursor(),
+    implementation: "0x8888888888888888888888888888888888888888",
+    implementationCodeHash: HASH,
+  };
 }
 
 function cursor(): ChainCursor {

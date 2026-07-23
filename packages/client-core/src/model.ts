@@ -3,9 +3,9 @@ import type { Address, LaneState, QuoteOutcome, QuoteRequest, QuoteState, Word }
 import type { Hex } from "ox/Hex";
 
 /** Current JSON checkpoint schema. */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 /** Solidity revision whose arithmetic behavior this SDK implements. */
-export const MATH_COMPATIBILITY_VERSION = "lunarbase-contracts@24db47b866e8150a0d91cffd80efe49df85179b5:math-v1";
+export const MATH_COMPATIBILITY_VERSION = "lunarbase-contracts@cfeb6b86f425c5207f3cf80c8b40adde07d6a60b:math-v2";
 
 /** Supported source families. */
 export enum Network {
@@ -111,8 +111,10 @@ export interface DeploymentConfig {
   expectWhitelisted: boolean;
   /** First block that can contain deployment lane events. */
   deploymentBlock: bigint;
-  /** Pinned hash of the expected Core runtime bytecode. */
-  expectedRuntimeCodeHash: Hex;
+  /** Pinned ERC-1967 implementation behind the Core proxy. */
+  expectedImplementation: Address;
+  /** Pinned runtime bytecode hash of `expectedImplementation`. */
+  expectedImplementationCodeHash: Hex;
   /** Human-readable contracts revision expected by the client. */
   contractCompatibilityVersion: string;
   /** HTTP JSON-RPC endpoint used only for bootstrap and recovery. */
@@ -129,8 +131,10 @@ export interface BootstrapSnapshot {
   state: QuoteState;
   /** Canonical cursor identifying the block used by every state read. */
   cursor: ChainCursor;
-  /** Keccak-256 hash of Core runtime bytecode at the snapshot block. */
-  runtimeCodeHash: Hex;
+  /** ERC-1967 implementation active at the snapshot block. */
+  implementation: Address;
+  /** Keccak-256 runtime bytecode hash of `implementation`. */
+  implementationCodeHash: Hex;
 }
 
 /** Versioned restart state bound to one deployment and configured router. */
@@ -139,8 +143,10 @@ export interface Checkpoint {
   schemaVersion: number;
   /** Exact pure-math compatibility identifier used to create the state. */
   mathCompatibilityVersion: string;
-  /** Core runtime bytecode hash verified for the serialized state. */
-  expectedRuntimeCodeHash: Hex;
+  /** ERC-1967 implementation verified for the serialized state. */
+  expectedImplementation: Address;
+  /** Runtime bytecode hash of the verified implementation. */
+  expectedImplementationCodeHash: Hex;
   /** EIP-155 chain identifier that owns the checkpoint. */
   chainId: bigint;
   /** Core contract whose state is serialized. */
@@ -180,13 +186,17 @@ export type QuoteEvent =
   | { kind: "LaneAdded"; asset: Address }
   | { kind: "LaneRemoved"; asset: Address }
   | { kind: "LaneUpdated"; asset: Address; slot0: Word }
-  | { kind: "SlippageKSet"; asset: Address; newK: bigint }
-  | { kind: "PartnerInfoSet"; router: Address; asset: Address; fee: bigint }
-  | { kind: "PartnerFeeSet"; router: Address; asset: Address; fee: bigint }
+  | { kind: "SlippageKSet"; asset: Address; newK: number }
+  | { kind: "LaneCorruptedSet"; asset: Address; corrupted: boolean }
+  | { kind: "BlockDelaySet"; asset: Address; blockDelay: number }
+  | { kind: "PartnerInfoSet"; router: Address; asset: Address; fee: number }
+  | { kind: "PartnerFeeSet"; router: Address; asset: Address; fee: number }
   | { kind: "WhitelistSet"; router: Address; whitelisted: boolean }
   | { kind: "BlacklistFeeMultiplierSet"; multiplier: bigint }
   | { kind: "DepositExecuted"; asset: Address; principal: bigint }
-  | { kind: "WithdrawalExecuted"; asset: Address; principal: bigint };
+  | { kind: "WithdrawalExecuted"; asset: Address; principal: bigint }
+  | { kind: "Sync"; asset: Address; assetReserve: bigint; cashReserve: bigint }
+  | { kind: "ImplementationUpgraded"; implementation: Address };
 
 /** Strict ABI validation error. */
 export class LogDecodeError extends Error {
@@ -210,7 +220,8 @@ export class ReducerError extends Error {
       | "REMOVED_LOG"
       | "INVALID_SLIPPAGE_K"
       | "INVALID_WIDTH"
-      | "ARITHMETIC",
+      | "ARITHMETIC"
+      | "IMPLEMENTATION_UPGRADED",
     message: string,
   ) {
     super(message);
@@ -240,8 +251,8 @@ export interface ClientQuote {
   cursor: ChainCursor;
   /** EVM-visible block supplied to time-dependent quote math. */
   executionBlockNumber: bigint;
-  /** Core runtime bytecode hash associated with the state snapshot. */
-  contractCodeHash: Hex;
+  /** Core implementation bytecode hash associated with the state snapshot. */
+  implementationCodeHash: Hex;
   /** Pinned Solidity math revision implemented by this client. */
   mathCompatibilityVersion: string;
 }
@@ -254,8 +265,8 @@ export interface ClientBatchQuote {
   executionBlockNumber: bigint;
   /** Results evaluated synchronously without yielding between items. */
   results: readonly QuoteOutcome[];
-  /** Core runtime bytecode hash associated with the shared snapshot. */
-  contractCodeHash: Hex;
+  /** Core implementation bytecode hash associated with the shared snapshot. */
+  implementationCodeHash: Hex;
   /** Pinned Solidity math revision implemented by this client. */
   mathCompatibilityVersion: string;
 }
@@ -268,8 +279,8 @@ export interface IndexerHealth {
   cursor?: ChainCursor;
   /** Confidence level of the latest accepted state. */
   commitment: Commitment;
-  /** Expected Core runtime bytecode hash for this deployment. */
-  contractCodeHash: string;
+  /** Expected Core implementation bytecode hash for this deployment. */
+  implementationCodeHash: string;
   /** Pinned Solidity arithmetic revision implemented by this client. */
   mathCompatibilityVersion: string;
 }

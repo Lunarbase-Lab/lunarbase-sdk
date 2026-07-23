@@ -255,7 +255,8 @@ fn config() -> ClientConnectConfig {
             router: ROUTER,
             expect_whitelisted: true,
             deployment_block: 1,
-            expected_runtime_code_hash: B256::new([7; 32]),
+            expected_implementation: Address::new([8; 20]),
+            expected_implementation_code_hash: B256::new([7; 32]),
             contract_compatibility_version: MATH_COMPATIBILITY_VERSION.into(),
             http_rpc_url: "http://unused".into(),
             realtime_source: "ws://unused".into(),
@@ -274,6 +275,7 @@ fn config() -> ClientConnectConfig {
 fn snapshot(block: u64) -> BootstrapSnapshot {
     let slot0 = encode_lane_slot0(&LaneSlot0 {
         price: u128::try_from(WAD).unwrap(),
+        exists: true,
         ..Default::default()
     })
     .unwrap();
@@ -283,11 +285,12 @@ fn snapshot(block: u64) -> BootstrapSnapshot {
     };
     state
         .lanes
-        .insert(ASSET, LaneState::new(slot0, 1_000_000, 0, 0, true, false));
+        .insert(ASSET, LaneState::new(slot0, 1_000_000, 0));
     BootstrapSnapshot {
         state,
         cursor: cursor(block, Commitment::Finalized),
-        runtime_code_hash: B256::new([7; 32]),
+        implementation: Address::new([8; 20]),
+        implementation_code_hash: B256::new([7; 32]),
     }
 }
 

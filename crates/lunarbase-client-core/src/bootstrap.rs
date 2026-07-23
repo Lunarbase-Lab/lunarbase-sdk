@@ -2,7 +2,7 @@
 
 use crate::model::ChainCursor;
 use lunarbase_math::state::QuoteState;
-use lunarbase_math::types::B256;
+use lunarbase_math::types::{Address, B256};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Fully materialized state and cursor read at one coherent block tag.
@@ -11,6 +11,8 @@ pub struct BootstrapSnapshot {
     pub state: QuoteState,
     /// Canonical cursor identifying the block from which `state` was read.
     pub cursor: ChainCursor,
-    /// Keccak-256 hash of the Core runtime bytecode at the snapshot block.
-    pub runtime_code_hash: B256,
+    /// ERC-1967 implementation active at the snapshot block.
+    pub implementation: Address,
+    /// Keccak-256 runtime bytecode hash of `implementation`.
+    pub implementation_code_hash: B256,
 }

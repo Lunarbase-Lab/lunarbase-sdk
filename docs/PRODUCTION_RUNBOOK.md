@@ -7,15 +7,15 @@ Every replica subscribes to realtime data, maintains its own in-memory state,
 and serves quotes. Put two or more ready replicas behind a load balancer; there
 is no leader, writer lease, fencing token, or standby role.
 
-Redis is optional restart acceleration. One schema-v3 key stores the complete
+Redis is optional restart acceleration. One schema-v4 key stores the complete
 checkpoint without TTL. Redis outages and concurrent best-effort writes do not
 affect a running replica or its readiness.
 
 ## Start
 
-1. Copy `config/production.base.toml` and replace all deployment identity,
-   code-hash, RPC, and realtime values.
-2. Verify that the configured Core code hash belongs to the pinned contract
+1. Copy `config/production.base.toml` and replace all deployment, implementation,
+   RPC, and realtime values.
+2. Verify that the configured ERC-1967 implementation and its code hash belong to the pinned contract
    compatibility revision.
 3. Configure Redis only if faster restarts are useful.
 4. Start at least two replicas and route traffic only to ready instances.
@@ -49,7 +49,7 @@ Each affected replica deliberately returns `503` while canonical recovery
 runs. Other healthy replicas continue serving. If one replica cannot recover:
 
 1. Remove that replica from traffic.
-2. Verify RPC block/log availability and Core code hash.
+2. Verify RPC block/log availability and the Core implementation identity.
 3. Inspect gap, reconnect, queue, and recovery metrics.
 4. Restart the replica. An invalid or forked Redis checkpoint is ignored
    automatically, so deleting Redis data is normally unnecessary.

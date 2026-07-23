@@ -5,6 +5,7 @@ use crate::model::{
     BackfillRequest, Commitment, ContractFilter, DeploymentConfig, QuoteEvent, SourceError,
 };
 use crate::protocol::abi::{core, decode_core_event, lane_discovery_topics};
+use crate::protocol::proxy::{ERC1967_IMPLEMENTATION_SLOT, decode_implementation};
 use crate::transport::rpc::client::RpcHttpClient;
 use alloy_primitives::Bytes;
 use alloy_sol_types::SolCall;
@@ -70,13 +71,25 @@ impl RpcSnapshotProvider {
             ));
         }
         let block_tag = format!("0x{:x}", cursor.block_number);
-        let runtime_code_hash = self
+        let implementation_word = self
             .rpc
-            .runtime_code_hash_at_hash(config.core, block_hash)
+            .get_storage_at_hash(config.core, ERC1967_IMPLEMENTATION_SLOT, block_hash)
             .await?;
-        if runtime_code_hash != config.expected_runtime_code_hash {
+        let implementation = decode_implementation(implementation_word).ok_or_else(|| {
+            SourceError::Unavailable("Core has an invalid ERC-1967 implementation slot".into())
+        })?;
+        if implementation != config.expected_implementation {
             return Err(SourceError::Unavailable(
-                "runtime code hash does not match deployment config".into(),
+                "Core implementation does not match deployment config".into(),
+            ));
+        }
+        let implementation_code_hash = self
+            .rpc
+            .runtime_code_hash_at_hash(implementation, block_hash)
+            .await?;
+        if implementation_code_hash != config.expected_implementation_code_hash {
+            return Err(SourceError::Unavailable(
+                "implementation code hash does not match deployment config".into(),
             ));
         }
 
@@ -123,12 +136,9 @@ impl RpcSnapshotProvider {
                 Ok::<_, SourceError>((
                     asset,
                     LaneState::new(
-                        U256::from_be_slice(lane.slot0.as_slice()),
+                        U256::from_be_slice(lane.as_slice()),
+                        reserves.assetReserve,
                         reserves.totalPrincipalAmount,
-                        lane.slippageKBps,
-                        lane.blockDelay,
-                        lane.exists,
-                        lane.paused,
                     ),
                 ))
             })
@@ -143,6 +153,10 @@ impl RpcSnapshotProvider {
             ));
         }
         state.lanes.extend(lane_states);
+        state.cash_reserve = self
+            .read(config.core, core::reservesCall { asset: cash }, block_hash)
+            .await?
+            .assetReserve;
 
         let mut partner_assets = assets.clone();
         if !partner_assets.contains(&cash) {
@@ -181,7 +195,8 @@ impl RpcSnapshotProvider {
         Ok(BootstrapSnapshot {
             state,
             cursor,
-            runtime_code_hash,
+            implementation,
+            implementation_code_hash,
         })
     }
 

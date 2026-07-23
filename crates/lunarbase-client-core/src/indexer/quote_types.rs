@@ -13,8 +13,8 @@ pub struct ClientQuote {
     pub cursor: ChainCursor,
     /// EVM-visible block number supplied to time-dependent quote math.
     pub execution_block_number: u64,
-    /// Core runtime bytecode hash associated with the state snapshot.
-    pub contract_code_hash: B256,
+    /// Core implementation bytecode hash associated with the state snapshot.
+    pub implementation_code_hash: B256,
     /// Pinned Solidity math revision implemented by this client.
     pub math_compatibility_version: String,
 }
@@ -28,8 +28,8 @@ pub struct ClientBatchQuote {
     pub cursor: ChainCursor,
     /// Single EVM-visible block number shared by every result.
     pub execution_block_number: u64,
-    /// Core runtime bytecode hash associated with the shared snapshot.
-    pub contract_code_hash: B256,
+    /// Core implementation bytecode hash associated with the shared snapshot.
+    pub implementation_code_hash: B256,
     /// Pinned Solidity math revision implemented by this client.
     pub math_compatibility_version: String,
 }
@@ -45,8 +45,8 @@ pub struct IndexerHealth {
     pub cursor: Option<ChainCursor>,
     /// EVM-visible block used by the latest state, absent before bootstrap.
     pub execution_block_number: Option<u64>,
-    /// Expected Core runtime bytecode hash for this deployment.
-    pub code_hash: B256,
+    /// Expected Core implementation bytecode hash for this deployment.
+    pub implementation_code_hash: B256,
     /// Pinned Solidity math revision implemented by this runtime.
     pub math_compatibility_version: String,
 }

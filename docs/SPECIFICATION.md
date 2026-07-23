@@ -3,7 +3,7 @@
 Status: handoff specification for `lunarbase-math`.
 
 Contract reference: `lunarbase-contracts` branch `dev`, commit
-[`24db47b866e8150a0d91cffd80efe49df85179b5`](https://github.com/Lunarbase-Lab/lunarbase-contracts/tree/24db47b866e8150a0d91cffd80efe49df85179b5), inspected on 2026-07-15.
+[`cfeb6b86f425c5207f3cf80c8b40adde07d6a60b`](https://github.com/Lunarbase-Lab/lunarbase-contracts/tree/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b), inspected on 2026-07-23.
 
 This document is deliberately pinned to a commit. A later `dev` revision must not silently change the
 off-chain result. Any contract math or event-schema change requires a new compatibility version and new
@@ -19,7 +19,7 @@ Build one `lunarbase-sdk` repository containing:
 4. A TypeScript client with the same public concepts and behavior.
 5. Network-specific real-time adapters for Base, Monad, and Arbitrum hidden behind one common source
    interface.
-6. Redis-backed checkpoints, recovery, coordination, and bounded update streams managed by the clients.
+6. Bounded client update streams plus optional Redis restart checkpoints owned only by the runnable indexer.
 7. Shared golden vectors and differential tests proving bit-for-bit parity with Solidity.
 
 The pure math packages must have no RPC, Redis, filesystem, clock, worker, or network dependency. The client
@@ -34,42 +34,42 @@ management, and custody are out of scope unless added as a separate package late
 
 | Area | Canonical source |
 | --- | --- |
-| Core composition and immutable CASH | [`Core.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/Core.sol#L13-L20), [`Cash.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/modules/Cash.sol#L7-L16) |
-| Operator update path and packed write | [`Lanes.update_0x01e44214`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/modules/Lanes.sol#L34-L81) |
-| Public `quoteExactIn` and `quoteExactOut` sentinels | [`Lanes.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/modules/Lanes.sol#L89-L102) |
-| Swap settlement and emitted quote fields | [`Lanes.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/modules/Lanes.sol#L104-L136), [`LanesLib._settleSwap`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/libraries/LanesLib.sol#L233-L251) |
-| Lanes ABI and events | [`ILanes.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/interfaces/ILanes.sol#L8-L67) |
+| Core composition and immutable CASH | [`Core.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/Core.sol#L13-L20), [`Cash.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/modules/Cash.sol#L7-L16) |
+| Operator update path and packed write | [`Lanes.update_0x01e44214`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/modules/Lanes.sol#L34-L81) |
+| Public `quoteExactIn` and `quoteExactOut` sentinels | [`Lanes.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/modules/Lanes.sol#L89-L102) |
+| Swap settlement and emitted quote fields | [`Lanes.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/modules/Lanes.sol#L104-L136), [`LanesLib._settleSwap`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/libraries/LanesLib.sol#L233-L251) |
+| Lanes ABI and events | [`ILanes.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/interfaces/ILanes.sol#L8-L67) |
 
 ### Quote engine and pure helpers
 
 | Area | Canonical source |
 | --- | --- |
-| `Lane`, `QuoteResult`, quote input structs | [`LanesLib.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/libraries/LanesLib.sol#L26-L95) |
-| Quote entry points and result assembly | [`quoteExactIn`, `quoteExactOut`, `_quote`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/libraries/LanesLib.sol#L125-L193) |
-| Direct-vs-route selection and lane validation | [`_getQuote`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/libraries/LanesLib.sol#L253-L302) |
-| Direct quote | [`_getDirectQuote`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/libraries/LanesLib.sol#L304-L330) |
-| Routed quote through CASH | [`_getRouteQuote`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/libraries/LanesLib.sol#L332-L365) |
-| Fee selection, spread, principal valuation | [`LanesLib.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/libraries/LanesLib.sol#L367-L475) |
-| Lane validity predicate | [`_validate`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/libraries/LanesLib.sol#L478-L480) |
-| Anchor, fee, slippage, weighted slippage helpers | [`LaneHelpers.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/utils/LaneHelpers.sol#L7-L105) |
-| Partner fee adjustment | [`PartnerHelpers.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/utils/PartnerHelpers.sol#L18-L34) |
-| Partner/treasury split | [`SwapHelpers.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/utils/SwapHelpers.sol#L7-L23) |
-| `BPS`, `WAD`-adjacent constants | [`Constants.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/utils/Constants.sol#L4-L10) |
+| `Lane`, `QuoteResult`, quote input structs | [`LanesLib.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/libraries/LanesLib.sol#L26-L95) |
+| Quote entry points and result assembly | [`quoteExactIn`, `quoteExactOut`, `_quote`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/libraries/LanesLib.sol#L125-L193) |
+| Direct-vs-route selection and lane validation | [`_getQuote`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/libraries/LanesLib.sol#L253-L302) |
+| Direct quote | [`_getDirectQuote`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/libraries/LanesLib.sol#L304-L330) |
+| Routed quote through CASH | [`_getRouteQuote`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/libraries/LanesLib.sol#L332-L365) |
+| Fee selection, spread, principal valuation | [`LanesLib.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/libraries/LanesLib.sol#L367-L475) |
+| Lane validity predicate | [`_validate`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/libraries/LanesLib.sol#L478-L480) |
+| Anchor, fee, slippage, weighted slippage helpers | [`LaneHelpers.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/utils/LaneHelpers.sol#L7-L105) |
+| Partner fee adjustment | [`PartnerHelpers.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/utils/PartnerHelpers.sol#L18-L34) |
+| Partner/treasury split | [`SwapHelpers.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/utils/SwapHelpers.sol#L7-L23) |
+| `BPS`, `WAD`-adjacent constants | [`Constants.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/utils/Constants.sol#L4-L10) |
 | Exact Solady multiplication/division semantics | [`FixedPointMathLib.fullMulDiv`](https://github.com/Vectorized/solady/blob/v0.1.26/src/utils/FixedPointMathLib.sol#L452-L560), [`mulDiv`](https://github.com/Vectorized/solady/blob/v0.1.26/src/utils/FixedPointMathLib.sol#L593-L606) |
 
 ### State required by quotes
 
 | Area | Canonical source |
 | --- | --- |
-| Packed lane word layout | [`LaneSlot0.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/types/LaneSlot0.sol#L7-L60) |
-| ERC-7201 lanes state | [`LanesLib.State`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/libraries/LanesLib.sol#L48-L62) |
-| Partner state and quote getters | [`PartnersLib.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/libraries/PartnersLib.sol#L9-L41), [`partnerFeeBps`, `feeBpsForRouter`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/libraries/PartnersLib.sol#L128-L138) |
-| Partner events/getters | [`IPartners.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/interfaces/IPartners.sol#L6-L43) |
-| Reserve state and `totalPrincipalAmount` | [`ReservesLib.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/libraries/ReservesLib.sol#L8-L38), [`totalPrincipalAmount`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/libraries/ReservesLib.sol#L128-L130) |
-| Reserve public getter | [`IReserves.reserves`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/interfaces/IReserves.sol#L7-L16) |
-| Principal enters active liquidity | [`PositionManagerLib.executeDeposit`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/libraries/PositionManagerLib.sol#L200-L222) |
-| Principal leaves active liquidity | [`PositionManagerLib.executeWithdrawal`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/libraries/PositionManagerLib.sol#L267-L293) |
-| Principal-changing events | [`IPositionManager.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/24db47b866e8150a0d91cffd80efe49df85179b5/src/interfaces/IPositionManager.sol#L44-L69) |
+| Packed lane word layout | [`LaneSlot0.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/types/LaneSlot0.sol#L7-L60) |
+| ERC-7201 lanes state | [`LanesLib.State`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/libraries/LanesLib.sol#L48-L62) |
+| Partner state and quote getters | [`PartnersLib.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/libraries/PartnersLib.sol#L9-L41), [`partnerFeeBps`, `feeBpsForRouter`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/libraries/PartnersLib.sol#L128-L138) |
+| Partner events/getters | [`IPartners.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/interfaces/IPartners.sol#L6-L43) |
+| Reserve state and `totalPrincipalAmount` | [`ReservesLib.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/libraries/ReservesLib.sol#L8-L38), [`totalPrincipalAmount`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/libraries/ReservesLib.sol#L128-L130) |
+| Reserve public getter | [`IReserves.reserves`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/interfaces/IReserves.sol#L7-L16) |
+| Principal enters active liquidity | [`PositionManagerLib.executeDeposit`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/libraries/PositionManagerLib.sol#L200-L222) |
+| Principal leaves active liquidity | [`PositionManagerLib.executeWithdrawal`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/libraries/PositionManagerLib.sol#L267-L293) |
+| Principal-changing events | [`IPositionManager.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/cfeb6b86f425c5207f3cf80c8b40adde07d6a60b/src/interfaces/IPositionManager.sol#L44-L69) |
 
 ## 3. Contract quote model
 
@@ -161,7 +161,12 @@ The lane's first storage word has this exact layout:
 | `[152, 159)` | 7 | `pricePushThreshold` | `uint7` |
 | `[159, 160)` | 1 | `thresholdEnabled` | `bool` |
 | `[160, 200)` | 40 | `latestUpdateBlock` | `uint40` |
-| `[200, 256)` | 56 | unused/preserved | - |
+| `[200, 201)` | 1 | `exists` | `bool` |
+| `[201, 202)` | 1 | `paused` | `bool` |
+| `[202, 210)` | 8 | `blockDelay` | `uint8` |
+| `[210, 242)` | 32 | `slippageKBps` | `uint32` |
+| `[242, 243)` | 1 | `corrupted` | `bool` |
+| `[243, 256)` | 13 | reserved/preserved | - |
 
 Decode a field as:
 
@@ -175,9 +180,11 @@ value = (word >> shift) & ((1 << width) - 1)
 fees = askFeeBps | (bidFeeBps << 20)
 ```
 
-`update_0x01e44214` replaces price, ask fee, bid fee, and `latestUpdateBlock`; it preserves threshold fields
-and unused high bits. It writes `NUMBER & ((1<<40)-1)` into `latestUpdateBlock` and emits the complete updated
-word in `LaneUpdated(asset, slot0)`.
+`update_0x01e44214` replaces price, ask fee, bid fee, and `latestUpdateBlock`; it preserves threshold,
+control, and reserved fields. It writes `NUMBER & ((1<<40)-1)` into `latestUpdateBlock` and emits the complete
+updated word in `LaneUpdated(asset, slot0)`. A strict threshold excess in either price direction zeroes price,
+sets `paused` and `corrupted`, and emits `LaneCorruptedSet`. A corrupted lane ignores later pushes until the
+owner clears its latch.
 
 The off-chain libraries need `decodeLaneSlot0` and `encodeLaneSlot0` utilities plus property tests for every
 field boundary. The event reducer should replace the entire cached `slot0` with the event value, not patch
@@ -195,10 +202,9 @@ executionBlockNumber >= latestUpdateBlock + blockDelay
 
 For a route, both lanes must be valid.
 
-In the pinned production code, `addLane` only sets `exists = true`; no production setter exists for
-`paused`, `blockDelay`, `pricePushThreshold`, or `thresholdEnabled`. Their default values are zero/false,
-but the off-chain model must retain the fields because they are part of the current storage and quote
-predicate.
+`addLane` sets the packed existence bit. `setBlockDelay`, `setSlippageKBps`, and `setLaneCorrupted` mutate
+their packed fields and emit dedicated events. Threshold fields are configured with lane state and preserved
+by price pushes. Off-chain state therefore retains the complete packed word.
 
 `executionBlockNumber` means the number visible to the EVM `NUMBER` opcode, not necessarily the native block
 height exposed by a chain's JSON-RPC block header. This is especially important on Arbitrum. See section 14.
@@ -465,16 +471,16 @@ Arithmetic overflow/division-by-zero is an error/revert equivalent, not an unava
 | --- | --- | --- | --- | --- |
 | CASH | deployment | direct/route selection | `cash()` | immutable |
 | Lane slot0 | asset | price, ask, bid, latest update | `lane(asset)` | `LaneUpdated` |
-| Lane metadata | asset | exists, paused, delay, slippage K | `lane(asset)` | `LaneAdded`, `LaneRemoved`, `SlippageKSet` |
+| Lane controls | asset | exists, paused, delay, slippage K, corruption | packed `lane(asset)` | `LaneAdded`, `LaneRemoved`, `SlippageKSet`, `BlockDelaySet`, `LaneCorruptedSet` |
+| Free output reserve | asset/CASH | settlement availability | `reserves(asset).assetReserve` | `Sync` |
 | Active principal | asset | principal CASH value/slippage | `reserves(asset).totalPrincipalAmount` | `DepositExecuted`, `WithdrawalExecuted` |
 | Whitelist | router | base fee adjustment | `whitelist(router)` | `WhitelistSet` |
 | Blacklist multiplier | deployment | base fee adjustment | `blacklistFeeMultiplier()` | `BlacklistFeeMultiplierSet` |
 | Partner fee | router + feeAsset | fee split | `partners(router, feeAsset).fee` | `PartnerInfoSet`, `PartnerFeeSet` |
 | EVM block context | quote snapshot | lane delay predicate | source-specific | source head |
 
-### State not required for mathematical quote parity
+### State not required for quote parity
 
-- `assetReserve`
 - `treasuryFees`
 - `partnerFees` reserve bucket
 - `escrowedAssets`
@@ -483,9 +489,10 @@ Arithmetic overflow/division-by-zero is an error/revert equivalent, not an unava
 - LP authority indexes
 - operator addresses used to authorize price pushes
 
-Those fields can be added to an optional execution-preflight snapshot. Current on-chain quote functions do
-not check output liquidity. A mathematically available quote can still revert during swap because token
-transfer or reserve synchronization fails. Keep `quote()` and `preflightExecution()` as separate concepts.
+The quote checks the free reserve of `assetOut`. Exact-out requires
+`amountOut <= outputReserve`; exact-in requires `amountOut + feeAmount <= outputReserve`, matching settlement
+where output-denominated fees become liabilities before transfer. It returns the normal unavailable sentinel
+instead of reverting when the reserve is insufficient.
 
 ### Principal lifecycle
 
@@ -512,20 +519,24 @@ parallel.
 | `LaneAdded(asset)` | Set `lane.exists = true`; preserve any previously observed slot0/meta fields. |
 | `LaneRemoved(asset)` | Delete/reset the entire lane, matching Solidity `delete`. |
 | `LaneUpdated(asset, slot0)` | Replace the entire packed word. Cache the update even if the lane does not currently exist. |
-| `SlippageKSet(asset, _, newK)` | Set `lane.slippageKBps = newK`. |
+| `LaneCorruptedSet(asset, _, corrupted)` | Apply the corruption latch, including price-zero/pause semantics. |
+| `SlippageKSet(asset, _, newK)` | Replace the packed slippage-K field. |
+| `BlockDelaySet(asset, _, delay)` | Replace the packed delay field. |
 | `PartnerInfoSet(router, asset, fee, operator)` | Set partner fee; operator is optional non-quote metadata. |
 | `PartnerFeeSet(router, asset, fee)` | Set partner fee. |
 | `WhitelistSet(router, flag)` | Set router whitelist flag. |
 | `BlacklistFeeMultiplierSet(multiplier)` | Replace global multiplier. |
 | `DepositExecuted(_, _, asset, principal)` | Checked add to active principal. |
 | `WithdrawalExecuted(_, _, asset, principal, ...)` | Checked subtract from active principal. |
+| `Sync(asset, assetReserve, cashReserve)` | Replace lane free reserve and the shared CASH free reserve. |
+| `Upgraded(implementation)` | Fail closed and revalidate the ERC-1967 implementation before recovery. |
 | `SwapExecuted(...)` | No quote-state change in the pinned implementation. |
 
 All other current events can be ignored by the quote reducer.
 
-Event-only replay is not a complete genesis mechanism because `paused`, `blockDelay`, and threshold fields
-have no current production mutation events/setters. Every process must start from a block-tagged state
-snapshot and then replay events.
+Event-only replay is not a complete genesis mechanism because the initial packed lane words, reserves, and
+router profile are not fully reconstructable from creation logs. Every process starts from a block-hash
+pinned state snapshot or a validated complete checkpoint and then replays events.
 
 ## 16. Bootstrap, live handoff, and recovery
 
@@ -536,12 +547,12 @@ network family
 chainId
 Core address
 deployment block
-expected runtime code hash
+expected ERC-1967 implementation address and implementation code hash
 contract compatibility version / pinned commit
 HTTP RPC URL
 real-time source configuration
-Redis namespace/configuration
-optional explicit lane assets and eagerly cached routers
+single configured router and expected whitelist profile
+optional explicit lane assets
 ```
 
 Recommended race-free startup:
@@ -550,10 +561,10 @@ Recommended race-free startup:
 2. Select a canonical snapshot block `B` and record its hash.
 3. Discover lane assets from `LaneAdded`/`LaneRemoved` history starting at deployment block, or use an explicit
    configured asset list and verify it against logs.
-4. At block tag `B`, multicall `cash()`, `blacklistFeeMultiplier()`, `lane(asset)`, and `reserves(asset)` for
-   every lane.
-5. Fetch whitelist and partner fee for configured routers, also at `B`. Unknown routers may be loaded lazily,
-   but the lazy request must use a state version compatible with the quote snapshot.
+4. At exact block hash `B`, read the ERC-1967 implementation slot, verify its runtime code hash, then read
+   `cash()`, packed `lane(asset)`, and `reserves(asset)` for every lane.
+5. Fetch whitelist, blacklist multiplier when needed, and partner fees for the single configured router at
+   the same block hash.
 6. Atomically publish the snapshot.
 7. Apply buffered updates strictly after `B` in cursor order.
 8. Persist a canonical checkpoint and start normal operation.
@@ -563,10 +574,9 @@ regression, or block-hash mismatch:
 
 1. Mark state not ready; do not serve a silently stale quote as fresh.
 2. Preserve the last good canonical checkpoint.
-3. Discard the provisional overlay.
-4. Backfill canonical logs from the last good cursor when possible.
-5. If continuity cannot be proven, rebuild from a new block-tagged snapshot.
-6. Resume only after code hash and state invariants pass.
+3. Backfill canonical logs from the last good cursor when possible.
+4. If continuity cannot be proven, rebuild from a new block-hash-pinned snapshot.
+5. Resume only after implementation identity and state invariants pass.
 
 ## 17. Network-independent client model
 
@@ -761,25 +771,23 @@ Arbitrum warning: Solidity/Yul `block.number`/`NUMBER` on Arbitrum represents an
 block number, while the JSON-RPC block number and `ArbSys.arbBlockNumber()` represent the L2 block height.
 See [Arbitrum block numbers and time](https://docs.arbitrum.io/arbitrum-essentials/arbitrum-vs-ethereum/block-numbers-and-time#ethereum-or-parent-chain-block-numbers-within-arbitrum).
 
-Current `blockDelay` is zero and has no setter, so this mismatch does not change current quote availability.
-If nonzero delay is enabled later, `ArbitrumNitroSource` must provide the EVM-visible parent block number from
-the feed/block context, or the contract should migrate the validity rule to timestamps. Do not compare packed
-`latestUpdateBlock` to the Arbitrum L2 height.
+Because `blockDelay` is configurable, `ArbitrumNitroSource` must provide the EVM-visible parent block number
+from the feed/block context. Do not compare packed `latestUpdateBlock` to the Arbitrum L2 height.
 
 ## 21. Redis and process model
 
 Redis is optional restart acceleration owned only by `lunarbase-indexer`.
-Embeddable client packages have no Redis dependency. Use one schema-v3 key:
+Embeddable client packages have no Redis dependency. Use one schema-v4 key:
 
 ```text
-lunarbase:v3:{chainId}:{coreAddress}:{routerAddress}
+lunarbase:v4:{chainId}:{coreAddress}:{routerAddress}
 ```
 
 The value is one versioned JSON DTO containing complete state. U256 values are
 decimal or fixed-width hexadecimal strings, never JSON numbers. Only `GET` and
 an atomic full-value `SET` are required; the key has no TTL.
 
-At startup validate schema/math version, Core code hash, chain/Core/router
+At startup validate schema/math version, Core implementation identity, chain/Core/router
 identity, router profile, and canonical checkpoint block hash. If a checkpoint
 is missing, malformed, incompatible, forked, or cannot be safely recovered,
 discard it and take a full RPC snapshot.
@@ -880,10 +888,8 @@ QuoteRequest {
 
 LaneState {
     slot0: U256,
-    totalPrincipalAmount: u128,
-    slippageK: u32,
-    blockDelay: u8,
-    flags: exists | paused
+    assetReserve: u128,
+    totalPrincipalAmount: u128
 }
 
 FeeProfile {
@@ -954,8 +960,8 @@ state must not be labeled realtime until recovery completes.
 10. Preserve independent ceil terms in weighted route K.
 11. Preserve fee-asset selection before loading partner fee.
 12. Preserve partner split based on anchor, with floor and cap.
-13. Do not add a liquidity check to the pure parity quote.
-14. Include contract commit/code-hash compatibility in every persisted state namespace.
+13. Apply the output-reserve check after amount construction and before partner/treasury splitting.
+14. Include contract commit and ERC-1967 implementation identity in every persisted state namespace.
 
 ## 27. Testing strategy
 
@@ -1011,7 +1017,7 @@ the test generator, because that would only compare two copies of the same off-c
 
 ## 28. Acceptance criteria
 
-Math v1 is complete when:
+Math v2 is complete when:
 
 - all shared vectors pass in Rust, TypeScript, and Solidity reference tests;
 - property/differential tests cover all direct/route modes and overflow outcomes;
@@ -1029,7 +1035,7 @@ Client v1 is complete when:
 - Monad Rust can read a colocated event ring, and TypeScript can consume the local sidecar;
 - Base consumes `pendingLogs + newHeads`;
 - Arbitrum consumes executed local Nitro state fed by the sequencer feed;
-- contract code-hash mismatch fails closed;
+- ERC-1967 implementation address or implementation code-hash mismatch fails closed;
 - memory and queues are bounded/configurable;
 - two replicas can independently remain ready without leader election;
 - Redis loss affects restart speed only;
@@ -1048,7 +1054,7 @@ Client v1 is complete when:
 ### Phase 2: state model and generic RPC source
 
 1. Define normalized cursors, logs, commitments, and reducer.
-2. Add deployment/code-hash validation.
+2. Add deployment/ERC-1967 implementation validation.
 3. Implement block-tagged bootstrap and historical log discovery.
 4. Implement generic WebSocket/RPC fallback.
 5. Add in-memory quote client.
@@ -1071,16 +1077,17 @@ Client v1 is complete when:
 
 1. `latestUpdateBlock` is network-dependent because it stores EVM `NUMBER`. A seconds-based freshness rule
    would be more portable, but this specification mirrors the current contract.
-2. `blockDelay`, `paused`, and threshold fields have no production setters. Indexers still snapshot them.
-3. The contract has no dedicated reserve/principal-change event. Principal is reconstructed from
-   `DepositExecuted` and `WithdrawalExecuted`, which are currently the only production mutations.
-4. A new contract path that mutates `totalPrincipalAmount` without one of those events requires an event and
+2. `Sync` carries free lane/CASH reserves after settlement and liquidity transitions; consumers must process
+   every ordered `Sync`, including both events emitted by a routed swap.
+3. Principal is reconstructed from `DepositExecuted` and `WithdrawalExecuted`, which are currently the only
+   production principal mutations.
+4. A new contract path that mutates reserves or `totalPrincipalAmount` without the corresponding events requires an event and
    reducer update before deployment.
 5. Public quote methods return only one amount and use `msg.sender` as router.
    Each off-chain runtime instance therefore has one configured router/profile;
    callers cannot override it per request.
-6. Current quote math does not verify transferable output liquidity. Keep parity quote and optional execution
-   preflight separate.
+6. Quote parity includes the contract's free output-reserve check; token-specific transfer behavior remains
+   outside pure math.
 7. Base preconfirmed state, Monad proposed state, and Arbitrum unsafe state are not equivalent to finality.
    The normalized commitment and cursor must always accompany a quote.
 8. Redis is optional restart acceleration in `lunarbase-indexer`; it is not

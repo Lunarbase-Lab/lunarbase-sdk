@@ -1,6 +1,6 @@
 {
   "schemaVersion": "1",
-  "mathCompatibilityVersion": "lunarbase-contracts@24db47b866e8150a0d91cffd80efe49df85179b5:math-v1",
+  "mathCompatibilityVersion": "lunarbase-contracts@cfeb6b86f425c5207f3cf80c8b40adde07d6a60b:math-v2",
   "vectors": [
     {
       "name": "direct-cash-to-asset-exact-in",
@@ -326,7 +326,7 @@
         "slippageKBps": "0",
         "principal": "1000000"
       },
-      "expectedError": "Overflow"
+      "expectedPublicAmount": "0"
     }
   ]
 }

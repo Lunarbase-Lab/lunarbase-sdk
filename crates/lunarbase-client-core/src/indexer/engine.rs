@@ -50,7 +50,10 @@ impl QuoteIndexer {
         snapshot: BootstrapSnapshot,
         mut buffered: Vec<ChainUpdate>,
     ) -> Result<(), IndexerError> {
-        if snapshot.runtime_code_hash != self.deployment.expected_runtime_code_hash {
+        if snapshot.implementation != self.deployment.expected_implementation
+            || snapshot.implementation_code_hash
+                != self.deployment.expected_implementation_code_hash
+        {
             return Err(IndexerError::CodeHashMismatch);
         }
         let snapshot_cursor = snapshot.cursor.clone();
@@ -177,7 +180,7 @@ impl QuoteIndexer {
             outcome,
             execution_block_number: cursor.execution_block_number,
             cursor,
-            contract_code_hash: self.deployment.expected_runtime_code_hash,
+            implementation_code_hash: self.deployment.expected_implementation_code_hash,
             math_compatibility_version: MATH_COMPATIBILITY_VERSION.into(),
         })
     }
@@ -204,7 +207,7 @@ impl QuoteIndexer {
             outcomes,
             cursor,
             execution_block_number,
-            contract_code_hash: self.deployment.expected_runtime_code_hash,
+            implementation_code_hash: self.deployment.expected_implementation_code_hash,
             math_compatibility_version: MATH_COMPATIBILITY_VERSION.into(),
         })
     }
@@ -219,7 +222,7 @@ impl QuoteIndexer {
                 .map_or(Commitment::Realtime, |cursor| cursor.commitment),
             execution_block_number: cursor.as_ref().map(|cursor| cursor.execution_block_number),
             cursor,
-            code_hash: self.deployment.expected_runtime_code_hash,
+            implementation_code_hash: self.deployment.expected_implementation_code_hash,
             math_compatibility_version: MATH_COMPATIBILITY_VERSION.into(),
         }
     }

@@ -130,6 +130,22 @@ impl RpcHttpClient {
             .map_err(|error| RpcError::Transport(error.to_string()))
     }
 
+    /// Reads one storage word against an exact EIP-1898 block hash.
+    pub async fn get_storage_at_hash(
+        &self,
+        address: Address,
+        slot: B256,
+        block_hash: B256,
+    ) -> Result<B256, RpcError> {
+        self.client
+            .request(
+                "eth_getStorageAt",
+                (address, slot, BlockHashSelector::new(block_hash)),
+            )
+            .await
+            .map_err(|error| RpcError::Transport(error.to_string()))
+    }
+
     /// Reads and hashes runtime bytecode through Alloy's Keccak-256 primitive.
     pub async fn runtime_code_hash(
         &self,

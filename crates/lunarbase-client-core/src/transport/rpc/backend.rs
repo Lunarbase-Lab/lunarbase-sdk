@@ -3,6 +3,7 @@
 use crate::model::{
     BackfillRequest, ChainCursor, Checkpoint, Commitment, ContractLog, Network, SourceError,
 };
+use crate::protocol::proxy::{ERC1967_IMPLEMENTATION_SLOT, decode_implementation};
 use crate::transport::rpc::client::RpcHttpClient;
 use std::sync::Arc;
 
@@ -84,15 +85,31 @@ impl RpcHttpBackend {
             .map_err(Into::into)
     }
 
-    /// Verifies a checkpoint block hash against canonical RPC.
+    /// Verifies checkpoint canonicality and the ERC-1967 implementation identity.
     pub async fn validate_checkpoint(&self, checkpoint: &Checkpoint) -> Result<bool, SourceError> {
         let tag = format!("0x{:x}", checkpoint.cursor.block_number);
         let canonical = self
             .rpc
             .block_cursor(&tag, self.chain_id, Commitment::Canonical)
             .await?;
-        Ok(canonical.block_hash.is_some()
-            && checkpoint.cursor.block_hash.is_some()
-            && canonical.block_hash == checkpoint.cursor.block_hash)
+        let Some(block_hash) = canonical.block_hash else {
+            return Ok(false);
+        };
+        if checkpoint.cursor.block_hash != Some(block_hash) {
+            return Ok(false);
+        }
+        let implementation = decode_implementation(
+            self.rpc
+                .get_storage_at_hash(checkpoint.core, ERC1967_IMPLEMENTATION_SLOT, block_hash)
+                .await?,
+        );
+        if implementation != Some(checkpoint.expected_implementation) {
+            return Ok(false);
+        }
+        let code_hash = self
+            .rpc
+            .runtime_code_hash_at_hash(checkpoint.expected_implementation, block_hash)
+            .await?;
+        Ok(code_hash == checkpoint.expected_implementation_code_hash)
     }
 }

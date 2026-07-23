@@ -4,7 +4,7 @@ Runnable Rust HTTP service built from the embeddable LunarBase clients.
 
 ## Run Base
 
-Edit `config/base.toml`, including Core, router, code hash, RPC, and realtime
+Edit `config/base.toml`, including Core proxy, implementation identity, router, RPC, and realtime
 endpoints:
 
 ```bash
@@ -32,7 +32,7 @@ or `arbitrum`.
 
 The configured router, execution block, commitment, and freshness policy are
 runtime-owned and cannot be overridden by an HTTP caller. Gap, reorg, removed
-log, queue overflow, incompatible code hash, or reducer failure revokes
+log, queue overflow, incompatible implementation, or reducer failure revokes
 readiness until canonical recovery completes.
 
 ## Redis

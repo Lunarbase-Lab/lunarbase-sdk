@@ -1,4 +1,4 @@
-//! Best-effort v3 Redis checkpoint acceleration.
+//! Best-effort v4 Redis checkpoint acceleration.
 
 use lunarbase_client_core::model::{ChainCursor, Checkpoint, Commitment, DeploymentConfig};
 use lunarbase_math::state::{FeeProfile, LaneState, QuoteState};
@@ -36,12 +36,12 @@ pub enum CheckpointError {
 }
 
 impl RedisCheckpointStore {
-    /// Creates the v3 deployment-specific key.
+    /// Creates the v4 deployment-specific key.
     pub fn new(url: impl Into<String>, deployment: &DeploymentConfig) -> Self {
         Self {
             url: url.into(),
             key: format!(
-                "lunarbase:v3:{}:{:#x}:{:#x}",
+                "lunarbase:v4:{}:{:#x}:{:#x}",
                 deployment.chain_id, deployment.core, deployment.router
             ),
         }
@@ -109,7 +109,8 @@ fn redis_error(error: redis::RedisError) -> CheckpointError {
 struct CheckpointDto {
     schema_version: u16,
     math_compatibility_version: String,
-    expected_runtime_code_hash: String,
+    expected_implementation: String,
+    expected_implementation_code_hash: String,
     chain_id: u64,
     core: String,
     router: String,
@@ -143,6 +144,7 @@ enum CommitmentDto {
 #[serde(rename_all = "camelCase")]
 struct StateDto {
     cash: String,
+    cash_reserve: u128,
     lanes: Vec<LaneDto>,
     fee_profile: FeeProfileDto,
 }
@@ -152,11 +154,8 @@ struct StateDto {
 struct LaneDto {
     asset: String,
     slot0: String,
+    asset_reserve: u128,
     total_principal_amount: u128,
-    slippage_k_bps: u32,
-    block_delay: u8,
-    exists: bool,
-    paused: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -183,11 +182,8 @@ impl From<&Checkpoint> for CheckpointDto {
             .map(|(asset, lane)| LaneDto {
                 asset: address_hex(*asset),
                 slot0: lane.slot0.to_string(),
+                asset_reserve: lane.asset_reserve,
                 total_principal_amount: lane.total_principal_amount,
-                slippage_k_bps: lane.slippage_k_bps,
-                block_delay: lane.block_delay,
-                exists: lane.exists(),
-                paused: lane.paused(),
             })
             .collect::<Vec<_>>();
         lanes.sort_by(|left, right| left.asset.cmp(&right.asset));
@@ -205,13 +201,17 @@ impl From<&Checkpoint> for CheckpointDto {
         Self {
             schema_version: checkpoint.schema_version,
             math_compatibility_version: checkpoint.math_compatibility_version.clone(),
-            expected_runtime_code_hash: hash_hex(checkpoint.expected_runtime_code_hash),
+            expected_implementation: address_hex(checkpoint.expected_implementation),
+            expected_implementation_code_hash: hash_hex(
+                checkpoint.expected_implementation_code_hash,
+            ),
             chain_id: checkpoint.chain_id,
             core: address_hex(checkpoint.core),
             router: address_hex(checkpoint.router),
             cursor: CursorDto::from(&checkpoint.cursor),
             state: StateDto {
                 cash: address_hex(checkpoint.state.cash),
+                cash_reserve: checkpoint.state.cash_reserve,
                 lanes,
                 fee_profile: FeeProfileDto {
                     whitelisted: checkpoint.state.fee_profile.whitelisted,
@@ -240,11 +240,8 @@ impl TryFrom<CheckpointDto> for Checkpoint {
                     parse_address(&lane.asset)?,
                     LaneState::new(
                         parse_u256(&lane.slot0)?,
+                        lane.asset_reserve,
                         lane.total_principal_amount,
-                        lane.slippage_k_bps,
-                        lane.block_delay,
-                        lane.exists,
-                        lane.paused,
                     ),
                 ))
             })
@@ -259,13 +256,15 @@ impl TryFrom<CheckpointDto> for Checkpoint {
         Ok(Checkpoint {
             schema_version: dto.schema_version,
             math_compatibility_version: dto.math_compatibility_version,
-            expected_runtime_code_hash: parse_hash(&dto.expected_runtime_code_hash)?,
+            expected_implementation: parse_address(&dto.expected_implementation)?,
+            expected_implementation_code_hash: parse_hash(&dto.expected_implementation_code_hash)?,
             chain_id: dto.chain_id,
             core: parse_address(&dto.core)?,
             router: parse_address(&dto.router)?,
             cursor: dto.cursor.try_into()?,
             state: QuoteState {
                 cash: parse_address(&dto.state.cash)?,
+                cash_reserve: dto.state.cash_reserve,
                 lanes,
                 fee_profile: FeeProfile {
                     whitelisted: dto.state.fee_profile.whitelisted,
@@ -365,7 +364,8 @@ mod tests {
             router: address(2),
             expect_whitelisted: true,
             deployment_block: 10,
-            expected_runtime_code_hash: B256::new([3; 32]),
+            expected_implementation: address(3),
+            expected_implementation_code_hash: B256::new([3; 32]),
             contract_compatibility_version: MATH_COMPATIBILITY_VERSION.into(),
             http_rpc_url: "http://rpc".into(),
             realtime_source: "ws://stream".into(),
@@ -376,17 +376,18 @@ mod tests {
     fn checkpoint() -> Checkpoint {
         let mut state = QuoteState {
             cash: address(5),
+            cash_reserve: 16,
             ..QuoteState::default()
         };
-        state.lanes.insert(
-            address(4),
-            LaneState::new(U256::from(17), 18, 19, 20, true, true),
-        );
+        state
+            .lanes
+            .insert(address(4), LaneState::new(U256::from(17), 18, 19));
         state.fee_profile.partner_fee_bps.insert(address(4), 21);
         Checkpoint {
             schema_version: SCHEMA_VERSION,
             math_compatibility_version: MATH_COMPATIBILITY_VERSION.into(),
-            expected_runtime_code_hash: B256::new([3; 32]),
+            expected_implementation: address(3),
+            expected_implementation_code_hash: B256::new([3; 32]),
             chain_id: 8453,
             core: address(1),
             router: address(2),
@@ -402,11 +403,11 @@ mod tests {
     }
 
     #[test]
-    fn key_is_bound_to_v3_chain_core_and_router() {
+    fn key_is_bound_to_v4_chain_core_and_router() {
         let store = RedisCheckpointStore::new("redis://localhost/", &deployment());
         assert_eq!(
             store.key,
-            format!("lunarbase:v3:8453:{}:{}", address(1), address(2))
+            format!("lunarbase:v4:8453:{}:{}", address(1), address(2))
         );
     }
 

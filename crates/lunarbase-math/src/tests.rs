@@ -32,7 +32,12 @@ fn slot0_round_trips_boundaries_and_reserved_bits() {
         price_push_threshold: (1u8 << 7) - 1,
         threshold_enabled: true,
         latest_update_block: (1u64 << 40) - 1,
-        reserved_high_bits: (1u64 << 56) - 1,
+        exists: true,
+        paused: true,
+        block_delay: u8::MAX,
+        slippage_k_bps: u32::MAX,
+        corrupted: true,
+        reserved_high_bits: (1u16 << 13) - 1,
     };
     assert_eq!(
         decode_lane_slot0(encode_lane_slot0(&fields).unwrap()),
@@ -76,6 +81,7 @@ fn direct_quote_matches_fee_split() {
     let asset = address(2);
     let mut state = QuoteState {
         cash,
+        cash_reserve: u128::MAX,
         ..Default::default()
     };
     state.fee_profile.whitelisted = false;
@@ -85,14 +91,12 @@ fn direct_quote_matches_fee_split() {
             encode_lane_slot0(&LaneSlot0 {
                 price: (WAD * n(2)).try_into().unwrap(),
                 ask_fee_bps: 10_000,
+                exists: true,
                 ..Default::default()
             })
             .unwrap(),
+            u128::MAX,
             1_000_000,
-            0,
-            0,
-            true,
-            false,
         ),
     );
     state.fee_profile.partner_fee_bps.insert(asset, 500_000);
@@ -117,6 +121,7 @@ fn exact_out_asset_to_cash_uses_requested_cash_value() {
     let asset = address(2);
     let mut state = QuoteState {
         cash,
+        cash_reserve: u128::MAX,
         ..Default::default()
     };
     state.fee_profile.whitelisted = false;
@@ -126,14 +131,12 @@ fn exact_out_asset_to_cash_uses_requested_cash_value() {
             encode_lane_slot0(&LaneSlot0 {
                 price: (WAD * n(2)).try_into().unwrap(),
                 bid_fee_bps: 10_000,
+                exists: true,
                 ..Default::default()
             })
             .unwrap(),
+            u128::MAX,
             1_000_000,
-            0,
-            0,
-            true,
-            false,
         ),
     );
     let request = QuoteRequest {
@@ -164,7 +167,12 @@ fn packed_update_preserves_unwritten_bits() {
         price_push_threshold: 63,
         threshold_enabled: true,
         latest_update_block: 10,
-        reserved_high_bits: (1u64 << 56) - 1,
+        exists: true,
+        paused: false,
+        block_delay: 15,
+        slippage_k_bps: 16,
+        corrupted: false,
+        reserved_high_bits: (1u16 << 13) - 1,
     })
     .unwrap();
     let updated =
@@ -176,7 +184,109 @@ fn packed_update_preserves_unwritten_bits() {
     assert_eq!(fields.latest_update_block, 14);
     assert_eq!(fields.price_push_threshold, 63);
     assert!(fields.threshold_enabled);
-    assert_eq!(fields.reserved_high_bits, (1u64 << 56) - 1);
+    assert_eq!(fields.reserved_high_bits, (1u16 << 13) - 1);
+    assert!(fields.exists);
+    assert_eq!(fields.block_delay, 15);
+    assert_eq!(fields.slippage_k_bps, 16);
+}
+
+#[test]
+fn packed_update_matches_threshold_and_corruption_latch() {
+    let base = encode_lane_slot0(&LaneSlot0 {
+        price: 100,
+        price_push_threshold: 10,
+        threshold_enabled: true,
+        exists: true,
+        ..Default::default()
+    })
+    .unwrap();
+    let boundary = apply_lane_update_slot0(base, 110, 0, 7).unwrap();
+    let boundary_fields = decode_lane_slot0(boundary);
+    assert_eq!(boundary_fields.price, 110);
+    assert!(!boundary_fields.corrupted);
+
+    for price in [89, 111] {
+        let corrupted = apply_lane_update_slot0(base, price, 0, 8).unwrap();
+        let fields = decode_lane_slot0(corrupted);
+        assert_eq!(fields.price, 0);
+        assert!(fields.paused);
+        assert!(fields.corrupted);
+    }
+
+    let ignored = apply_lane_update_slot0(
+        encode_lane_slot0(&LaneSlot0 {
+            price: 100,
+            corrupted: true,
+            ..Default::default()
+        })
+        .unwrap(),
+        77,
+        encode_update_fees(12, 13).unwrap(),
+        9,
+    )
+    .unwrap();
+    let ignored_fields = decode_lane_slot0(ignored);
+    assert_eq!(ignored_fields.price, 0);
+    assert_eq!(ignored_fields.ask_fee_bps, 0);
+    assert_eq!(ignored_fields.latest_update_block, 0);
+}
+
+#[test]
+fn reserve_boundary_matches_exact_in_and_exact_out_settlement() {
+    let cash = address(1);
+    let asset = address(2);
+    let slot0 = encode_lane_slot0(&LaneSlot0 {
+        price: WAD.try_into().unwrap(),
+        ask_fee_bps: 10_000,
+        exists: true,
+        ..Default::default()
+    })
+    .unwrap();
+    let mut state = QuoteState {
+        cash,
+        cash_reserve: u128::MAX,
+        ..Default::default()
+    };
+    state
+        .lanes
+        .insert(asset, LaneState::new(slot0, u128::MAX, 1_000_000));
+
+    let exact_in = QuoteRequest {
+        asset_in: cash,
+        asset_out: asset,
+        amount: n(100),
+        mode: QuoteMode::ExactIn,
+    };
+    let QuoteOutcome::Available(result) = quote(&exact_in, 1, &state).unwrap() else {
+        panic!("reference exact-in quote unavailable")
+    };
+    let required = u128::try_from(result.amount_out + result.fee_amount).unwrap();
+    state.lanes.get_mut(&asset).unwrap().asset_reserve = required;
+    assert!(matches!(
+        quote(&exact_in, 1, &state).unwrap(),
+        QuoteOutcome::Available(_)
+    ));
+    state.lanes.get_mut(&asset).unwrap().asset_reserve = required - 1;
+    assert_eq!(
+        quote(&exact_in, 1, &state).unwrap(),
+        QuoteOutcome::Unavailable(UnavailableReason::InsufficientOutputReserve(asset))
+    );
+
+    let exact_out = QuoteRequest {
+        mode: QuoteMode::ExactOut,
+        amount: n(100),
+        ..exact_in
+    };
+    state.lanes.get_mut(&asset).unwrap().asset_reserve = 100;
+    assert!(matches!(
+        quote(&exact_out, 1, &state).unwrap(),
+        QuoteOutcome::Available(_)
+    ));
+    state.lanes.get_mut(&asset).unwrap().asset_reserve = 99;
+    assert_eq!(
+        quote(&exact_out, 1, &state).unwrap(),
+        QuoteOutcome::Unavailable(UnavailableReason::InsufficientOutputReserve(asset))
+    );
 }
 
 #[derive(Debug, Deserialize)]
@@ -245,6 +355,7 @@ fn shared_quote_vectors_match_rust_math() {
         let asset_out = Address::from_str(&vector.asset_out).unwrap();
         let mut state = QuoteState {
             cash,
+            cash_reserve: u128::MAX,
             ..Default::default()
         };
         state.fee_profile.whitelisted = vector.whitelisted;
@@ -265,19 +376,16 @@ fn shared_quote_vectors_match_rust_math() {
                     ask_fee_bps: lane.ask_fee_bps.parse().unwrap(),
                     bid_fee_bps: lane.bid_fee_bps.parse().unwrap(),
                     latest_update_block: lane.latest_update_block.parse().unwrap(),
+                    exists: lane.exists,
+                    paused: lane.paused,
+                    block_delay: lane.block_delay.parse().unwrap(),
+                    slippage_k_bps: lane.slippage_k_bps.parse().unwrap(),
                     ..Default::default()
                 })
                 .unwrap();
                 state.lanes.insert(
                     asset,
-                    LaneState::new(
-                        slot0,
-                        lane.principal.parse().unwrap(),
-                        lane.slippage_k_bps.parse().unwrap(),
-                        lane.block_delay.parse().unwrap(),
-                        lane.exists,
-                        lane.paused,
-                    ),
+                    LaneState::new(slot0, u128::MAX, lane.principal.parse().unwrap()),
                 );
             }
         }

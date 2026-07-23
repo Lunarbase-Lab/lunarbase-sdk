@@ -1,10 +1,8 @@
 //! Compact quote-critical state and public quote request/result types.
 
+use crate::slot0::{lane_slot0_exists, lane_slot0_paused};
 use crate::types::{Address, MathError, U256};
 use std::collections::HashMap;
-
-const LANE_EXISTS: u8 = 1;
-const LANE_PAUSED: u8 = 1 << 1;
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 /// Fees for the single router configured by a client or indexer instance.
@@ -48,6 +46,8 @@ impl FeeProfile {
 pub struct QuoteState {
     /// Settlement asset used as the intermediate asset for routed quotes.
     pub cash: Address,
+    /// Free CASH balance available for output settlement after liabilities.
+    pub cash_reserve: u128,
     /// Quote-critical lane state keyed by non-cash asset address.
     pub lanes: HashMap<Address, LaneState>,
     /// Effective fee configuration for the single runtime router.
@@ -57,77 +57,37 @@ pub struct QuoteState {
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 /// Compact quote-critical state for one lane.
 ///
-/// Principal is stored next to `slot0`, eliminating a second map lookup.
-/// Boolean fields share one byte so the native representation remains small.
+/// Reserve and principal are stored next to the packed lane word, eliminating
+/// secondary map lookups while preserving the contract's single-word controls.
 pub struct LaneState {
-    /// Raw packed Solidity `Lane.slot0` word used directly on the hot path.
+    /// Raw packed Solidity lane word used directly on the hot path.
     pub slot0: U256,
+    /// Free lane-asset balance available for output settlement after liabilities.
+    pub asset_reserve: u128,
     /// Total active principal used as the denominator of lane slippage.
     pub total_principal_amount: u128,
-    /// Lane-specific slippage coefficient in protocol BPS.
-    pub slippage_k_bps: u32,
-    /// Number of execution blocks required after the latest price update.
-    pub block_delay: u8,
-    /// Compact lifecycle flags for lane existence and pause state.
-    flags: u8,
 }
 
 impl LaneState {
-    /// Builds a lane with explicit lifecycle flags.
-    pub const fn new(
-        slot0: U256,
-        total_principal_amount: u128,
-        slippage_k_bps: u32,
-        block_delay: u8,
-        exists: bool,
-        paused: bool,
-    ) -> Self {
-        let mut flags = 0;
-        if exists {
-            flags |= LANE_EXISTS;
-        }
-        if paused {
-            flags |= LANE_PAUSED;
-        }
+    /// Builds a lane from its packed word and quote-critical reserves.
+    pub const fn new(slot0: U256, asset_reserve: u128, total_principal_amount: u128) -> Self {
         Self {
             slot0,
+            asset_reserve,
             total_principal_amount,
-            slippage_k_bps,
-            block_delay,
-            flags,
         }
     }
 
-    /// Returns whether the Core currently exposes this lane.
+    /// Returns the packed existence bit.
     #[inline]
-    pub const fn exists(&self) -> bool {
-        self.flags & LANE_EXISTS != 0
+    pub fn exists(&self) -> bool {
+        lane_slot0_exists(self.slot0)
     }
 
-    /// Returns whether quotes through this lane are paused.
+    /// Returns the packed lane pause bit.
     #[inline]
-    pub const fn paused(&self) -> bool {
-        self.flags & LANE_PAUSED != 0
-    }
-
-    /// Updates the existence bit without touching other compact flags.
-    #[inline]
-    pub fn set_exists(&mut self, exists: bool) {
-        self.flags = if exists {
-            self.flags | LANE_EXISTS
-        } else {
-            self.flags & !LANE_EXISTS
-        };
-    }
-
-    /// Updates the pause bit without touching other compact flags.
-    #[inline]
-    pub fn set_paused(&mut self, paused: bool) {
-        self.flags = if paused {
-            self.flags | LANE_PAUSED
-        } else {
-            self.flags & !LANE_PAUSED
-        };
+    pub fn paused(&self) -> bool {
+        lane_slot0_paused(self.slot0)
     }
 }
 
@@ -191,6 +151,8 @@ pub enum UnavailableReason {
     ZeroAnchor,
     /// Fee and slippage deductions consume the complete quote anchor.
     SpreadConsumesAnchor,
+    /// The free output reserve cannot cover the transfer and output-side fee.
+    InsufficientOutputReserve(Address),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]

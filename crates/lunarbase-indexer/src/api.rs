@@ -58,7 +58,7 @@ async fn ready(State(state): State<ApiState>) -> Response {
                 "ready": true,
                 "cursor": health.cursor.as_ref().map(ApiCursor::from),
                 "executionBlockNumber": health.execution_block_number,
-                "contractCodeHash": hash_hex(health.code_hash),
+                "implementationCodeHash": hash_hex(health.implementation_code_hash),
                 "mathCompatibilityVersion": health.math_compatibility_version,
             })),
         )
@@ -68,7 +68,7 @@ async fn ready(State(state): State<ApiState>) -> Response {
             Json(json!({
                 "ready": false,
                 "cursor": health.cursor.as_ref().map(ApiCursor::from),
-                "contractCodeHash": hash_hex(health.code_hash),
+                "implementationCodeHash": hash_hex(health.implementation_code_hash),
                 "mathCompatibilityVersion": health.math_compatibility_version,
             })),
         )
@@ -190,7 +190,7 @@ impl ApiBatchRequest {
 struct ApiQuoteResponse {
     cursor: ApiCursor,
     execution_block_number: u64,
-    contract_code_hash: String,
+    implementation_code_hash: String,
     math_compatibility_version: String,
     result: ApiQuoteOutcome,
 }
@@ -200,7 +200,7 @@ impl From<ClientQuote> for ApiQuoteResponse {
         Self {
             cursor: ApiCursor::from(&quote.cursor),
             execution_block_number: quote.execution_block_number,
-            contract_code_hash: hash_hex(quote.contract_code_hash),
+            implementation_code_hash: hash_hex(quote.implementation_code_hash),
             math_compatibility_version: quote.math_compatibility_version,
             result: ApiQuoteOutcome::from(quote.outcome),
         }
@@ -212,7 +212,7 @@ impl From<ClientQuote> for ApiQuoteResponse {
 struct ApiBatchResponse {
     cursor: ApiCursor,
     execution_block_number: u64,
-    contract_code_hash: String,
+    implementation_code_hash: String,
     math_compatibility_version: String,
     results: Vec<ApiQuoteOutcome>,
 }
@@ -222,7 +222,7 @@ impl From<ClientBatchQuote> for ApiBatchResponse {
         Self {
             cursor: ApiCursor::from(&batch.cursor),
             execution_block_number: batch.execution_block_number,
-            contract_code_hash: hash_hex(batch.contract_code_hash),
+            implementation_code_hash: hash_hex(batch.implementation_code_hash),
             math_compatibility_version: batch.math_compatibility_version,
             results: batch
                 .outcomes
@@ -319,6 +319,9 @@ fn unavailable(reason: UnavailableReason) -> ApiQuoteOutcome {
         UnavailableReason::ZeroPrincipal(asset) => ("zeroPrincipal", Some(address_hex(asset))),
         UnavailableReason::ZeroAnchor => ("zeroAnchor", None),
         UnavailableReason::SpreadConsumesAnchor => ("spreadConsumesAnchor", None),
+        UnavailableReason::InsufficientOutputReserve(asset) => {
+            ("insufficientOutputReserve", Some(address_hex(asset)))
+        }
     };
     ApiQuoteOutcome::Unavailable { reason, asset }
 }

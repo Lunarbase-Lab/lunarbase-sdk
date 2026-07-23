@@ -27,7 +27,7 @@ pub enum IndexerError {
     #[error(transparent)]
     Source(#[from] SourceError),
     /// Runtime bytecode at the configured Core address differs from the pinned deployment.
-    #[error("runtime code hash mismatch")]
+    #[error("Core implementation identity mismatch")]
     CodeHashMismatch,
     /// No verified chain position is available for a quote or checkpoint.
     #[error("no canonical cursor")]

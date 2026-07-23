@@ -1,6 +1,6 @@
 use crate::support::e2e::environment::MockState;
 use crate::support::e2e::helpers::{address_word, block_hash, word_hex};
-use crate::support::e2e::{ASSET, CASH, CORE};
+use crate::support::e2e::{ASSET, CASH, CORE, IMPLEMENTATION};
 use alloy_sol_types::{SolCall, SolValue};
 use axum::Json;
 use axum::extract::State;
@@ -32,6 +32,7 @@ pub(super) async fn rpc(
             "hash": block_hash(block),
         }),
         "eth_getCode" => json!("0x"),
+        "eth_getStorageAt" => json!(address_word(IMPLEMENTATION)),
         "eth_getLogs" => discovery_logs(&request, block),
         "eth_call" => {
             let data = request
@@ -80,16 +81,10 @@ fn eth_call_result(data: &str, slot0: U256) -> String {
     } else if selector == core::blacklistFeeMultiplierCall::SELECTOR {
         core::blacklistFeeMultiplierCall::abi_encode_returns(&U256::ONE)
     } else if selector == core::laneCall::SELECTOR {
-        core::laneCall::abi_encode_returns(&core::laneReturn {
-            slot0: B256::from(slot0.to_be_bytes::<32>()),
-            exists: true,
-            paused: false,
-            blockDelay: 0,
-            slippageKBps: 0,
-        })
+        core::laneCall::abi_encode_returns(&B256::from(slot0.to_be_bytes::<32>()))
     } else if selector == core::reservesCall::SELECTOR {
         core::reservesCall::abi_encode_returns(&core::reservesReturn {
-            assetReserve: 0,
+            assetReserve: 1_000_000_000,
             treasuryFees: 0,
             partnerFees: 0,
             escrowedAssets: 0,

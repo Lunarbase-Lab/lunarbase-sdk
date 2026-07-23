@@ -7,8 +7,8 @@ use crate::fees::{
     quote_lane_weighted_slippage_k_bps, split_fee,
 };
 use crate::slot0::{
-    lane_slot0_ask_fee_bps, lane_slot0_bid_fee_bps, lane_slot0_latest_update_block,
-    lane_slot0_price,
+    lane_slot0_ask_fee_bps, lane_slot0_bid_fee_bps, lane_slot0_block_delay,
+    lane_slot0_latest_update_block, lane_slot0_price, lane_slot0_slippage_k_bps,
 };
 use crate::state::{
     LaneState, QuoteError, QuoteMode, QuoteOutcome, QuoteRequest, QuoteResult, QuoteState,
@@ -31,8 +31,8 @@ fn lane_or_reason(
     if lane.paused() {
         return Err(UnavailableReason::PausedLane(asset));
     }
-    let ready_at =
-        lane_slot0_latest_update_block(lane.slot0).saturating_add(u64::from(lane.block_delay));
+    let ready_at = lane_slot0_latest_update_block(lane.slot0)
+        .saturating_add(u64::from(lane_slot0_block_delay(lane.slot0)));
     if execution_block_number < ready_at {
         return Err(UnavailableReason::DelayedLane(asset));
     }
@@ -87,6 +87,26 @@ fn assemble_quote(
         }
         QuoteMode::ExactOut => (checked_add(anchor, total_spread)?, request.amount),
     };
+    let output_reserve = if request.asset_out == state.cash {
+        state.cash_reserve
+    } else {
+        match state.lanes.get(&request.asset_out) {
+            Some(lane) => lane.asset_reserve,
+            None => {
+                return Ok(QuoteOutcome::Unavailable(UnavailableReason::MissingLane(
+                    request.asset_out,
+                )));
+            }
+        }
+    };
+    let output_reserve = U256::from(output_reserve);
+    let insufficient = amount_out > output_reserve
+        || (request.mode == QuoteMode::ExactIn && fee > checked_sub(output_reserve, amount_out)?);
+    if insufficient {
+        return Ok(QuoteOutcome::Unavailable(
+            UnavailableReason::InsufficientOutputReserve(request.asset_out),
+        ));
+    }
     let (partner, treasury) = split_fee(anchor, fee, state.fee_profile.partner_fee_bps(fee_asset))?;
     Ok(QuoteOutcome::Available(QuoteResult {
         amount_in,
@@ -143,7 +163,11 @@ fn quote_direct(
     } else {
         request.amount
     };
-    let slippage = quote_lane_slippage_bps(swap_cash, principal, U256::from(lane.slippage_k_bps))?;
+    let slippage = quote_lane_slippage_bps(
+        swap_cash,
+        principal,
+        U256::from(lane_slot0_slippage_k_bps(lane.slot0)),
+    )?;
     let (fee, slippage_amount) = lane_spread(
         anchor,
         fee_bps,
@@ -193,9 +217,9 @@ fn quote_route(
     }
     let weighted_k = quote_lane_weighted_slippage_k_bps(
         first_principal,
-        U256::from(input_lane.slippage_k_bps),
+        U256::from(lane_slot0_slippage_k_bps(input_lane.slot0)),
         second_principal,
-        U256::from(output_lane.slippage_k_bps),
+        U256::from(lane_slot0_slippage_k_bps(output_lane.slot0)),
     )?;
     let slippage = quote_lane_slippage_bps(
         intermediate_cash,
@@ -243,7 +267,8 @@ fn quote_route(
 ///
 /// The function applies the contract's zero/equal-asset sentinels, lane
 /// validity predicate, anchor conversion, configured fee profile,
-/// principal-based slippage, spread, and partner/treasury split.
+/// principal-based slippage, spread, output-reserve availability, and
+/// partner/treasury split.
 ///
 /// `execution_block_number` must be the EVM-visible block number supplied by
 /// the runtime's normalized head, not an arbitrary provider sequence.

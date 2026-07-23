@@ -71,7 +71,12 @@ test("slot0 round-trips boundaries and reserved bits", () => {
     pricePushThreshold: (1n << 7n) - 1n,
     thresholdEnabled: true,
     latestUpdateBlock: (1n << 40n) - 1n,
-    reservedHighBits: (1n << 56n) - 1n,
+    exists: true,
+    paused: true,
+    blockDelay: 0xff,
+    slippageKBps: 0xffff_ffff,
+    corrupted: true,
+    reservedHighBits: (1n << 13n) - 1n,
   };
   assert.deepEqual(decodeLaneSlot0(encodeLaneSlot0(fields)), fields);
 });
@@ -96,16 +101,14 @@ test("direct quote returns complete result and Solidity sentinels", () => {
   const asset = address("2");
   const state: QuoteState = {
     cash,
+    cashReserve: (1n << 128n) - 1n,
     lanes: new Map([
       [
         asset,
         createLaneState(
-          encodeLaneSlot0({ ...EMPTY_SLOT0, price: 2n * WAD, askFeeBps: 10_000n }),
+          encodeLaneSlot0({ ...EMPTY_SLOT0, price: 2n * WAD, askFeeBps: 10_000n, exists: true }),
+          (1n << 128n) - 1n,
           1_000_000n,
-          0,
-          0,
-          true,
-          false,
         ),
       ],
     ]),
@@ -134,7 +137,12 @@ test("packed update preserves threshold and reserved bits", () => {
     pricePushThreshold: 63n,
     thresholdEnabled: true,
     latestUpdateBlock: 10n,
-    reservedHighBits: (1n << 56n) - 1n,
+    exists: true,
+    paused: false,
+    blockDelay: 15,
+    slippageKBps: 16,
+    corrupted: false,
+    reservedHighBits: (1n << 13n) - 1n,
   });
   const updated = decodeLaneSlot0(applyLaneUpdateSlot0(previous, 11n, encodeUpdateFees(12n, 13n), 14n));
   assert.equal(updated.price, 11n);
@@ -143,6 +151,77 @@ test("packed update preserves threshold and reserved bits", () => {
   assert.equal(updated.latestUpdateBlock, 14n);
   assert.equal(updated.pricePushThreshold, 63n);
   assert.equal(updated.thresholdEnabled, true);
+});
+
+test("packed update applies strict symmetric threshold and corruption latch", () => {
+  const base = encodeLaneSlot0({
+    ...EMPTY_SLOT0,
+    price: 100n,
+    pricePushThreshold: 10n,
+    thresholdEnabled: true,
+    exists: true,
+  });
+  const boundary = decodeLaneSlot0(applyLaneUpdateSlot0(base, 110n, 0n, 7n));
+  assert.equal(boundary.price, 110n);
+  assert.equal(boundary.corrupted, false);
+  for (const price of [89n, 111n]) {
+    const corrupted = decodeLaneSlot0(applyLaneUpdateSlot0(base, price, 0n, 8n));
+    assert.equal(corrupted.price, 0n);
+    assert.equal(corrupted.paused, true);
+    assert.equal(corrupted.corrupted, true);
+  }
+  const ignored = decodeLaneSlot0(
+    applyLaneUpdateSlot0(
+      encodeLaneSlot0({ ...EMPTY_SLOT0, price: 100n, corrupted: true }),
+      77n,
+      encodeUpdateFees(12n, 13n),
+      9n,
+    ),
+  );
+  assert.equal(ignored.price, 0n);
+  assert.equal(ignored.askFeeBps, 0n);
+  assert.equal(ignored.latestUpdateBlock, 0n);
+});
+
+test("reserve boundary matches exact-in and exact-out settlement", () => {
+  const cash = address("1");
+  const asset = address("2");
+  const lane = createLaneState(
+    encodeLaneSlot0({ ...EMPTY_SLOT0, price: WAD, askFeeBps: 10_000n, exists: true }),
+    (1n << 128n) - 1n,
+    1_000_000n,
+  );
+  const state: QuoteState = {
+    cash,
+    cashReserve: (1n << 128n) - 1n,
+    lanes: new Map([[asset, lane]]),
+    feeProfile: {
+      whitelisted: true,
+      blacklistFeeMultiplier: 1n,
+      partnerFeeBps: new Map(),
+    },
+  };
+  const exactIn = { assetIn: cash, assetOut: asset, amount: 100n, mode: "ExactIn" as const };
+  const reference = quote(exactIn, 1n, state);
+  assert.equal(reference.kind, "Available");
+  if (reference.kind !== "Available") return;
+  const required = reference.result.amountOut + reference.result.feeAmount;
+  lane.assetReserve = required;
+  assert.equal(quote(exactIn, 1n, state).kind, "Available");
+  lane.assetReserve = required - 1n;
+  assert.deepEqual(quote(exactIn, 1n, state), {
+    kind: "Unavailable",
+    reason: { kind: "InsufficientOutputReserve", asset },
+  });
+
+  const exactOut = { ...exactIn, amount: 100n, mode: "ExactOut" as const };
+  lane.assetReserve = 100n;
+  assert.equal(quote(exactOut, 1n, state).kind, "Available");
+  lane.assetReserve = 99n;
+  assert.deepEqual(quote(exactOut, 1n, state), {
+    kind: "Unavailable",
+    reason: { kind: "InsufficientOutputReserve", asset },
+  });
 });
 
 test("shared golden vectors match TypeScript engine", () => {
@@ -169,19 +248,22 @@ test("shared golden vectors match TypeScript engine", () => {
             pricePushThreshold: 0n,
             thresholdEnabled: false,
             latestUpdateBlock: BigInt(lane.latestUpdateBlock),
+            exists: lane.exists,
+            paused: lane.paused,
+            blockDelay: Number(lane.blockDelay),
+            slippageKBps: Number(lane.slippageKBps),
+            corrupted: false,
             reservedHighBits: 0n,
           }),
+          (1n << 128n) - 1n,
           BigInt(lane.principal),
-          Number(lane.slippageKBps),
-          Number(lane.blockDelay),
-          lane.exists,
-          lane.paused,
         ),
       );
     }
     const feeAsset = vector.mode === "ExactIn" ? assetOut : assetIn;
     const state: QuoteState = {
       cash,
+      cashReserve: (1n << 128n) - 1n,
       lanes,
       feeProfile: {
         whitelisted: vector.whitelisted,
@@ -214,7 +296,7 @@ test("shared golden vectors match TypeScript engine", () => {
       }
     } else {
       assert.equal(
-        solidityExactOutAmountForRequest(request, outcome),
+        vector.mode === "ExactIn" ? solidityExactInAmount(outcome) : solidityExactOutAmountForRequest(request, outcome),
         BigInt(vector.expectedPublicAmount ?? "missing"),
       );
     }

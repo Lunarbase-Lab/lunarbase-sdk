@@ -30,7 +30,7 @@ recovery. Quote calculation performs no RPC, Redis access, state serialization,
 or full-state clone.
 
 The current SDK version is `0.2.0`. Its math compatibility baseline is
-`lunarbase-contracts@24db47b866e8150a0d91cffd80efe49df85179b5:math-v1`.
+`lunarbase-contracts@cfeb6b86f425c5207f3cf80c8b40adde07d6a60b:math-v2`.
 Canonical Solidity/Rust/TypeScript differential tests live in
 `lunarbase-contracts`.
 
@@ -117,7 +117,7 @@ TypeScript realtime quote loggers. After creating the language-specific
 
 ### Runnable indexer
 
-Configure `config/base.toml`, especially the Core address, router, code hash,
+Configure `config/base.toml`, especially the Core proxy, implementation identity, router,
 RPC, and realtime endpoints, then run:
 
 ```bash

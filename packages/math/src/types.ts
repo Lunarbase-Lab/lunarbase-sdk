@@ -2,7 +2,7 @@ import type { Address, Word } from "./constants.js";
 
 /** Complete logical view of the packed lane slot. */
 export interface LaneSlot0 {
-  /** Fixed-point lane price stored in the low 128 bits of Solidity `slot0`. */
+  /** Fixed-point lane price stored in the low 112 bits of Solidity `slot0`. */
   price: bigint;
   /** Exact-input fee charged when buying the lane asset, in protocol BPS. */
   askFeeBps: bigint;
@@ -14,7 +14,17 @@ export interface LaneSlot0 {
   thresholdEnabled: boolean;
   /** EVM block number of the latest accepted price update. */
   latestUpdateBlock: bigint;
-  /** Unassigned high bits preserved for bit-exact slot round trips. */
+  /** Whether Core currently exposes this lane. */
+  exists: boolean;
+  /** Whether swaps through this lane are disabled. */
+  paused: boolean;
+  /** Required execution-block delay after a price update. */
+  blockDelay: number;
+  /** Lane-specific slippage coefficient in protocol BPS. */
+  slippageKBps: number;
+  /** Owner-controlled corruption latch. */
+  corrupted: boolean;
+  /** Unassigned high 13 bits preserved for bit-exact round trips. */
   reservedHighBits: bigint;
 }
 
@@ -26,56 +36,39 @@ export const EMPTY_SLOT0: LaneSlot0 = Object.freeze({
   pricePushThreshold: 0n,
   thresholdEnabled: false,
   latestUpdateBlock: 0n,
+  exists: false,
+  paused: false,
+  blockDelay: 0,
+  slippageKBps: 0,
+  corrupted: false,
   reservedHighBits: 0n,
-});
-
-/** Bit values used by the compact lane lifecycle field. */
-export const LaneFlags = Object.freeze({
-  Exists: 1,
-  Paused: 2,
 });
 
 /** Compact lane state consumed by the quote engine. */
 export interface LaneState {
-  /** Raw packed Solidity `Lane.slot0` word consumed by quote math. */
+  /** Raw packed Solidity lane word consumed by quote math. */
   slot0: Word;
+  /** Free lane-asset balance available for output settlement after liabilities. */
+  assetReserve: bigint;
   /** Active principal used as the denominator of lane slippage. */
   totalPrincipalAmount: bigint;
-  /** Lane-specific slippage coefficient in protocol BPS. */
-  slippageKBps: number;
-  /** Required execution-block delay after the latest price update. */
-  blockDelay: number;
-  /** Compact `LaneFlags` bitset for existence and pause state. */
-  flags: number;
 }
 
-/** Returns whether a compact lane is active. */
-export const laneExists = (lane: LaneState): boolean => (lane.flags & LaneFlags.Exists) !== 0;
+/** Returns the packed existence bit. */
+export const laneExists = (lane: LaneState): boolean => ((lane.slot0 >> 200n) & 1n) === 1n;
 
-/** Returns whether a compact lane is paused. */
-export const lanePaused = (lane: LaneState): boolean => (lane.flags & LaneFlags.Paused) !== 0;
+/** Returns the packed pause bit. */
+export const lanePaused = (lane: LaneState): boolean => ((lane.slot0 >> 201n) & 1n) === 1n;
 
-/** Builds a compact lane while validating native-number fields. */
-export function createLaneState(
-  slot0: Word,
-  totalPrincipalAmount: bigint,
-  slippageKBps: number,
-  blockDelay: number,
-  exists: boolean,
-  paused: boolean,
-): LaneState {
-  if (!Number.isSafeInteger(slippageKBps) || slippageKBps < 0 || slippageKBps > 0xffff_ffff)
-    throw new RangeError("slippageKBps does not fit uint32");
-  if (!Number.isSafeInteger(blockDelay) || blockDelay < 0 || blockDelay > 0xff)
-    throw new RangeError("blockDelay does not fit uint8");
+/** Builds a compact lane from its packed word and quote-critical reserves. */
+export function createLaneState(slot0: Word, assetReserve: bigint, totalPrincipalAmount: bigint): LaneState {
+  if (assetReserve < 0n || assetReserve >= 1n << 128n) throw new RangeError("assetReserve does not fit uint128");
   if (totalPrincipalAmount < 0n || totalPrincipalAmount >= 1n << 128n)
     throw new RangeError("totalPrincipalAmount does not fit uint128");
   return {
     slot0,
+    assetReserve,
     totalPrincipalAmount,
-    slippageKBps,
-    blockDelay,
-    flags: (exists ? LaneFlags.Exists : 0) | (paused ? LaneFlags.Paused : 0),
   };
 }
 
@@ -93,6 +86,8 @@ export interface FeeProfile {
 export interface QuoteState {
   /** Settlement asset used between two non-cash lanes. */
   cash: Address;
+  /** Free CASH balance available for output settlement after liabilities. */
+  cashReserve: bigint;
   /** Quote-critical lane state keyed by non-cash asset address. */
   lanes: ReadonlyMap<Address, LaneState>;
   /** Effective fees for the single router configured by this runtime. */
@@ -140,7 +135,8 @@ export type UnavailableReason =
   | { kind: "ZeroPrice"; asset: Address }
   | { kind: "ZeroPrincipal"; asset: Address }
   | { kind: "ZeroAnchor" }
-  | { kind: "SpreadConsumesAnchor" };
+  | { kind: "SpreadConsumesAnchor" }
+  | { kind: "InsufficientOutputReserve"; asset: Address };
 
 /** Discriminated union returned by all quote entry points. */
 export type QuoteOutcome =

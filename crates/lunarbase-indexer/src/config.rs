@@ -37,8 +37,10 @@ pub struct RawConfig {
     pub expect_whitelisted: bool,
     /// First deployment block included in lane discovery.
     pub deployment_block: u64,
-    /// Exact non-zero hash of the expected Core runtime bytecode.
-    pub expected_runtime_code_hash: String,
+    /// Exact ERC-1967 implementation behind the Core proxy.
+    pub expected_implementation: String,
+    /// Exact non-zero runtime bytecode hash of the implementation.
+    pub expected_implementation_code_hash: String,
     /// Contracts revision expected by the runtime and checkpoint schema.
     #[serde(default = "default_compatibility")]
     pub contract_compatibility_version: String,
@@ -129,9 +131,11 @@ impl RawConfig {
             .iter()
             .map(|value| parse_address(value, "explicit_lane_assets"))
             .collect::<Result<Vec<_>, _>>()?;
-        let expected_runtime_code_hash = parse_hash(
-            &self.expected_runtime_code_hash,
-            "expected_runtime_code_hash",
+        let expected_implementation =
+            parse_address(&self.expected_implementation, "expected_implementation")?;
+        let expected_implementation_code_hash = parse_hash(
+            &self.expected_implementation_code_hash,
+            "expected_implementation_code_hash",
         )?;
         let bind = self
             .bind
@@ -158,7 +162,8 @@ impl RawConfig {
             router,
             expect_whitelisted: self.expect_whitelisted,
             deployment_block: self.deployment_block,
-            expected_runtime_code_hash,
+            expected_implementation,
+            expected_implementation_code_hash,
             contract_compatibility_version: self.contract_compatibility_version,
             http_rpc_url: self.http_rpc_url,
             realtime_source: self.realtime_url,

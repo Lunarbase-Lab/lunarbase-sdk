@@ -60,7 +60,20 @@ export function decodeCoreEvent(log: ContractLog): QuoteEvent | undefined {
   if (topic0 === CORE_EVENT_TOPICS.SlippageKSet) {
     expectShape(log, 2, 2);
     const { asset, newK } = decode<{ asset: Address; newK: number }>(CORE_EVENTS.SlippageKSet, log);
-    return { kind: "SlippageKSet", asset, newK: BigInt(newK) };
+    return { kind: "SlippageKSet", asset, newK };
+  }
+  if (topic0 === CORE_EVENT_TOPICS.LaneCorruptedSet) {
+    expectShape(log, 2, 2);
+    const { asset, newCorrupted } = decode<{ asset: Address; newCorrupted: boolean }>(
+      CORE_EVENTS.LaneCorruptedSet,
+      log,
+    );
+    return { kind: "LaneCorruptedSet", asset, corrupted: newCorrupted };
+  }
+  if (topic0 === CORE_EVENT_TOPICS.BlockDelaySet) {
+    expectShape(log, 2, 2);
+    const { asset, newBlockDelay } = decode<{ asset: Address; newBlockDelay: number }>(CORE_EVENTS.BlockDelaySet, log);
+    return { kind: "BlockDelaySet", asset, blockDelay: newBlockDelay };
   }
   if (topic0 === CORE_EVENT_TOPICS.PartnerInfoSet) {
     expectShape(log, 4, 1);
@@ -68,7 +81,7 @@ export function decodeCoreEvent(log: ContractLog): QuoteEvent | undefined {
       CORE_EVENTS.PartnerInfoSet,
       log,
     );
-    return { kind: "PartnerInfoSet", router, asset, fee: BigInt(fee) };
+    return { kind: "PartnerInfoSet", router, asset, fee };
   }
   if (topic0 === CORE_EVENT_TOPICS.PartnerFeeSet) {
     expectShape(log, 3, 1);
@@ -76,7 +89,7 @@ export function decodeCoreEvent(log: ContractLog): QuoteEvent | undefined {
       CORE_EVENTS.PartnerFeeSet,
       log,
     );
-    return { kind: "PartnerFeeSet", router, asset, fee: BigInt(fee) };
+    return { kind: "PartnerFeeSet", router, asset, fee };
   }
   if (topic0 === CORE_EVENT_TOPICS.WhitelistSet) {
     expectShape(log, 2, 1);
@@ -103,6 +116,20 @@ export function decodeCoreEvent(log: ContractLog): QuoteEvent | undefined {
       log,
     );
     return { kind: "WithdrawalExecuted", asset, principal: principalAmount };
+  }
+  if (topic0 === CORE_EVENT_TOPICS.Sync) {
+    expectShape(log, 2, 2);
+    const { lane, assetReserve, cashReserve } = decode<{
+      lane: Address;
+      assetReserve: bigint;
+      cashReserve: bigint;
+    }>(CORE_EVENTS.Sync, log);
+    return { kind: "Sync", asset: lane, assetReserve, cashReserve };
+  }
+  if (topic0 === CORE_EVENT_TOPICS.Upgraded) {
+    expectShape(log, 2, 0);
+    const { implementation } = decode<{ implementation: Address }>(CORE_EVENTS.Upgraded, log);
+    return { kind: "ImplementationUpgraded", implementation };
   }
   return undefined;
 }
