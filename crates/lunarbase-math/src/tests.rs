@@ -91,6 +91,7 @@ fn direct_quote_matches_fee_split() {
             encode_lane_slot0(&LaneSlot0 {
                 price: (WAD * n(2)).try_into().unwrap(),
                 ask_fee_bps: 10_000,
+                latest_update_block: 1,
                 exists: true,
                 ..Default::default()
             })
@@ -131,6 +132,7 @@ fn exact_out_asset_to_cash_uses_requested_cash_value() {
             encode_lane_slot0(&LaneSlot0 {
                 price: (WAD * n(2)).try_into().unwrap(),
                 bid_fee_bps: 10_000,
+                latest_update_block: 1,
                 exists: true,
                 ..Default::default()
             })
@@ -149,6 +151,51 @@ fn exact_out_asset_to_cash_uses_requested_cash_value() {
         panic!("quote unavailable")
     };
     assert_eq!(result.amount_in, n(51));
+}
+
+#[test]
+fn lane_quote_ttl_includes_boundary_and_expires_next_block() {
+    let cash = address(1);
+    let asset = address(2);
+    let mut state = QuoteState {
+        cash,
+        cash_reserve: u128::MAX,
+        ..Default::default()
+    };
+    state.lanes.insert(
+        asset,
+        LaneState::new(
+            encode_lane_slot0(&LaneSlot0 {
+                price: WAD.try_into().unwrap(),
+                latest_update_block: 100,
+                exists: true,
+                block_delay: 3,
+                ..Default::default()
+            })
+            .unwrap(),
+            u128::MAX,
+            1_000_000,
+        ),
+    );
+    let request = QuoteRequest {
+        asset_in: cash,
+        asset_out: asset,
+        amount: n(100),
+        mode: QuoteMode::ExactIn,
+    };
+
+    assert!(matches!(
+        quote(&request, 100, &state).unwrap(),
+        QuoteOutcome::Available(_)
+    ));
+    assert!(matches!(
+        quote(&request, 103, &state).unwrap(),
+        QuoteOutcome::Available(_)
+    ));
+    assert_eq!(
+        quote(&request, 104, &state).unwrap(),
+        QuoteOutcome::Unavailable(UnavailableReason::StaleLane(asset))
+    );
 }
 
 #[test]
@@ -238,6 +285,7 @@ fn reserve_boundary_matches_exact_in_and_exact_out_settlement() {
     let slot0 = encode_lane_slot0(&LaneSlot0 {
         price: WAD.try_into().unwrap(),
         ask_fee_bps: 10_000,
+        latest_update_block: 1,
         exists: true,
         ..Default::default()
     })
@@ -302,6 +350,7 @@ fn route_preserves_contract_evaluation_order_before_zero_price_sentinel() {
     for (asset, price) in [(&asset_in, 0), (&asset_out, (1u128 << 112) - 1)] {
         let slot0 = encode_lane_slot0(&LaneSlot0 {
             price,
+            latest_update_block: 1,
             exists: true,
             ..Default::default()
         })

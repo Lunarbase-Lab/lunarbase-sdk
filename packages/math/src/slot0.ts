@@ -48,7 +48,7 @@ export const laneSlot0LatestUpdateBlock = (word: Word): bigint =>
 export const laneSlot0Exists = (word: Word): boolean => ((assertU256(word, "slot0") >> 200n) & 1n) === 1n;
 /** Returns the packed lane pause bit. */
 export const laneSlot0Paused = (word: Word): boolean => ((assertU256(word, "slot0") >> 201n) & 1n) === 1n;
-/** Returns the packed post-update block delay. */
+/** Returns the packed inclusive quote TTL in execution blocks. */
 export const laneSlot0BlockDelay = (word: Word): number => Number((assertU256(word, "slot0") >> 202n) & 0xffn);
 /** Returns the packed lane slippage coefficient. */
 export const laneSlot0SlippageKBps = (word: Word): number =>

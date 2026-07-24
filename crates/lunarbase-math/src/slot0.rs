@@ -46,7 +46,7 @@ pub struct LaneSlot0 {
     pub exists: bool,
     /// Whether swaps through this lane are disabled.
     pub paused: bool,
-    /// Required execution-block delay after a price update.
+    /// Inclusive quote TTL in execution blocks after a price update.
     pub block_delay: u8,
     /// Lane-specific slippage coefficient in protocol BPS.
     pub slippage_k_bps: u32,
@@ -165,7 +165,7 @@ pub fn lane_slot0_paused(word: U256) -> bool {
 }
 
 #[inline(always)]
-/// Reads the packed post-update block delay.
+/// Reads the packed inclusive quote TTL in execution blocks.
 pub fn lane_slot0_block_delay(word: U256) -> u8 {
     read_field(word, BLOCK_DELAY_SHIFT, BLOCK_DELAY_BITS)
         .try_into()

@@ -106,7 +106,13 @@ test("direct quote returns complete result and Solidity sentinels", () => {
       [
         asset,
         createLaneState(
-          encodeLaneSlot0({ ...EMPTY_SLOT0, price: 2n * WAD, askFeeBps: 10_000n, exists: true }),
+          encodeLaneSlot0({
+            ...EMPTY_SLOT0,
+            price: 2n * WAD,
+            askFeeBps: 10_000n,
+            latestUpdateBlock: 1n,
+            exists: true,
+          }),
           (1n << 128n) - 1n,
           1_000_000n,
         ),
@@ -127,6 +133,44 @@ test("direct quote returns complete result and Solidity sentinels", () => {
   });
   assert.equal(solidityExactInAmount(unavailable), 0n);
   assert.equal(solidityExactOutAmount(unavailable), U256_MAX);
+});
+
+test("lane quote TTL includes boundary and expires next block", () => {
+  const cash = address("1");
+  const asset = address("2");
+  const state: QuoteState = {
+    cash,
+    cashReserve: (1n << 128n) - 1n,
+    lanes: new Map([
+      [
+        asset,
+        createLaneState(
+          encodeLaneSlot0({
+            ...EMPTY_SLOT0,
+            price: WAD,
+            latestUpdateBlock: 100n,
+            exists: true,
+            blockDelay: 3,
+          }),
+          (1n << 128n) - 1n,
+          1_000_000n,
+        ),
+      ],
+    ]),
+    feeProfile: {
+      whitelisted: true,
+      blacklistFeeMultiplier: 1n,
+      partnerFeeBps: new Map(),
+    },
+  };
+  const request = { assetIn: cash, assetOut: asset, amount: 100n, mode: "ExactIn" as const };
+
+  assert.equal(quote(request, 100n, state).kind, "Available");
+  assert.equal(quote(request, 103n, state).kind, "Available");
+  assert.deepEqual(quote(request, 104n, state), {
+    kind: "Unavailable",
+    reason: { kind: "StaleLane", asset },
+  });
 });
 
 test("packed update preserves threshold and reserved bits", () => {
@@ -187,7 +231,13 @@ test("reserve boundary matches exact-in and exact-out settlement", () => {
   const cash = address("1");
   const asset = address("2");
   const lane = createLaneState(
-    encodeLaneSlot0({ ...EMPTY_SLOT0, price: WAD, askFeeBps: 10_000n, exists: true }),
+    encodeLaneSlot0({
+      ...EMPTY_SLOT0,
+      price: WAD,
+      askFeeBps: 10_000n,
+      latestUpdateBlock: 1n,
+      exists: true,
+    }),
     (1n << 128n) - 1n,
     1_000_000n,
   );
@@ -232,11 +282,23 @@ test("route preserves contract evaluation order before zero-price sentinel", () 
     cash,
     cashReserve: (1n << 128n) - 1n,
     lanes: new Map([
-      [assetIn, createLaneState(encodeLaneSlot0({ ...EMPTY_SLOT0, price: 0n, exists: true }), (1n << 128n) - 1n, 1n)],
+      [
+        assetIn,
+        createLaneState(
+          encodeLaneSlot0({ ...EMPTY_SLOT0, price: 0n, latestUpdateBlock: 1n, exists: true }),
+          (1n << 128n) - 1n,
+          1n,
+        ),
+      ],
       [
         assetOut,
         createLaneState(
-          encodeLaneSlot0({ ...EMPTY_SLOT0, price: (1n << 112n) - 1n, exists: true }),
+          encodeLaneSlot0({
+            ...EMPTY_SLOT0,
+            price: (1n << 112n) - 1n,
+            latestUpdateBlock: 1n,
+            exists: true,
+          }),
           (1n << 128n) - 1n,
           1n,
         ),

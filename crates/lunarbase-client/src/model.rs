@@ -358,11 +358,11 @@ pub enum QuoteEvent {
         /// New corruption state emitted by Core.
         corrupted: bool,
     },
-    /// Changes the execution-block delay after a lane update.
+    /// Changes the inclusive quote TTL after a lane update.
     BlockDelaySet {
         /// ERC-20 asset identifying the lane.
         asset: Address,
-        /// New delay decoded at its Solidity width.
+        /// New quote TTL decoded at its Solidity width.
         block_delay: u8,
     },
     /// Initializes or replaces configured-router partner information.

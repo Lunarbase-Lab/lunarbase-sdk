@@ -18,7 +18,7 @@ export interface LaneSlot0 {
   exists: boolean;
   /** Whether swaps through this lane are disabled. */
   paused: boolean;
-  /** Required execution-block delay after a price update. */
+  /** Inclusive quote TTL in execution blocks after a price update. */
   blockDelay: number;
   /** Lane-specific slippage coefficient in protocol BPS. */
   slippageKBps: number;
@@ -131,7 +131,7 @@ export type UnavailableReason =
   | { kind: "EqualAssets" }
   | { kind: "MissingLane"; asset: Address }
   | { kind: "PausedLane"; asset: Address }
-  | { kind: "DelayedLane"; asset: Address }
+  | { kind: "StaleLane"; asset: Address }
   | { kind: "ZeroPrincipal"; asset: Address }
   | { kind: "ZeroAnchor" }
   | { kind: "SpreadConsumesAnchor" }

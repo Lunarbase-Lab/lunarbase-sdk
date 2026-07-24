@@ -197,10 +197,12 @@ A lane is usable only when all conditions are true:
 ```text
 lane.exists
 !lane.paused
-executionBlockNumber >= latestUpdateBlock + blockDelay
+executionBlockNumber <= latestUpdateBlock + blockDelay
 ```
 
-For a route, both lanes must be valid.
+`blockDelay` is an inclusive quote TTL: an update at block `N` is valid through
+`N + blockDelay` and becomes stale at `N + blockDelay + 1`. For a route, both
+lanes must be valid.
 
 `addLane` sets the packed existence bit. `setBlockDelay`, `setSlippageKBps`, and `setLaneCorrupted` mutate
 their packed fields and emit dedicated events. Threshold fields are configured with lane state and preserved
@@ -440,7 +442,7 @@ return these exact values:
 | --- | ---: | ---: |
 | amount is zero | `0` | `0` |
 | `assetIn == assetOut` | `0` | `U256_MAX` |
-| missing/paused/delayed lane | `0` | `U256_MAX` |
+| missing/paused/stale lane | `0` | `U256_MAX` |
 | zero price after preceding arithmetic succeeds | `0` | `U256_MAX` |
 | required principal CASH value is zero | `0` | `U256_MAX` |
 | exact-in spread consumes anchor | `0` | not applicable |
@@ -474,7 +476,7 @@ Arithmetic overflow/division-by-zero is an error/revert equivalent, not an unava
 | --- | --- | --- | --- | --- |
 | CASH | deployment | direct/route selection | `cash()` | immutable |
 | Lane slot0 | asset | price, ask, bid, latest update | `lane(asset)` | `LaneUpdated` |
-| Lane controls | asset | exists, paused, delay, slippage K, corruption | packed `lane(asset)` | `LaneAdded`, `LaneRemoved`, `SlippageKSet`, `BlockDelaySet`, `LaneCorruptedSet` |
+| Lane controls | asset | exists, paused, quote TTL, slippage K, corruption | packed `lane(asset)` | `LaneAdded`, `LaneRemoved`, `SlippageKSet`, `BlockDelaySet`, `LaneCorruptedSet` |
 | Free output reserve | asset/CASH | settlement availability | `reserves(asset).assetReserve` | `Sync` |
 | Active principal | asset | principal CASH value/slippage | `reserves(asset).totalPrincipalAmount` | `DepositExecuted`, `WithdrawalExecuted` |
 | Whitelist | router | base fee adjustment | `whitelist(router)` | `WhitelistSet` |
@@ -524,7 +526,7 @@ parallel.
 | `LaneUpdated(asset, slot0)` | Replace the entire packed word. Cache the update even if the lane does not currently exist. |
 | `LaneCorruptedSet(asset, _, corrupted)` | Apply the corruption latch, including price-zero/pause semantics. |
 | `SlippageKSet(asset, _, newK)` | Replace the packed slippage-K field. |
-| `BlockDelaySet(asset, _, delay)` | Replace the packed delay field. |
+| `BlockDelaySet(asset, _, ttl)` | Replace the packed quote TTL field. |
 | `PartnerInfoSet(router, asset, fee, operator)` | Set partner fee; operator is optional non-quote metadata. |
 | `PartnerFeeSet(router, asset, fee)` | Set partner fee. |
 | `WhitelistSet(router, flag)` | Set router whitelist flag. |
@@ -986,7 +988,7 @@ Required vector groups:
 - exact-in and exact-out,
 - one-wei rounding boundaries,
 - zero amount, zero price, zero principal, equal assets,
-- missing/paused/delayed lane,
+- missing/paused/stale lane,
 - raw fee over BPS clamping,
 - whitelist true/false and multipliers 0, 1, large, and overflow-guard boundary,
 - slippage zero, cap, and sequential-ceil boundaries,

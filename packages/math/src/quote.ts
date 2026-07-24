@@ -36,8 +36,8 @@ function laneOrReason(state: QuoteState, asset: Address, executionBlockNumber: b
   const lane = state.lanes.get(asset.toLowerCase() as Address);
   if (!lane || !laneExists(lane)) return { kind: "MissingLane", asset };
   if (lanePaused(lane)) return { kind: "PausedLane", asset };
-  const readyAt = checkedAdd(laneSlot0LatestUpdateBlock(lane.slot0), BigInt(laneSlot0BlockDelay(lane.slot0)));
-  if (executionBlockNumber < readyAt) return { kind: "DelayedLane", asset };
+  const expiresAt = checkedAdd(laneSlot0LatestUpdateBlock(lane.slot0), BigInt(laneSlot0BlockDelay(lane.slot0)));
+  if (executionBlockNumber > expiresAt) return { kind: "StaleLane", asset };
   return lane;
 }
 

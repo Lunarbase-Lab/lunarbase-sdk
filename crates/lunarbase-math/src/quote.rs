@@ -31,10 +31,10 @@ fn lane_or_reason(
     if lane.paused() {
         return Err(UnavailableReason::PausedLane(asset));
     }
-    let ready_at = lane_slot0_latest_update_block(lane.slot0)
+    let expires_at = lane_slot0_latest_update_block(lane.slot0)
         .saturating_add(u64::from(lane_slot0_block_delay(lane.slot0)));
-    if execution_block_number < ready_at {
-        return Err(UnavailableReason::DelayedLane(asset));
+    if execution_block_number > expires_at {
+        return Err(UnavailableReason::StaleLane(asset));
     }
     Ok(lane)
 }
