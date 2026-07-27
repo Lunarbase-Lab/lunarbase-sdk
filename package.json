@@ -1,7 +1,7 @@
 {
   "name": "@lunarbase/sdk-workspace",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "repository": "git+https://github.com/Lunarbase-Lab/lunarbase-sdk.git",
   "packageManager": "pnpm@9.15.0",
   "scripts": {

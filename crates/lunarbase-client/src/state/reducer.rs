@@ -6,8 +6,8 @@ use crate::model::{
 };
 use lunarbase_math::arithmetic::BPS;
 use lunarbase_math::slot0::{
-    apply_lane_corrupted_set, set_lane_slot0_block_delay, set_lane_slot0_exists,
-    set_lane_slot0_slippage_k_bps,
+    set_lane_slot0_block_delay, set_lane_slot0_exists, set_lane_slot0_paused,
+    set_lane_slot0_price_push_threshold, set_lane_slot0_slippage_k_bps,
 };
 use lunarbase_math::state::QuoteState;
 use lunarbase_math::types::{Address, U256};
@@ -179,9 +179,16 @@ impl QuoteReducer {
 
     fn apply_event(&mut self, event: QuoteEvent) -> Result<(), ReducerError> {
         match event {
-            QuoteEvent::LaneAdded { asset } => {
+            QuoteEvent::LaneAdded {
+                asset,
+                price_push_threshold,
+            } => {
                 let lane = self.state.lanes.entry(asset).or_default();
-                lane.slot0 = set_lane_slot0_exists(lane.slot0, true);
+                let slot0 =
+                    set_lane_slot0_price_push_threshold(lane.slot0, price_push_threshold, true)
+                        .map_err(|_| ReducerError::InvalidWidth)?;
+                let slot0 = set_lane_slot0_exists(slot0, true);
+                lane.slot0 = set_lane_slot0_paused(slot0, true);
             }
             QuoteEvent::LaneRemoved { asset } => {
                 self.state.lanes.remove(&asset);
@@ -196,9 +203,19 @@ impl QuoteReducer {
                 let lane = self.state.lanes.entry(asset).or_default();
                 lane.slot0 = set_lane_slot0_slippage_k_bps(lane.slot0, new_k);
             }
-            QuoteEvent::LaneCorruptedSet { asset, corrupted } => {
+            QuoteEvent::LanePausedSet { asset, paused } => {
                 let lane = self.state.lanes.entry(asset).or_default();
-                lane.slot0 = apply_lane_corrupted_set(lane.slot0, corrupted);
+                lane.slot0 = set_lane_slot0_paused(lane.slot0, paused);
+            }
+            QuoteEvent::PricePushThresholdSet {
+                asset,
+                price_push_threshold,
+                enabled,
+            } => {
+                let lane = self.state.lanes.entry(asset).or_default();
+                lane.slot0 =
+                    set_lane_slot0_price_push_threshold(lane.slot0, price_push_threshold, enabled)
+                        .map_err(|_| ReducerError::InvalidWidth)?;
             }
             QuoteEvent::BlockDelaySet { asset, block_delay } => {
                 let lane = self.state.lanes.entry(asset).or_default();
@@ -301,7 +318,6 @@ mod tests {
         let asset = address(2);
         let slot0 = encode_lane_slot0(&LaneSlot0 {
             price: 100,
-            exists: true,
             ..Default::default()
         })
         .unwrap();
@@ -312,6 +328,25 @@ mod tests {
         state.lanes.insert(asset, LaneState::new(slot0, 0, 500));
         let mut reducer = QuoteReducer::new(state, address(3));
 
+        reducer
+            .apply_event(QuoteEvent::LaneAdded {
+                asset,
+                price_push_threshold: 9,
+            })
+            .unwrap();
+        let fields = decode_lane_slot0(reducer.state().lanes[&asset].slot0);
+        assert_eq!(fields.price, 100);
+        assert_eq!(fields.price_push_threshold, 9);
+        assert!(fields.threshold_enabled);
+        assert!(fields.exists);
+        assert!(fields.paused);
+
+        reducer
+            .apply_event(QuoteEvent::LanePausedSet {
+                asset,
+                paused: false,
+            })
+            .unwrap();
         reducer
             .apply_event(QuoteEvent::SlippageKSet {
                 asset,
@@ -338,17 +373,26 @@ mod tests {
         assert_eq!(lane.asset_reserve, 11);
         assert_eq!(lane.total_principal_amount, 500);
         assert_eq!(reducer.state().cash_reserve, 12);
+        assert!(!decode_lane_slot0(lane.slot0).paused);
 
         reducer
-            .apply_event(QuoteEvent::LaneCorruptedSet {
+            .apply_event(QuoteEvent::PricePushThresholdSet {
                 asset,
-                corrupted: true,
+                price_push_threshold: 17,
+                enabled: true,
+            })
+            .unwrap();
+        reducer
+            .apply_event(QuoteEvent::LanePausedSet {
+                asset,
+                paused: true,
             })
             .unwrap();
         let fields = decode_lane_slot0(reducer.state().lanes[&asset].slot0);
-        assert_eq!(fields.price, 0);
+        assert_eq!(fields.price, 100);
+        assert_eq!(fields.price_push_threshold, 17);
+        assert!(fields.threshold_enabled);
         assert!(fields.paused);
-        assert!(fields.corrupted);
     }
 
     #[test]

@@ -5,7 +5,7 @@ import type { Hex } from "ox/Hex";
 /** Current JSON checkpoint schema. */
 export const SCHEMA_VERSION = 4;
 /** Solidity revision whose arithmetic behavior this SDK implements. */
-export const MATH_COMPATIBILITY_VERSION = "lunarbase-contracts@cfeb6b86f425c5207f3cf80c8b40adde07d6a60b:math-v2";
+export const MATH_COMPATIBILITY_VERSION = "lunarbase-contracts@ad46cf7688c9839edbbd82271d4bd4576b4a1528:math-v3";
 
 /** Supported source families. */
 export enum Network {
@@ -179,11 +179,12 @@ export interface ChainDataSource {
 
 /** Decoded quote-critical Core event. `SwapExecuted` is intentionally absent. */
 export type QuoteEvent =
-  | { kind: "LaneAdded"; asset: Address }
+  | { kind: "LaneAdded"; asset: Address; pricePushThreshold: number }
   | { kind: "LaneRemoved"; asset: Address }
   | { kind: "LaneUpdated"; asset: Address; slot0: Word }
   | { kind: "SlippageKSet"; asset: Address; newK: number }
-  | { kind: "LaneCorruptedSet"; asset: Address; corrupted: boolean }
+  | { kind: "LanePausedSet"; asset: Address; paused: boolean }
+  | { kind: "PricePushThresholdSet"; asset: Address; pricePushThreshold: number; enabled: boolean }
   | { kind: "BlockDelaySet"; asset: Address; blockDelay: number }
   | { kind: "PartnerInfoSet"; router: Address; asset: Address; fee: number }
   | { kind: "PartnerFeeSet"; router: Address; asset: Address; fee: number }

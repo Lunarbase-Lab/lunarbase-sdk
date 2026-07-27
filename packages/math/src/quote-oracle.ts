@@ -76,7 +76,6 @@ const lane = (input: LaneVector, assetReserve: bigint): LaneState =>
       paused: input.paused,
       blockDelay: Number(input.blockDelay),
       slippageKBps: Number(input.slippageKBps),
-      corrupted: false,
       reservedHighBits: 0n,
     }),
     assetReserve,

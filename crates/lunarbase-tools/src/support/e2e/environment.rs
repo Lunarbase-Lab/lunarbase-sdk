@@ -87,7 +87,9 @@ impl MockChain {
             slot0: encode_lane_slot0(&LaneSlot0 {
                 price: u128::try_from(WAD * U256::from(2)).expect("test price fits uint128"),
                 ask_fee_bps: 10_000,
+                latest_update_block: 100,
                 exists: true,
+                block_delay: u8::MAX,
                 ..Default::default()
             })
             .map_err(|error| E2eError::Scenario(error.to_string()))?,

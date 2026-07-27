@@ -188,10 +188,18 @@ test("reducer applies packed controls and Sync, then rejects Upgraded", () => {
     transactionIndex: 0n,
     logIndex,
   });
-  reducer.apply(eventCursor(0n), { kind: "Sync", asset: ASSET, assetReserve: 11n, cashReserve: 12n });
-  reducer.apply(eventCursor(1n), { kind: "SlippageKSet", asset: ASSET, newK: 1_000 });
-  reducer.apply(eventCursor(2n), { kind: "BlockDelaySet", asset: ASSET, blockDelay: 7 });
-  reducer.apply(eventCursor(3n), { kind: "LaneCorruptedSet", asset: ASSET, corrupted: true });
+  reducer.apply(eventCursor(0n), { kind: "LaneAdded", asset: ASSET, pricePushThreshold: 9 });
+  reducer.apply(eventCursor(1n), { kind: "LanePausedSet", asset: ASSET, paused: false });
+  reducer.apply(eventCursor(2n), { kind: "Sync", asset: ASSET, assetReserve: 11n, cashReserve: 12n });
+  reducer.apply(eventCursor(3n), { kind: "SlippageKSet", asset: ASSET, newK: 1_000 });
+  reducer.apply(eventCursor(4n), { kind: "BlockDelaySet", asset: ASSET, blockDelay: 7 });
+  reducer.apply(eventCursor(5n), {
+    kind: "PricePushThresholdSet",
+    asset: ASSET,
+    pricePushThreshold: 17,
+    enabled: true,
+  });
+  reducer.apply(eventCursor(6n), { kind: "LanePausedSet", asset: ASSET, paused: true });
 
   const checkpoint = reducer.checkpoint(deployment());
   assert.ok(checkpoint);
@@ -202,14 +210,15 @@ test("reducer applies packed controls and Sync, then rejects Upgraded", () => {
   assert.equal(lane?.totalPrincipalAmount, 0n);
   if (!lane) return;
   const fields = decodeLaneSlot0(lane.slot0);
-  assert.equal(fields.price, 0n);
+  assert.equal(fields.price, WAD);
+  assert.equal(fields.pricePushThreshold, 17n);
+  assert.equal(fields.thresholdEnabled, true);
   assert.equal(fields.slippageKBps, 1_000);
   assert.equal(fields.blockDelay, 7);
   assert.equal(fields.paused, true);
-  assert.equal(fields.corrupted, true);
   assert.throws(
     () =>
-      reducer.apply(eventCursor(4n), {
+      reducer.apply(eventCursor(7n), {
         kind: "ImplementationUpgraded",
         implementation: "0x9999999999999999999999999999999999999999",
       }),
@@ -261,7 +270,6 @@ function snapshot(): BootstrapSnapshot {
             paused: false,
             blockDelay: 0,
             slippageKBps: 0,
-            corrupted: false,
             reservedHighBits: 0n,
           }),
           1_000_000n,

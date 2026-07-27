@@ -31,10 +31,17 @@ pub mod core {
             view
             returns (uint128 cumFees, uint32 fee, uint32 latestWithdrawTimestamp, address operator);
 
-        event LaneAdded(address indexed asset);
+        event LaneAdded(address indexed asset, uint8 pricePushThreshold);
         event LaneRemoved(address indexed asset);
         event LaneUpdated(address indexed asset, bytes32 slot0);
-        event LaneCorruptedSet(address indexed asset, bool previousCorrupted, bool newCorrupted);
+        event LanePausedSet(address indexed asset, bool previousPaused, bool newPaused);
+        event PricePushThresholdSet(
+            address indexed asset,
+            uint8 previousThreshold,
+            uint8 newThreshold,
+            bool previousEnabled,
+            bool newEnabled
+        );
         event SlippageKSet(address indexed asset, uint32 previousK, uint32 newK);
         event BlockDelaySet(address indexed asset, uint8 previousBlockDelay, uint8 newBlockDelay);
         event PartnerInfoSet(
@@ -71,7 +78,8 @@ pub const TOPIC_LANE_ADDED: B256 = core::LaneAdded::SIGNATURE_HASH;
 /// Event signature used to remove lanes during discovery replay.
 pub const TOPIC_LANE_REMOVED: B256 = core::LaneRemoved::SIGNATURE_HASH;
 const TOPIC_LANE_UPDATED: B256 = core::LaneUpdated::SIGNATURE_HASH;
-const TOPIC_LANE_CORRUPTED_SET: B256 = core::LaneCorruptedSet::SIGNATURE_HASH;
+const TOPIC_LANE_PAUSED_SET: B256 = core::LanePausedSet::SIGNATURE_HASH;
+const TOPIC_PRICE_PUSH_THRESHOLD_SET: B256 = core::PricePushThresholdSet::SIGNATURE_HASH;
 const TOPIC_SLIPPAGE_K_SET: B256 = core::SlippageKSet::SIGNATURE_HASH;
 const TOPIC_BLOCK_DELAY_SET: B256 = core::BlockDelaySet::SIGNATURE_HASH;
 const TOPIC_PARTNER_INFO_SET: B256 = core::PartnerInfoSet::SIGNATURE_HASH;
@@ -89,12 +97,13 @@ pub fn lane_discovery_topics() -> [B256; 2] {
 }
 
 /// Returns every quote-critical Core topic accepted by the reducer.
-pub fn quote_critical_topics() -> [B256; 14] {
+pub fn quote_critical_topics() -> [B256; 15] {
     [
         TOPIC_LANE_ADDED,
         TOPIC_LANE_REMOVED,
         TOPIC_LANE_UPDATED,
-        TOPIC_LANE_CORRUPTED_SET,
+        TOPIC_LANE_PAUSED_SET,
+        TOPIC_PRICE_PUSH_THRESHOLD_SET,
         TOPIC_SLIPPAGE_K_SET,
         TOPIC_BLOCK_DELAY_SET,
         TOPIC_PARTNER_INFO_SET,
@@ -129,9 +138,12 @@ fn decode<E: SolEvent>(log: &ContractLog, error: LogDecodeError) -> Result<E, Lo
 pub fn decode_core_event(log: &ContractLog) -> Result<Option<QuoteEvent>, LogDecodeError> {
     let topic0 = *log.topics.first().ok_or(LogDecodeError::MissingTopic0)?;
     let event = if topic0 == TOPIC_LANE_ADDED {
-        expect_shape(log, 2, 0)?;
+        expect_shape(log, 2, 1)?;
         let event = decode::<core::LaneAdded>(log, LogDecodeError::InvalidAddress)?;
-        Some(QuoteEvent::LaneAdded { asset: event.asset })
+        Some(QuoteEvent::LaneAdded {
+            asset: event.asset,
+            price_push_threshold: event.pricePushThreshold,
+        })
     } else if topic0 == TOPIC_LANE_REMOVED {
         expect_shape(log, 2, 0)?;
         let event = decode::<core::LaneRemoved>(log, LogDecodeError::InvalidAddress)?;
@@ -150,12 +162,20 @@ pub fn decode_core_event(log: &ContractLog) -> Result<Option<QuoteEvent>, LogDec
             asset: event.asset,
             new_k: event.newK,
         })
-    } else if topic0 == TOPIC_LANE_CORRUPTED_SET {
+    } else if topic0 == TOPIC_LANE_PAUSED_SET {
         expect_shape(log, 2, 2)?;
-        let event = decode::<core::LaneCorruptedSet>(log, LogDecodeError::InvalidBoolean)?;
-        Some(QuoteEvent::LaneCorruptedSet {
+        let event = decode::<core::LanePausedSet>(log, LogDecodeError::InvalidBoolean)?;
+        Some(QuoteEvent::LanePausedSet {
             asset: event.asset,
-            corrupted: event.newCorrupted,
+            paused: event.newPaused,
+        })
+    } else if topic0 == TOPIC_PRICE_PUSH_THRESHOLD_SET {
+        expect_shape(log, 2, 4)?;
+        let event = decode::<core::PricePushThresholdSet>(log, LogDecodeError::InvalidBoolean)?;
+        Some(QuoteEvent::PricePushThresholdSet {
+            asset: event.asset,
+            price_push_threshold: event.newThreshold,
+            enabled: event.newEnabled,
         })
     } else if topic0 == TOPIC_BLOCK_DELAY_SET {
         expect_shape(log, 2, 2)?;
@@ -232,12 +252,25 @@ pub fn decode_core_event(log: &ContractLog) -> Result<Option<QuoteEvent>, LogDec
 mod tests {
     use crate::model::{ChainCursor, Commitment, ContractLog, QuoteEvent};
     use crate::protocol::abi::{
-        TOPIC_DEPOSIT_EXECUTED, TOPIC_WITHDRAWAL_EXECUTED, decode_core_event,
+        TOPIC_DEPOSIT_EXECUTED, TOPIC_LANE_ADDED, TOPIC_LANE_PAUSED_SET,
+        TOPIC_PRICE_PUSH_THRESHOLD_SET, TOPIC_WITHDRAWAL_EXECUTED, decode_core_event,
     };
     use lunarbase_math::types::{Address, B256, U256};
 
     #[test]
     fn generated_topics_match_the_pinned_solidity_abi() {
+        assert_eq!(
+            format!("{TOPIC_LANE_ADDED:#x}"),
+            "0x6cae71316970c32843d474efd54a6fe3e81b2cb11b40f4f4ba09ca8bcebe51cb"
+        );
+        assert_eq!(
+            format!("{TOPIC_LANE_PAUSED_SET:#x}"),
+            "0x457fade720abbce2ed945bda9c751bcadaddbd87a70e8d0c79b156e9aa4d3399"
+        );
+        assert_eq!(
+            format!("{TOPIC_PRICE_PUSH_THRESHOLD_SET:#x}"),
+            "0x6b38206650880c4736891c797636196db2056062d3a8011e4074feecbe8ae337"
+        );
         assert_eq!(
             format!("{TOPIC_DEPOSIT_EXECUTED:#x}"),
             "0x9fb4891ffe3e11f428f3f10fa362b7938a364beebc215a2ec1db56a8d05ba20f"
@@ -245,6 +278,42 @@ mod tests {
         assert_eq!(
             format!("{TOPIC_WITHDRAWAL_EXECUTED:#x}"),
             "0x722ca578dc087cbf283dc08891a94ba45b7119723568feda14da8f4c9c35d251"
+        );
+    }
+
+    #[test]
+    fn lane_control_events_decode_the_new_contract_schema() {
+        let asset = Address::new([0x11; 20]);
+        let added = lane_log(TOPIC_LANE_ADDED, asset, &[U256::from(42)]);
+        assert_eq!(
+            decode_core_event(&added).unwrap(),
+            Some(QuoteEvent::LaneAdded {
+                asset,
+                price_push_threshold: 42,
+            })
+        );
+
+        let paused = lane_log(TOPIC_LANE_PAUSED_SET, asset, &[U256::ZERO, U256::ONE]);
+        assert_eq!(
+            decode_core_event(&paused).unwrap(),
+            Some(QuoteEvent::LanePausedSet {
+                asset,
+                paused: true,
+            })
+        );
+
+        let threshold = lane_log(
+            TOPIC_PRICE_PUSH_THRESHOLD_SET,
+            asset,
+            &[U256::from(9), U256::from(17), U256::ONE, U256::ZERO],
+        );
+        assert_eq!(
+            decode_core_event(&threshold).unwrap(),
+            Some(QuoteEvent::PricePushThresholdSet {
+                asset,
+                price_push_threshold: 17,
+                enabled: false,
+            })
         );
     }
 
@@ -285,5 +354,29 @@ mod tests {
                 principal: 7,
             })
         );
+    }
+
+    fn lane_log(topic0: B256, asset: Address, words: &[U256]) -> ContractLog {
+        let mut data = Vec::with_capacity(words.len() * 32);
+        for word in words {
+            data.extend_from_slice(&word.to_be_bytes::<32>());
+        }
+        ContractLog {
+            address: Address::new([0x22; 20]),
+            topics: vec![topic0, B256::left_padding_from(asset.as_slice())],
+            data: data.into(),
+            removed: false,
+            cursor: ChainCursor {
+                chain_id: 1,
+                block_number: 1,
+                execution_block_number: 1,
+                block_hash: Some(B256::new([0x33; 32])),
+                transaction_index: Some(0),
+                log_index: Some(0),
+                source_sequence: Some(1),
+                source_sub_index: Some(0),
+                commitment: Commitment::Canonical,
+            },
+        }
     }
 }

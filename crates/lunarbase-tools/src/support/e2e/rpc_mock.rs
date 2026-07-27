@@ -62,7 +62,7 @@ fn discovery_logs(request: &Value, block: u64) -> Value {
     json!([{
         "address": CORE,
         "topics": [added, address_word(ASSET)],
-        "data": "0x",
+        "data": word_hex(B256::from(U256::from(127_u8).to_be_bytes::<32>())),
         "removed": false,
         "blockNumber": "0x1",
         "blockHash": block_hash(1),

@@ -10,7 +10,7 @@ pub const SCHEMA_VERSION: u16 = 4;
 
 /// Pinned Solidity implementation used by both pure math packages.
 pub const MATH_COMPATIBILITY_VERSION: &str =
-    "lunarbase-contracts@cfeb6b86f425c5207f3cf80c8b40adde07d6a60b:math-v2";
+    "lunarbase-contracts@ad46cf7688c9839edbbd82271d4bd4576b4a1528:math-v3";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 /// Supported chain families.
@@ -327,10 +327,12 @@ impl Checkpoint {
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Decoded quote-critical Core transition.
 pub enum QuoteEvent {
-    /// Marks a newly configured asset lane as available.
+    /// Adds a paused asset lane with threshold checks enabled.
     LaneAdded {
         /// ERC-20 asset identifying the lane.
         asset: Address,
+        /// Initial seven-bit price-push threshold.
+        price_push_threshold: u8,
     },
     /// Removes an asset lane from quote state.
     LaneRemoved {
@@ -351,12 +353,21 @@ pub enum QuoteEvent {
         /// New basis-point coefficient decoded at its Solidity width.
         new_k: u32,
     },
-    /// Changes the owner-controlled corruption latch and pause state.
-    LaneCorruptedSet {
+    /// Changes whether swaps through one lane are paused.
+    LanePausedSet {
         /// ERC-20 asset identifying the lane.
         asset: Address,
-        /// New corruption state emitted by Core.
-        corrupted: bool,
+        /// New lane pause state emitted by Core.
+        paused: bool,
+    },
+    /// Changes one lane's price-push threshold policy.
+    PricePushThresholdSet {
+        /// ERC-20 asset identifying the lane.
+        asset: Address,
+        /// New seven-bit percentage threshold.
+        price_push_threshold: u8,
+        /// Whether the threshold is enforced for later operator updates.
+        enabled: bool,
     },
     /// Changes the inclusive quote TTL after a lane update.
     BlockDelaySet {

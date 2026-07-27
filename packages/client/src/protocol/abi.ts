@@ -43,9 +43,12 @@ export function decodeCoreEvent(log: ContractLog): QuoteEvent | undefined {
   if (topic0 === undefined) throw new LogDecodeError("MISSING_TOPIC0", "event log has no topic0");
 
   if (topic0 === CORE_EVENT_TOPICS.LaneAdded) {
-    expectShape(log, 2, 0);
-    const { asset } = decode<{ asset: Address }>(CORE_EVENTS.LaneAdded, log);
-    return { kind: "LaneAdded", asset };
+    expectShape(log, 2, 1);
+    const { asset, pricePushThreshold } = decode<{ asset: Address; pricePushThreshold: number }>(
+      CORE_EVENTS.LaneAdded,
+      log,
+    );
+    return { kind: "LaneAdded", asset, pricePushThreshold };
   }
   if (topic0 === CORE_EVENT_TOPICS.LaneRemoved) {
     expectShape(log, 2, 0);
@@ -62,13 +65,19 @@ export function decodeCoreEvent(log: ContractLog): QuoteEvent | undefined {
     const { asset, newK } = decode<{ asset: Address; newK: number }>(CORE_EVENTS.SlippageKSet, log);
     return { kind: "SlippageKSet", asset, newK };
   }
-  if (topic0 === CORE_EVENT_TOPICS.LaneCorruptedSet) {
+  if (topic0 === CORE_EVENT_TOPICS.LanePausedSet) {
     expectShape(log, 2, 2);
-    const { asset, newCorrupted } = decode<{ asset: Address; newCorrupted: boolean }>(
-      CORE_EVENTS.LaneCorruptedSet,
-      log,
-    );
-    return { kind: "LaneCorruptedSet", asset, corrupted: newCorrupted };
+    const { asset, newPaused } = decode<{ asset: Address; newPaused: boolean }>(CORE_EVENTS.LanePausedSet, log);
+    return { kind: "LanePausedSet", asset, paused: newPaused };
+  }
+  if (topic0 === CORE_EVENT_TOPICS.PricePushThresholdSet) {
+    expectShape(log, 2, 4);
+    const { asset, newThreshold, newEnabled } = decode<{
+      asset: Address;
+      newThreshold: number;
+      newEnabled: boolean;
+    }>(CORE_EVENTS.PricePushThresholdSet, log);
+    return { kind: "PricePushThresholdSet", asset, pricePushThreshold: newThreshold, enabled: newEnabled };
   }
   if (topic0 === CORE_EVENT_TOPICS.BlockDelaySet) {
     expectShape(log, 2, 2);

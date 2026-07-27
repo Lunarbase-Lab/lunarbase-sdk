@@ -75,8 +75,7 @@ test("slot0 round-trips boundaries and reserved bits", () => {
     paused: true,
     blockDelay: 0xff,
     slippageKBps: 0xffff_ffff,
-    corrupted: true,
-    reservedHighBits: (1n << 13n) - 1n,
+    reservedHighBits: (1n << 14n) - 1n,
   };
   assert.deepEqual(decodeLaneSlot0(encodeLaneSlot0(fields)), fields);
 });
@@ -185,8 +184,7 @@ test("packed update preserves threshold and reserved bits", () => {
     paused: false,
     blockDelay: 15,
     slippageKBps: 16,
-    corrupted: false,
-    reservedHighBits: (1n << 13n) - 1n,
+    reservedHighBits: (1n << 14n) - 1n,
   });
   const updated = decodeLaneSlot0(applyLaneUpdateSlot0(previous, 11n, encodeUpdateFees(12n, 13n), 14n));
   assert.equal(updated.price, 11n);
@@ -197,7 +195,7 @@ test("packed update preserves threshold and reserved bits", () => {
   assert.equal(updated.thresholdEnabled, true);
 });
 
-test("packed update applies strict symmetric threshold and corruption latch", () => {
+test("packed update applies strict symmetric threshold pause and accepts later updates", () => {
   const base = encodeLaneSlot0({
     ...EMPTY_SLOT0,
     price: 100n,
@@ -207,24 +205,19 @@ test("packed update applies strict symmetric threshold and corruption latch", ()
   });
   const boundary = decodeLaneSlot0(applyLaneUpdateSlot0(base, 110n, 0n, 7n));
   assert.equal(boundary.price, 110n);
-  assert.equal(boundary.corrupted, false);
+  assert.equal(boundary.paused, false);
   for (const price of [89n, 111n]) {
-    const corrupted = decodeLaneSlot0(applyLaneUpdateSlot0(base, price, 0n, 8n));
-    assert.equal(corrupted.price, 0n);
-    assert.equal(corrupted.paused, true);
-    assert.equal(corrupted.corrupted, true);
+    const paused = decodeLaneSlot0(applyLaneUpdateSlot0(base, price, 0n, 8n));
+    assert.equal(paused.price, price);
+    assert.equal(paused.paused, true);
   }
-  const ignored = decodeLaneSlot0(
-    applyLaneUpdateSlot0(
-      encodeLaneSlot0({ ...EMPTY_SLOT0, price: 100n, corrupted: true }),
-      77n,
-      encodeUpdateFees(12n, 13n),
-      9n,
-    ),
-  );
-  assert.equal(ignored.price, 0n);
-  assert.equal(ignored.askFeeBps, 0n);
-  assert.equal(ignored.latestUpdateBlock, 0n);
+  const paused = applyLaneUpdateSlot0(base, 89n, 0n, 8n);
+  const refreshed = decodeLaneSlot0(applyLaneUpdateSlot0(paused, 77n, encodeUpdateFees(12n, 13n), 9n));
+  assert.equal(refreshed.price, 77n);
+  assert.equal(refreshed.askFeeBps, 12n);
+  assert.equal(refreshed.bidFeeBps, 13n);
+  assert.equal(refreshed.latestUpdateBlock, 9n);
+  assert.equal(refreshed.paused, true);
 });
 
 test("reserve boundary matches exact-in and exact-out settlement", () => {
@@ -345,7 +338,6 @@ test("shared golden vectors match TypeScript engine", () => {
             paused: lane.paused,
             blockDelay: Number(lane.blockDelay),
             slippageKBps: Number(lane.slippageKBps),
-            corrupted: false,
             reservedHighBits: 0n,
           }),
           (1n << 128n) - 1n,

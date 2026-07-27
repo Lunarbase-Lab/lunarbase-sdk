@@ -8,7 +8,7 @@ const THRESHOLD_BITS: usize = 7;
 const BLOCK_BITS: usize = 40;
 const BLOCK_DELAY_BITS: usize = 8;
 const SLIPPAGE_K_BITS: usize = 32;
-const RESERVED_BITS: usize = 13;
+const RESERVED_BITS: usize = 14;
 
 const PRICE_SHIFT: usize = 0;
 const ASK_FEE_SHIFT: usize = 112;
@@ -20,8 +20,7 @@ const EXISTS_SHIFT: usize = 200;
 const PAUSED_SHIFT: usize = 201;
 const BLOCK_DELAY_SHIFT: usize = 202;
 const SLIPPAGE_K_SHIFT: usize = 210;
-const CORRUPTED_SHIFT: usize = 242;
-const RESERVED_SHIFT: usize = 243;
+const RESERVED_SHIFT: usize = 242;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 /// Native-width boundary view of the packed `Lane.slot0` word.
@@ -50,9 +49,7 @@ pub struct LaneSlot0 {
     pub block_delay: u8,
     /// Lane-specific slippage coefficient in protocol BPS.
     pub slippage_k_bps: u32,
-    /// Owner-controlled corruption latch set by excessive price movement.
-    pub corrupted: bool,
-    /// Uninterpreted upper 13 bits preserved across decode/encode operations.
+    /// Uninterpreted upper 14 bits preserved across decode/encode operations.
     pub reserved_high_bits: u16,
 }
 
@@ -119,10 +116,9 @@ pub fn decode_lane_slot0(word: U256) -> LaneSlot0 {
         slippage_k_bps: read_field(word, SLIPPAGE_K_SHIFT, SLIPPAGE_K_BITS)
             .try_into()
             .expect("32-bit slippage K fits u32"),
-        corrupted: read_field(word, CORRUPTED_SHIFT, 1) == U256::ONE,
         reserved_high_bits: read_field(word, RESERVED_SHIFT, RESERVED_BITS)
             .try_into()
-            .expect("13-bit reserved field fits u16"),
+            .expect("14-bit reserved field fits u16"),
     }
 }
 
@@ -181,15 +177,45 @@ pub fn lane_slot0_slippage_k_bps(word: U256) -> u32 {
 }
 
 #[inline(always)]
-/// Reads the owner-controlled corruption latch.
-pub fn lane_slot0_corrupted(word: U256) -> bool {
-    read_field(word, CORRUPTED_SHIFT, 1) == U256::ONE
-}
-
-#[inline(always)]
 /// Replaces the packed existence bit.
 pub fn set_lane_slot0_exists(word: U256, exists: bool) -> U256 {
     write_field(word, U256::from(exists), EXISTS_SHIFT, 1)
+}
+
+#[inline(always)]
+/// Replaces the packed lane pause bit.
+pub fn set_lane_slot0_paused(word: U256, paused: bool) -> U256 {
+    write_field(word, U256::from(paused), PAUSED_SHIFT, 1)
+}
+
+/// Replaces the packed price-push threshold and its enable bit.
+///
+/// # Errors
+///
+/// Returns [`MathError::FieldOverflow`] when `price_push_threshold` exceeds
+/// the contract's seven-bit field.
+pub fn set_lane_slot0_price_push_threshold(
+    word: U256,
+    price_push_threshold: u8,
+    enabled: bool,
+) -> Result<U256, MathError> {
+    validate_native(
+        price_push_threshold.into(),
+        THRESHOLD_BITS,
+        "pricePushThreshold",
+    )?;
+    let word = write_field(
+        word,
+        U256::from(price_push_threshold),
+        THRESHOLD_SHIFT,
+        THRESHOLD_BITS,
+    );
+    Ok(write_field(
+        word,
+        U256::from(enabled),
+        THRESHOLD_ENABLED_SHIFT,
+        1,
+    ))
 }
 
 #[inline(always)]
@@ -212,17 +238,6 @@ pub fn set_lane_slot0_slippage_k_bps(word: U256, slippage_k_bps: u32) -> U256 {
         SLIPPAGE_K_SHIFT,
         SLIPPAGE_K_BITS,
     )
-}
-
-/// Mirrors `LanesLib.setLaneCorrupted` on one packed word.
-pub fn apply_lane_corrupted_set(word: U256, corrupted: bool) -> U256 {
-    let word = if corrupted {
-        write_field(word, U256::ZERO, PRICE_SHIFT, PRICE_BITS)
-    } else {
-        word
-    };
-    let word = write_field(word, U256::from(corrupted), CORRUPTED_SHIFT, 1);
-    write_field(word, U256::from(corrupted), PAUSED_SHIFT, 1)
 }
 
 /// Encodes a native-width view into the exact 256-bit storage word.
@@ -266,9 +281,6 @@ pub fn encode_lane_slot0(fields: &LaneSlot0) -> Result<U256, MathError> {
     }
     word |= U256::from(fields.block_delay) << BLOCK_DELAY_SHIFT;
     word |= U256::from(fields.slippage_k_bps) << SLIPPAGE_K_SHIFT;
-    if fields.corrupted {
-        word |= U256::ONE << CORRUPTED_SHIFT;
-    }
     word |= U256::from(fields.reserved_high_bits) << RESERVED_SHIFT;
     Ok(word)
 }
@@ -295,7 +307,7 @@ pub fn decode_update_fees(fees: u64) -> Result<(u32, u32), MathError> {
     Ok(((fees & mask) as u32, (fees >> FEE_BITS) as u32))
 }
 
-/// Applies the Solidity operator update, including threshold corruption.
+/// Applies the Solidity operator update, including threshold-triggered pause.
 ///
 /// # Errors
 ///
@@ -312,10 +324,6 @@ pub fn apply_lane_update_slot0(
     validate_native(block_number.into(), BLOCK_BITS, "blockNumber")?;
     let (ask_fee_bps, bid_fee_bps) = decode_update_fees(fees)?;
     let mut fields = decode_lane_slot0(previous);
-    if fields.corrupted {
-        fields.price = 0;
-        return encode_lane_slot0(&fields);
-    }
     let delta = price.abs_diff(fields.price);
     let exceeds_threshold = fields.threshold_enabled
         && fields.price != 0
@@ -325,9 +333,7 @@ pub fn apply_lane_update_slot0(
     fields.bid_fee_bps = bid_fee_bps;
     fields.latest_update_block = block_number;
     if exceeds_threshold {
-        fields.price = 0;
         fields.paused = true;
-        fields.corrupted = true;
     }
     encode_lane_slot0(&fields)
 }

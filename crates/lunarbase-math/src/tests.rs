@@ -36,8 +36,7 @@ fn slot0_round_trips_boundaries_and_reserved_bits() {
         paused: true,
         block_delay: u8::MAX,
         slippage_k_bps: u32::MAX,
-        corrupted: true,
-        reserved_high_bits: (1u16 << 13) - 1,
+        reserved_high_bits: (1u16 << 14) - 1,
     };
     assert_eq!(
         decode_lane_slot0(encode_lane_slot0(&fields).unwrap()),
@@ -218,8 +217,7 @@ fn packed_update_preserves_unwritten_bits() {
         paused: false,
         block_delay: 15,
         slippage_k_bps: 16,
-        corrupted: false,
-        reserved_high_bits: (1u16 << 13) - 1,
+        reserved_high_bits: (1u16 << 14) - 1,
     })
     .unwrap();
     let updated =
@@ -231,14 +229,14 @@ fn packed_update_preserves_unwritten_bits() {
     assert_eq!(fields.latest_update_block, 14);
     assert_eq!(fields.price_push_threshold, 63);
     assert!(fields.threshold_enabled);
-    assert_eq!(fields.reserved_high_bits, (1u16 << 13) - 1);
+    assert_eq!(fields.reserved_high_bits, (1u16 << 14) - 1);
     assert!(fields.exists);
     assert_eq!(fields.block_delay, 15);
     assert_eq!(fields.slippage_k_bps, 16);
 }
 
 #[test]
-fn packed_update_matches_threshold_and_corruption_latch() {
+fn packed_update_matches_threshold_pause_and_accepts_later_updates() {
     let base = encode_lane_slot0(&LaneSlot0 {
         price: 100,
         price_push_threshold: 10,
@@ -250,32 +248,24 @@ fn packed_update_matches_threshold_and_corruption_latch() {
     let boundary = apply_lane_update_slot0(base, 110, 0, 7).unwrap();
     let boundary_fields = decode_lane_slot0(boundary);
     assert_eq!(boundary_fields.price, 110);
-    assert!(!boundary_fields.corrupted);
+    assert!(!boundary_fields.paused);
 
     for price in [89, 111] {
-        let corrupted = apply_lane_update_slot0(base, price, 0, 8).unwrap();
-        let fields = decode_lane_slot0(corrupted);
-        assert_eq!(fields.price, 0);
+        let paused = apply_lane_update_slot0(base, price, 0, 8).unwrap();
+        let fields = decode_lane_slot0(paused);
+        assert_eq!(fields.price, price);
         assert!(fields.paused);
-        assert!(fields.corrupted);
     }
 
-    let ignored = apply_lane_update_slot0(
-        encode_lane_slot0(&LaneSlot0 {
-            price: 100,
-            corrupted: true,
-            ..Default::default()
-        })
-        .unwrap(),
-        77,
-        encode_update_fees(12, 13).unwrap(),
-        9,
-    )
-    .unwrap();
-    let ignored_fields = decode_lane_slot0(ignored);
-    assert_eq!(ignored_fields.price, 0);
-    assert_eq!(ignored_fields.ask_fee_bps, 0);
-    assert_eq!(ignored_fields.latest_update_block, 0);
+    let paused = apply_lane_update_slot0(base, 89, 0, 8).unwrap();
+    let refreshed =
+        apply_lane_update_slot0(paused, 77, encode_update_fees(12, 13).unwrap(), 9).unwrap();
+    let refreshed_fields = decode_lane_slot0(refreshed);
+    assert_eq!(refreshed_fields.price, 77);
+    assert_eq!(refreshed_fields.ask_fee_bps, 12);
+    assert_eq!(refreshed_fields.bid_fee_bps, 13);
+    assert_eq!(refreshed_fields.latest_update_block, 9);
+    assert!(refreshed_fields.paused);
 }
 
 #[test]

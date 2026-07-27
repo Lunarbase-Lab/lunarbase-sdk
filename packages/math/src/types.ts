@@ -22,9 +22,7 @@ export interface LaneSlot0 {
   blockDelay: number;
   /** Lane-specific slippage coefficient in protocol BPS. */
   slippageKBps: number;
-  /** Owner-controlled corruption latch. */
-  corrupted: boolean;
-  /** Unassigned high 13 bits preserved for bit-exact round trips. */
+  /** Unassigned high 14 bits preserved for bit-exact round trips. */
   reservedHighBits: bigint;
 }
 
@@ -40,7 +38,6 @@ export const EMPTY_SLOT0: LaneSlot0 = Object.freeze({
   paused: false,
   blockDelay: 0,
   slippageKBps: 0,
-  corrupted: false,
   reservedHighBits: 0n,
 });
 

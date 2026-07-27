@@ -31,8 +31,7 @@ export function decodeLaneSlot0(word: Word): LaneSlot0 {
     paused: readField(word, 201n, 1n) === 1n,
     blockDelay: Number(readField(word, 202n, 8n)),
     slippageKBps: Number(readField(word, 210n, 32n)),
-    corrupted: readField(word, 242n, 1n) === 1n,
-    reservedHighBits: word >> 243n,
+    reservedHighBits: word >> 242n,
   };
 }
 /** Returns the packed 112-bit lane price. */
@@ -53,9 +52,6 @@ export const laneSlot0BlockDelay = (word: Word): number => Number((assertU256(wo
 /** Returns the packed lane slippage coefficient. */
 export const laneSlot0SlippageKBps = (word: Word): number =>
   Number((assertU256(word, "slot0") >> 210n) & SLOT0_SLIPPAGE_K_MASK);
-/** Returns the packed corruption latch. */
-export const laneSlot0Corrupted = (word: Word): boolean => ((assertU256(word, "slot0") >> 242n) & 1n) === 1n;
-
 function replaceField(word: Word, value: bigint, shift: bigint, bits: bigint): Word {
   const mask = fieldMask(bits) << shift;
   return assertU256((word & ~mask) | ((value & fieldMask(bits)) << shift), "slot0");
@@ -63,6 +59,15 @@ function replaceField(word: Word, value: bigint, shift: bigint, bits: bigint): W
 
 /** Replaces the packed existence bit. */
 export const setLaneSlot0Exists = (word: Word, exists: boolean): Word => replaceField(word, exists ? 1n : 0n, 200n, 1n);
+/** Replaces the packed lane pause bit. */
+export const setLaneSlot0Paused = (word: Word, paused: boolean): Word => replaceField(word, paused ? 1n : 0n, 201n, 1n);
+/** Replaces the packed price-push threshold and its enable bit. */
+export function setLaneSlot0PricePushThreshold(word: Word, pricePushThreshold: number, enabled: boolean): Word {
+  if (!Number.isSafeInteger(pricePushThreshold) || pricePushThreshold < 0 || pricePushThreshold > 0x7f)
+    throw new RangeError("pricePushThreshold does not fit uint7");
+  const updated = replaceField(word, BigInt(pricePushThreshold), 152n, 7n);
+  return replaceField(updated, enabled ? 1n : 0n, 159n, 1n);
+}
 /** Replaces the packed block delay. */
 export const setLaneSlot0BlockDelay = (word: Word, blockDelay: number): Word => {
   if (!Number.isSafeInteger(blockDelay) || blockDelay < 0 || blockDelay > 0xff)
@@ -75,12 +80,6 @@ export const setLaneSlot0SlippageKBps = (word: Word, slippageKBps: number): Word
     throw new RangeError("slippageKBps does not fit uint32");
   return replaceField(word, BigInt(slippageKBps), 210n, 32n);
 };
-/** Mirrors `LanesLib.setLaneCorrupted` on one packed word. */
-export function applyLaneCorruptedSet(word: Word, corrupted: boolean): Word {
-  let updated = corrupted ? replaceField(word, 0n, 0n, 112n) : word;
-  updated = replaceField(updated, corrupted ? 1n : 0n, 242n, 1n);
-  return replaceField(updated, corrupted ? 1n : 0n, 201n, 1n);
-}
 /** Encodes a validated lane slot into the canonical bit layout. */
 export function encodeLaneSlot0(fields: LaneSlot0): Word {
   validateField(fields.price, 112n, "price");
@@ -92,7 +91,7 @@ export function encodeLaneSlot0(fields: LaneSlot0): Word {
     throw new RangeError("blockDelay does not fit uint8");
   if (!Number.isSafeInteger(fields.slippageKBps) || fields.slippageKBps < 0 || fields.slippageKBps > 0xffff_ffff)
     throw new RangeError("slippageKBps does not fit uint32");
-  validateField(fields.reservedHighBits, 13n, "reservedHighBits");
+  validateField(fields.reservedHighBits, 14n, "reservedHighBits");
   let word =
     fields.price | (fields.askFeeBps << 112n) | (fields.bidFeeBps << 132n) | (fields.pricePushThreshold << 152n);
   if (fields.thresholdEnabled) word |= 1n << 159n;
@@ -101,8 +100,7 @@ export function encodeLaneSlot0(fields: LaneSlot0): Word {
   if (fields.paused) word |= 1n << 201n;
   word |= BigInt(fields.blockDelay) << 202n;
   word |= BigInt(fields.slippageKBps) << 210n;
-  if (fields.corrupted) word |= 1n << 242n;
-  word |= fields.reservedHighBits << 243n;
+  word |= fields.reservedHighBits << 242n;
   return assertU256(word, "slot0");
 }
 /** Packs ask and bid fees into the 40-bit update-fee payload. */
@@ -123,17 +121,15 @@ export function applyLaneUpdateSlot0(previous: Word, price: bigint, fees: bigint
   validateField(blockNumber, 40n, "blockNumber");
   const [askFeeBps, bidFeeBps] = decodeUpdateFees(fees);
   const fields = decodeLaneSlot0(previous);
-  if (fields.corrupted) return encodeLaneSlot0({ ...fields, price: 0n });
   const delta = price >= fields.price ? price - fields.price : fields.price - price;
   const exceedsThreshold =
     fields.thresholdEnabled && fields.price !== 0n && delta * 100n > fields.price * fields.pricePushThreshold;
   return encodeLaneSlot0({
     ...fields,
-    price: exceedsThreshold ? 0n : price,
+    price,
     askFeeBps,
     bidFeeBps,
     latestUpdateBlock: blockNumber,
     paused: exceedsThreshold || fields.paused,
-    corrupted: exceedsThreshold || fields.corrupted,
   });
 }

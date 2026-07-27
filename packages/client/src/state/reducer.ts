@@ -1,10 +1,11 @@
 /** Ordered single-writer quote-state reducer. */
 import {
   BPS,
-  applyLaneCorruptedSet,
   quote as computeQuote,
   setLaneSlot0BlockDelay,
   setLaneSlot0Exists,
+  setLaneSlot0Paused,
+  setLaneSlot0PricePushThreshold,
   setLaneSlot0SlippageKBps,
   type Address,
   type LaneState,
@@ -199,6 +200,13 @@ export class QuoteReducer {
     )
       throw new ReducerError("INVALID_SLIPPAGE_K", "slippage K exceeds BPS");
     if (
+      (event.kind === "LaneAdded" || event.kind === "PricePushThresholdSet") &&
+      (!Number.isSafeInteger(event.pricePushThreshold) ||
+        event.pricePushThreshold < 0 ||
+        event.pricePushThreshold > 0x7f)
+    )
+      throw new ReducerError("INVALID_WIDTH", "price-push threshold does not fit uint7");
+    if (
       (event.kind === "PartnerInfoSet" || event.kind === "PartnerFeeSet") &&
       (!Number.isSafeInteger(event.fee) || event.fee < 0 || BigInt(event.fee) > BPS)
     )
@@ -214,7 +222,9 @@ export class QuoteReducer {
     switch (event.kind) {
       case "LaneAdded": {
         const lane = this.lane(event.asset);
-        lane.slot0 = setLaneSlot0Exists(lane.slot0, true);
+        let slot0 = setLaneSlot0PricePushThreshold(lane.slot0, event.pricePushThreshold, true);
+        slot0 = setLaneSlot0Exists(slot0, true);
+        lane.slot0 = setLaneSlot0Paused(slot0, true);
         this.setLane(event.asset, lane);
         break;
       }
@@ -233,9 +243,15 @@ export class QuoteReducer {
         this.setLane(event.asset, lane);
         break;
       }
-      case "LaneCorruptedSet": {
+      case "LanePausedSet": {
         const lane = this.lane(event.asset);
-        lane.slot0 = applyLaneCorruptedSet(lane.slot0, event.corrupted);
+        lane.slot0 = setLaneSlot0Paused(lane.slot0, event.paused);
+        this.setLane(event.asset, lane);
+        break;
+      }
+      case "PricePushThresholdSet": {
+        const lane = this.lane(event.asset);
+        lane.slot0 = setLaneSlot0PricePushThreshold(lane.slot0, event.pricePushThreshold, event.enabled);
         this.setLane(event.asset, lane);
         break;
       }

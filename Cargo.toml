@@ -13,7 +13,7 @@ resolver = "2"
 
 [workspace.package]
 edition = "2024"
-version = "0.2.0"
+version = "0.3.0"
 license = "MIT OR Apache-2.0"
 rust-version = "1.97"
 repository = "https://github.com/Lunarbase-Lab/lunarbase-sdk"
@@ -30,11 +30,11 @@ unimplemented = "deny"
 wildcard_imports = "deny"
 
 [workspace.dependencies]
-lunarbase-math = { version = "0.2.0", path = "crates/lunarbase-math" }
-lunarbase-client = { version = "0.2.0", path = "crates/lunarbase-client" }
-lunarbase-source-evm = { version = "0.2.0", path = "crates/lunarbase-source-evm" }
-lunarbase-source-monad = { version = "0.2.0", path = "crates/lunarbase-source-monad" }
-lunarbase-source-arbitrum = { version = "0.2.0", path = "crates/lunarbase-source-arbitrum" }
+lunarbase-math = { version = "0.3.0", path = "crates/lunarbase-math" }
+lunarbase-client = { version = "0.3.0", path = "crates/lunarbase-client" }
+lunarbase-source-evm = { version = "0.3.0", path = "crates/lunarbase-source-evm" }
+lunarbase-source-monad = { version = "0.3.0", path = "crates/lunarbase-source-monad" }
+lunarbase-source-arbitrum = { version = "0.3.0", path = "crates/lunarbase-source-arbitrum" }
 alloy-primitives = { version = "=1.6.1", default-features = false, features = ["std", "serde"] }
 alloy-rpc-client = { version = "=2.2.0", default-features = false, features = ["reqwest"] }
 alloy-serde = { version = "=2.2.0", default-features = false }

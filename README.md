@@ -29,8 +29,8 @@ RPC and optional Redis checkpointing are limited to bootstrap and canonical
 recovery. Quote calculation performs no RPC, Redis access, state serialization,
 or full-state clone.
 
-The current SDK version is `0.2.0`. Its math compatibility baseline is
-`lunarbase-contracts@cfeb6b86f425c5207f3cf80c8b40adde07d6a60b:math-v2`.
+The current SDK version is `0.3.0`. Its math compatibility baseline is
+`lunarbase-contracts@ad46cf7688c9839edbbd82271d4bd4576b4a1528:math-v3`.
 Canonical Solidity/Rust/TypeScript differential tests live in
 `lunarbase-contracts`.
 
@@ -100,7 +100,7 @@ runtime guarantees.
 
 ### TypeScript libraries
 
-After the `0.2.0` packages are published to the configured npm registry:
+After the `0.3.0` packages are published to the configured npm registry:
 
 ```bash
 pnpm add @lunarbase/math @lunarbase/client @lunarbase/source-evm
