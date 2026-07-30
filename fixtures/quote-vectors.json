@@ -1,6 +1,6 @@
 {
   "schemaVersion": "1",
-  "mathCompatibilityVersion": "lunarbase-contracts@ad46cf7688c9839edbbd82271d4bd4576b4a1528:math-v3",
+  "mathCompatibilityVersion": "lunarbase-contracts@4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d:math-v4",
   "vectors": [
     {
       "name": "direct-cash-to-asset-exact-in",

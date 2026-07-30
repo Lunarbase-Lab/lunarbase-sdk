@@ -1,6 +1,6 @@
-//! Runs the embeddable Base client and periodically logs offchain quotes.
+//! Runs the embeddable EVM client and periodically logs offchain quotes.
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use dotenvy::from_path;
 use lunarbase_client::model::MATH_COMPATIBILITY_VERSION;
 use lunarbase_client::prelude::{
@@ -20,6 +20,23 @@ use url::Url;
 const DEMO_ROUTER: &str = "0x000000000000000000000000000000000000dead";
 type AnyError = Box<dyn Error + Send + Sync>;
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum SourceProfile {
+    /// Canonical EVM `logs + newHeads` subscriptions.
+    Evm,
+    /// Base `pendingLogs + newHeads` Flashblocks subscriptions.
+    BaseFlashblocks,
+}
+
+impl SourceProfile {
+    const fn network(self) -> Network {
+        match self {
+            Self::Evm => Network::Evm,
+            Self::BaseFlashblocks => Network::Base,
+        }
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(about = "Streams LunarBase state and logs bit-exact offchain quotes")]
 struct Args {
@@ -32,6 +49,9 @@ struct Args {
     /// Realtime WebSocket endpoint; derived from RPC_URL when omitted.
     #[arg(long, env = "WS_URL")]
     ws_url: Option<Url>,
+    /// Realtime subscription profile.
+    #[arg(long, env = "SOURCE_PROFILE", value_enum, default_value = "evm")]
+    source_profile: SourceProfile,
     /// Router whose whitelist and partner fee profile is quoted.
     #[arg(long, env = "ROUTER_ADDRESS")]
     router: Option<Address>,
@@ -39,6 +59,9 @@ struct Args {
     expect_whitelisted: bool,
     #[arg(long, env = "DEPLOYMENT_BLOCK", default_value_t = 0)]
     deployment_block: u64,
+    /// Explicit active lanes, comma-separated; avoids historical log discovery.
+    #[arg(long, env = "LANE_ASSETS", value_delimiter = ',')]
+    lane_assets: Vec<Address>,
     #[arg(long, env = "QUOTE_AMOUNT", default_value = "1000000000000000000")]
     quote_amount: U256,
     #[arg(long, env = "QUOTE_INTERVAL_SECONDS", default_value = "2")]
@@ -85,7 +108,7 @@ async fn main() -> Result<(), AnyError> {
     }
 
     let deployment = DeploymentConfig {
-        network: Network::Base,
+        network: args.source_profile.network(),
         chain_id,
         core: args.core,
         router,
@@ -94,7 +117,7 @@ async fn main() -> Result<(), AnyError> {
         expected_implementation: implementation,
         expected_implementation_code_hash: implementation_code_hash,
         contract_compatibility_version: MATH_COMPATIBILITY_VERSION.into(),
-        explicit_lane_assets: Vec::new(),
+        explicit_lane_assets: args.lane_assets,
     };
     let config = ClientConnectConfig {
         filter: ContractFilter {
@@ -110,14 +133,18 @@ async fn main() -> Result<(), AnyError> {
         chain_id,
         core = %format!("{:#x}", args.core),
         router = %format!("{router:#x}"),
+        source_profile = ?args.source_profile,
         rpc_ws = %ws_url,
-        "connecting LunarBase Base client"
+        "connecting LunarBase EVM client"
     );
-    let source = Arc::new(EvmRpcSource::base_flashblocks(
-        rpc,
-        ws_url.to_string(),
-        chain_id,
-    ));
+    let source = Arc::new(match args.source_profile {
+        SourceProfile::Evm => {
+            EvmRpcSource::new(rpc, ws_url.to_string(), Network::Evm, chain_id, "latest")
+        }
+        SourceProfile::BaseFlashblocks => {
+            EvmRpcSource::base_flashblocks(rpc, ws_url.to_string(), chain_id)
+        }
+    });
     let client = ConnectedQuoteClient::connect(config, source, None).await?;
     client.await_ready(Commitment::Realtime).await?;
 
@@ -135,7 +162,7 @@ async fn main() -> Result<(), AnyError> {
     if lanes.is_empty() {
         client.shutdown().await;
         return Err(io::Error::other(
-            "no active lanes discovered; verify CORE_ADDRESS and DEPLOYMENT_BLOCK",
+            "no active lanes discovered; verify CORE_ADDRESS, DEPLOYMENT_BLOCK, or LANE_ASSETS",
         )
         .into());
     }

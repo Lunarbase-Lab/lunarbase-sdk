@@ -24,7 +24,7 @@ pub struct Cli {
 #[serde(deny_unknown_fields)]
 /// Human-editable service configuration.
 pub struct RawConfig {
-    /// Adapter family name: `base`, `monad`, or `arbitrum`.
+    /// Adapter family name: `evm`, `base`, `monad`, or `arbitrum`.
     pub network: String,
     /// EIP-155 chain identifier expected from RPC and realtime sources.
     pub chain_id: u64,
@@ -123,10 +123,11 @@ impl Config {
 impl RawConfig {
     fn validate(self) -> Result<Config, ConfigError> {
         let network = match self.network.to_ascii_lowercase().as_str() {
+            "evm" => Network::Evm,
             "base" => Network::Base,
             "monad" => Network::Monad,
             "arbitrum" => Network::Arbitrum,
-            _ => return invalid("network", "expected base, monad, or arbitrum"),
+            _ => return invalid("network", "expected evm, base, monad, or arbitrum"),
         };
         let core = parse_address(&self.core, "core")?;
         let router = parse_address(&self.router, "router")?;

@@ -15,17 +15,16 @@ test("position topics match the pinned Solidity ABI", () => {
 });
 
 test("lane control topics and payloads match the pinned Solidity ABI", () => {
-  assert.equal(CORE_EVENT_TOPICS.LaneAdded, "0x6cae71316970c32843d474efd54a6fe3e81b2cb11b40f4f4ba09ca8bcebe51cb");
+  assert.equal(CORE_EVENT_TOPICS.LaneAdded, "0x1c61848d54083be4bfb8a26449add9f919cf1efd4ca608005f7f3f6aa0cef958");
   assert.equal(CORE_EVENT_TOPICS.LanePausedSet, "0x457fade720abbce2ed945bda9c751bcadaddbd87a70e8d0c79b156e9aa4d3399");
   assert.equal(
     CORE_EVENT_TOPICS.PricePushThresholdSet,
     "0x6b38206650880c4736891c797636196db2056062d3a8011e4074feecbe8ae337",
   );
 
-  assert.deepEqual(decodeCoreEvent(laneLog(CORE_EVENT_TOPICS.LaneAdded, [42n])), {
+  assert.deepEqual(decodeCoreEvent(laneLog(CORE_EVENT_TOPICS.LaneAdded, [])), {
     kind: "LaneAdded",
     asset: "0x1111111111111111111111111111111111111111",
-    pricePushThreshold: 42,
   });
   assert.deepEqual(decodeCoreEvent(laneLog(CORE_EVENT_TOPICS.LanePausedSet, [0n, 1n])), {
     kind: "LanePausedSet",

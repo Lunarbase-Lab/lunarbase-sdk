@@ -43,12 +43,9 @@ export function decodeCoreEvent(log: ContractLog): QuoteEvent | undefined {
   if (topic0 === undefined) throw new LogDecodeError("MISSING_TOPIC0", "event log has no topic0");
 
   if (topic0 === CORE_EVENT_TOPICS.LaneAdded) {
-    expectShape(log, 2, 1);
-    const { asset, pricePushThreshold } = decode<{ asset: Address; pricePushThreshold: number }>(
-      CORE_EVENTS.LaneAdded,
-      log,
-    );
-    return { kind: "LaneAdded", asset, pricePushThreshold };
+    expectShape(log, 2, 0);
+    const { asset } = decode<{ asset: Address }>(CORE_EVENTS.LaneAdded, log);
+    return { kind: "LaneAdded", asset };
   }
   if (topic0 === CORE_EVENT_TOPICS.LaneRemoved) {
     expectShape(log, 2, 0);

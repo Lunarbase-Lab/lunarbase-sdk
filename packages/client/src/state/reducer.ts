@@ -200,7 +200,7 @@ export class QuoteReducer {
     )
       throw new ReducerError("INVALID_SLIPPAGE_K", "slippage K exceeds BPS");
     if (
-      (event.kind === "LaneAdded" || event.kind === "PricePushThresholdSet") &&
+      event.kind === "PricePushThresholdSet" &&
       (!Number.isSafeInteger(event.pricePushThreshold) ||
         event.pricePushThreshold < 0 ||
         event.pricePushThreshold > 0x7f)
@@ -222,8 +222,7 @@ export class QuoteReducer {
     switch (event.kind) {
       case "LaneAdded": {
         const lane = this.lane(event.asset);
-        let slot0 = setLaneSlot0PricePushThreshold(lane.slot0, event.pricePushThreshold, true);
-        slot0 = setLaneSlot0Exists(slot0, true);
+        const slot0 = setLaneSlot0Exists(lane.slot0, true);
         lane.slot0 = setLaneSlot0Paused(slot0, true);
         this.setLane(event.asset, lane);
         break;
@@ -232,31 +231,31 @@ export class QuoteReducer {
         (this.state.lanes as Map<Address, LaneState>).delete(key(event.asset));
         break;
       case "LaneUpdated": {
-        const lane = this.lane(event.asset);
+        const lane = this.existingLane(event.asset);
         lane.slot0 = event.slot0;
         this.setLane(event.asset, lane);
         break;
       }
       case "SlippageKSet": {
-        const lane = this.lane(event.asset);
+        const lane = this.existingLane(event.asset);
         lane.slot0 = setLaneSlot0SlippageKBps(lane.slot0, event.newK);
         this.setLane(event.asset, lane);
         break;
       }
       case "LanePausedSet": {
-        const lane = this.lane(event.asset);
+        const lane = this.existingLane(event.asset);
         lane.slot0 = setLaneSlot0Paused(lane.slot0, event.paused);
         this.setLane(event.asset, lane);
         break;
       }
       case "PricePushThresholdSet": {
-        const lane = this.lane(event.asset);
+        const lane = this.existingLane(event.asset);
         lane.slot0 = setLaneSlot0PricePushThreshold(lane.slot0, event.pricePushThreshold, event.enabled);
         this.setLane(event.asset, lane);
         break;
       }
       case "BlockDelaySet": {
-        const lane = this.lane(event.asset);
+        const lane = this.existingLane(event.asset);
         lane.slot0 = setLaneSlot0BlockDelay(lane.slot0, event.blockDelay);
         this.setLane(event.asset, lane);
         break;
@@ -273,7 +272,7 @@ export class QuoteReducer {
         this.state.feeProfile.blacklistFeeMultiplier = event.multiplier;
         break;
       case "DepositExecuted": {
-        const lane = this.lane(event.asset);
+        const lane = this.existingLane(event.asset);
         const next = lane.totalPrincipalAmount + event.principal;
         if (next > U128_MAX) throw new ReducerError("ARITHMETIC", "principal storage overflow");
         lane.totalPrincipalAmount = next;
@@ -281,7 +280,7 @@ export class QuoteReducer {
         break;
       }
       case "WithdrawalExecuted": {
-        const lane = this.lane(event.asset);
+        const lane = this.existingLane(event.asset);
         if (event.principal > lane.totalPrincipalAmount) throw new ReducerError("ARITHMETIC", "principal underflow");
         lane.totalPrincipalAmount -= event.principal;
         this.setLane(event.asset, lane);
@@ -290,7 +289,7 @@ export class QuoteReducer {
       case "Sync": {
         this.state.cashReserve = event.cashReserve;
         if (key(event.asset) !== key(this.state.cash)) {
-          const lane = this.lane(event.asset);
+          const lane = this.existingLane(event.asset);
           lane.assetReserve = event.assetReserve;
           this.setLane(event.asset, lane);
         }
@@ -303,6 +302,12 @@ export class QuoteReducer {
 
   private lane(asset: Address): LaneState {
     return { ...(this.state.lanes.get(key(asset)) ?? emptyLane()) };
+  }
+
+  private existingLane(asset: Address): LaneState {
+    const lane = this.state.lanes.get(key(asset));
+    if (lane === undefined) throw new ReducerError("UNKNOWN_LANE", "event references an unknown lane");
+    return { ...lane };
   }
 
   private setLane(asset: Address, lane: LaneState): void {

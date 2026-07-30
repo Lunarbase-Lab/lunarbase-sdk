@@ -54,14 +54,18 @@ test("Base treats changing same-height Flashblock heads as progress", async () =
   if (update?.kind === "Head") assert.equal(update.cursor.sourceSequence, 2n);
   abort.abort();
   await iterator.return?.();
+  assert.equal(socket.closeCalls, 1);
 });
 
 class FakeSocket implements WebSocketLike {
   readonly readyState = 0;
+  closeCalls = 0;
   private readonly listeners = new Map<string, Set<(event: SocketEvent) => void>>();
 
   send(_data: string): void {}
-  close(_code?: number, _reason?: string): void {}
+  close(_code?: number, _reason?: string): void {
+    this.closeCalls += 1;
+  }
 
   addEventListener(type: "open" | "message" | "error" | "close", listener: (event: SocketEvent) => void): void {
     const listeners = this.listeners.get(type) ?? new Set();

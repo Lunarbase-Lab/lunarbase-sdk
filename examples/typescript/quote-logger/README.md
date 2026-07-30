@@ -1,7 +1,7 @@
 # TypeScript realtime quote logger
 
 This private workspace package demonstrates the complete embeddable TypeScript
-Base client flow:
+EVM client flow:
 
 ```text
 RPC snapshot + WebSocket updates → ordered client state → quoteMany → terminal
@@ -18,15 +18,19 @@ Only `RPC_URL` and `CORE_ADDRESS` are required. `WS_URL` is derived by replacing
 `http` with `ws`; set it explicitly when the provider uses another WebSocket
 endpoint.
 
+`SOURCE_PROFILE=evm` (the default) consumes canonical `logs + newHeads` on
+standard EVM chains. Set `SOURCE_PROFILE=base-flashblocks` for Base
+`pendingLogs + newHeads`.
+
 For exact partner fees, set `ROUTER_ADDRESS` and its actual
 `EXPECT_WHITELISTED` value. Without a router, the example uses a fixed
 non-whitelisted demonstration address.
 
 The example reads chain and implementation identity through
-`@lunarbase/source-evm`, builds the Base Flashblocks source, and injects it
-into `@lunarbase/client`. The common client then discovers cash and active
-lanes. `DEPLOYMENT_BLOCK` is optional but strongly recommended to limit the
-lane-discovery log range.
+`@lunarbase/source-evm` and injects the selected source into
+`@lunarbase/client`. The common client then discovers cash and active lanes.
+`DEPLOYMENT_BLOCK` limits the lane-discovery range. On a non-archive public
+RPC, set comma-separated `LANE_ASSETS` to avoid historical discovery calls.
 
 ## Run
 

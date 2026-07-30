@@ -5,17 +5,19 @@ import type { Hex } from "ox/Hex";
 /** Current JSON checkpoint schema. */
 export const SCHEMA_VERSION = 4;
 /** Solidity revision whose arithmetic behavior this SDK implements. */
-export const MATH_COMPATIBILITY_VERSION = "lunarbase-contracts@ad46cf7688c9839edbbd82271d4bd4576b4a1528:math-v3";
+export const MATH_COMPATIBILITY_VERSION = "lunarbase-contracts@4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d:math-v4";
 
 /** Supported source families. */
 export enum Network {
+  Evm = "Evm",
   Base = "Base",
   Monad = "Monad",
   Arbitrum = "Arbitrum",
 }
 
-/** Returns the default mainnet chain id for one source family. */
-export function defaultChainId(network: Network): bigint {
+/** Returns the default mainnet chain id for a chain-specific source family. */
+export function defaultChainId(network: Network): bigint | undefined {
+  if (network === Network.Evm) return undefined;
   return network === Network.Base ? 8453n : network === Network.Monad ? 143n : 42161n;
 }
 
@@ -179,7 +181,7 @@ export interface ChainDataSource {
 
 /** Decoded quote-critical Core event. `SwapExecuted` is intentionally absent. */
 export type QuoteEvent =
-  | { kind: "LaneAdded"; asset: Address; pricePushThreshold: number }
+  | { kind: "LaneAdded"; asset: Address }
   | { kind: "LaneRemoved"; asset: Address }
   | { kind: "LaneUpdated"; asset: Address; slot0: Word }
   | { kind: "SlippageKSet"; asset: Address; newK: number }
@@ -217,6 +219,7 @@ export class ReducerError extends Error {
       | "REMOVED_LOG"
       | "INVALID_SLIPPAGE_K"
       | "INVALID_WIDTH"
+      | "UNKNOWN_LANE"
       | "ARITHMETIC"
       | "IMPLEMENTATION_UPGRADED",
     message: string,

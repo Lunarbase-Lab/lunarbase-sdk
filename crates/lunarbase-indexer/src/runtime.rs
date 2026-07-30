@@ -15,7 +15,6 @@ pub enum RuntimeError {
     #[error(transparent)]
     Client(#[from] IndexerError),
     /// The binary was compiled without the source selected by configuration.
-    #[cfg(not(all(feature = "base", feature = "monad", feature = "arbitrum")))]
     #[error("network support is not compiled: {0:?}")]
     UnsupportedNetwork(Network),
 }
@@ -26,10 +25,37 @@ pub async fn connect_client(
     checkpoint: Option<Checkpoint>,
 ) -> Result<ConnectedQuoteClient, RuntimeError> {
     match config.client.deployment.network {
+        Network::Evm => connect_evm(config, checkpoint).await,
         Network::Base => connect_base(config, checkpoint).await,
         Network::Monad => connect_monad(config, checkpoint).await,
         Network::Arbitrum => connect_arbitrum(config, checkpoint).await,
     }
+}
+
+#[cfg(feature = "evm")]
+async fn connect_evm(
+    config: &Config,
+    checkpoint: Option<Checkpoint>,
+) -> Result<ConnectedQuoteClient, RuntimeError> {
+    let rpc = lunarbase_source_evm::rpc::client::RpcHttpClient::new(config.http_rpc_url.clone())
+        .map_err(lunarbase_client::model::SourceError::from)
+        .map_err(IndexerError::from)?;
+    let source = Arc::new(lunarbase_source_evm::ws::EvmRpcSource::new(
+        rpc,
+        config.realtime_url.clone(),
+        Network::Evm,
+        config.client.deployment.chain_id,
+        "latest",
+    ));
+    Ok(ConnectedQuoteClient::connect(config.client.clone(), source, checkpoint).await?)
+}
+
+#[cfg(not(feature = "evm"))]
+async fn connect_evm(
+    _config: &Config,
+    _checkpoint: Option<Checkpoint>,
+) -> Result<ConnectedQuoteClient, RuntimeError> {
+    Err(RuntimeError::UnsupportedNetwork(Network::Evm))
 }
 
 #[cfg(feature = "base")]

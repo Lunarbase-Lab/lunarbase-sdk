@@ -241,7 +241,7 @@ impl RpcSnapshotProvider {
             match decode_core_event(&log)
                 .map_err(|error| SourceError::Unavailable(error.to_string()))?
             {
-                Some(QuoteEvent::LaneAdded { asset, .. }) => {
+                Some(QuoteEvent::LaneAdded { asset }) => {
                     discovered.insert(asset);
                 }
                 Some(QuoteEvent::LaneRemoved { asset }) => {

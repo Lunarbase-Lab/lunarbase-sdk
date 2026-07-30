@@ -1,4 +1,4 @@
-import { createBaseFlashblocksSource, JsonRpcHttpClient } from "@lunarbase/source-evm";
+import { createBaseFlashblocksSource, EvmRpcSource, JsonRpcHttpClient } from "@lunarbase/source-evm";
 import {
   MATH_COMPATIBILITY_VERSION,
   Commitment,
@@ -25,8 +25,9 @@ async function main(): Promise<void> {
     await rpc.getStorageAtHash(environment.core, ERC1967_IMPLEMENTATION_SLOT, head.blockHash),
   );
   const implementationCodeHash = await rpc.runtimeCodeHashAtHash(implementation, head.blockHash);
+  const network = environment.sourceProfile === "evm" ? Network.Evm : Network.Base;
   const deployment = {
-    network: Network.Base,
+    network,
     chainId,
     core: environment.core,
     router: environment.router,
@@ -35,7 +36,7 @@ async function main(): Promise<void> {
     expectedImplementation: implementation,
     expectedImplementationCodeHash: implementationCodeHash,
     contractCompatibilityVersion: MATH_COMPATIBILITY_VERSION,
-    explicitLaneAssets: [],
+    explicitLaneAssets: environment.explicitLaneAssets,
   };
   const config: ClientConnectConfig = {
     deployment,
@@ -50,17 +51,20 @@ async function main(): Promise<void> {
     });
   writeLog("info", "connecting LunarBase client", {
     chainId,
-    network: Network.Base,
+    network,
     core: environment.core,
     router: environment.router,
     rpcWs: environment.wsUrl,
   });
 
-  const source = createBaseFlashblocksSource({
-    httpRpcUrl: environment.rpcUrl,
-    realtimeUrl: environment.wsUrl,
-    chainId,
-  });
+  const source =
+    environment.sourceProfile === "evm"
+      ? new EvmRpcSource(rpc, environment.wsUrl, Network.Evm, chainId)
+      : createBaseFlashblocksSource({
+          httpRpcUrl: environment.rpcUrl,
+          realtimeUrl: environment.wsUrl,
+          chainId,
+        });
   const client = await connect(config, source);
   const checkpoint = client.checkpoint();
   if (checkpoint === undefined) {

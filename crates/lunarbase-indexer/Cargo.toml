@@ -10,7 +10,8 @@ publish = false
 
 [features]
 default = ["base"]
-base = ["dep:lunarbase-source-evm"]
+evm = ["dep:lunarbase-source-evm"]
+base = ["evm"]
 monad = ["dep:lunarbase-source-monad"]
 monad-native = ["monad", "lunarbase-source-monad/native-event-ring"]
 arbitrum = ["dep:lunarbase-source-arbitrum"]

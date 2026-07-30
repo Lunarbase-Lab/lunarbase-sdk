@@ -14,7 +14,7 @@ export const CORE_ABI = Abi.from([
   "function whitelist(address account) view returns (bool)",
   "function blacklistFeeMultiplier() view returns (uint256)",
   "function partners(address router, address asset) view returns (uint128 cumFees, uint32 fee, uint32 latestWithdrawTimestamp, address operator)",
-  "event LaneAdded(address indexed asset, uint8 pricePushThreshold)",
+  "event LaneAdded(address indexed asset)",
   "event LaneRemoved(address indexed asset)",
   "event LaneUpdated(address indexed asset, bytes32 slot0)",
   "event LanePausedSet(address indexed asset, bool previousPaused, bool newPaused)",
@@ -33,7 +33,7 @@ export const CORE_ABI = Abi.from([
 
 /** Parsed quote-critical events keyed by their Solidity names. */
 export const CORE_EVENTS = {
-  LaneAdded: AbiEvent.from("event LaneAdded(address indexed asset, uint8 pricePushThreshold)"),
+  LaneAdded: AbiEvent.from("event LaneAdded(address indexed asset)"),
   LaneRemoved: AbiEvent.from("event LaneRemoved(address indexed asset)"),
   LaneUpdated: AbiEvent.from("event LaneUpdated(address indexed asset, bytes32 slot0)"),
   LanePausedSet: AbiEvent.from("event LanePausedSet(address indexed asset, bool previousPaused, bool newPaused)"),

@@ -31,7 +31,7 @@ pub mod core {
             view
             returns (uint128 cumFees, uint32 fee, uint32 latestWithdrawTimestamp, address operator);
 
-        event LaneAdded(address indexed asset, uint8 pricePushThreshold);
+        event LaneAdded(address indexed asset);
         event LaneRemoved(address indexed asset);
         event LaneUpdated(address indexed asset, bytes32 slot0);
         event LanePausedSet(address indexed asset, bool previousPaused, bool newPaused);
@@ -138,12 +138,9 @@ fn decode<E: SolEvent>(log: &ContractLog, error: LogDecodeError) -> Result<E, Lo
 pub fn decode_core_event(log: &ContractLog) -> Result<Option<QuoteEvent>, LogDecodeError> {
     let topic0 = *log.topics.first().ok_or(LogDecodeError::MissingTopic0)?;
     let event = if topic0 == TOPIC_LANE_ADDED {
-        expect_shape(log, 2, 1)?;
+        expect_shape(log, 2, 0)?;
         let event = decode::<core::LaneAdded>(log, LogDecodeError::InvalidAddress)?;
-        Some(QuoteEvent::LaneAdded {
-            asset: event.asset,
-            price_push_threshold: event.pricePushThreshold,
-        })
+        Some(QuoteEvent::LaneAdded { asset: event.asset })
     } else if topic0 == TOPIC_LANE_REMOVED {
         expect_shape(log, 2, 0)?;
         let event = decode::<core::LaneRemoved>(log, LogDecodeError::InvalidAddress)?;
@@ -261,7 +258,7 @@ mod tests {
     fn generated_topics_match_the_pinned_solidity_abi() {
         assert_eq!(
             format!("{TOPIC_LANE_ADDED:#x}"),
-            "0x6cae71316970c32843d474efd54a6fe3e81b2cb11b40f4f4ba09ca8bcebe51cb"
+            "0x1c61848d54083be4bfb8a26449add9f919cf1efd4ca608005f7f3f6aa0cef958"
         );
         assert_eq!(
             format!("{TOPIC_LANE_PAUSED_SET:#x}"),
@@ -284,13 +281,10 @@ mod tests {
     #[test]
     fn lane_control_events_decode_the_new_contract_schema() {
         let asset = Address::new([0x11; 20]);
-        let added = lane_log(TOPIC_LANE_ADDED, asset, &[U256::from(42)]);
+        let added = lane_log(TOPIC_LANE_ADDED, asset, &[]);
         assert_eq!(
             decode_core_event(&added).unwrap(),
-            Some(QuoteEvent::LaneAdded {
-                asset,
-                price_push_threshold: 42,
-            })
+            Some(QuoteEvent::LaneAdded { asset })
         );
 
         let paused = lane_log(TOPIC_LANE_PAUSED_SET, asset, &[U256::ZERO, U256::ONE]);

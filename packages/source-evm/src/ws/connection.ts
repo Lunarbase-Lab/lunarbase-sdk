@@ -60,7 +60,9 @@ export async function establishSocket(
     socket.removeEventListener?.("message", onMessage);
     socket.removeEventListener?.("error", onError);
     socket.removeEventListener?.("close", onClose);
-    if (!signal?.aborted) socket.close(1000, "source consumer stopped");
+    if (socket.readyState === undefined || socket.readyState < 2) {
+      socket.close(1000, "source consumer stopped");
+    }
   };
 
   try {

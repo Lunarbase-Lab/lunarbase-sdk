@@ -188,7 +188,7 @@ test("reducer applies packed controls and Sync, then rejects Upgraded", () => {
     transactionIndex: 0n,
     logIndex,
   });
-  reducer.apply(eventCursor(0n), { kind: "LaneAdded", asset: ASSET, pricePushThreshold: 9 });
+  reducer.apply(eventCursor(0n), { kind: "LaneAdded", asset: ASSET });
   reducer.apply(eventCursor(1n), { kind: "LanePausedSet", asset: ASSET, paused: false });
   reducer.apply(eventCursor(2n), { kind: "Sync", asset: ASSET, assetReserve: 11n, cashReserve: 12n });
   reducer.apply(eventCursor(3n), { kind: "SlippageKSet", asset: ASSET, newK: 1_000 });
@@ -223,6 +223,15 @@ test("reducer applies packed controls and Sync, then rejects Upgraded", () => {
         implementation: "0x9999999999999999999999999999999999999999",
       }),
     { code: "IMPLEMENTATION_UPGRADED" },
+  );
+  assert.throws(
+    () =>
+      reducer.apply(eventCursor(8n), {
+        kind: "LaneUpdated",
+        asset: "0x9999999999999999999999999999999999999999",
+        slot0: 0n,
+      }),
+    { code: "UNKNOWN_LANE" },
   );
 });
 

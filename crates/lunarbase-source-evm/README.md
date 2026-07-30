@@ -34,3 +34,21 @@ Flashblocks WebSocket endpoint for realtime `pendingLogs` and progressive
 `newHeads`. Use `EvmRpcSource::new` or `EvmRpcSource::with_config` for standard
 EVM `logs + newHeads` streams. Base is the default network of
 `lunarbase-indexer`.
+
+## Standard EVM
+
+```rust
+use lunarbase_client::model::Network;
+use lunarbase_source_evm::prelude::{EvmRpcSource, RpcHttpClient};
+
+let source = EvmRpcSource::new(
+    RpcHttpClient::new(http_rpc_url)?,
+    websocket_url,
+    Network::Evm,
+    chain_id,
+    "latest",
+);
+```
+
+The standard profile is chain-agnostic. `chain_id` remains explicit and binds
+all cursors and checkpoints to the selected EVM deployment.

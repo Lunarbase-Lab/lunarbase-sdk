@@ -9,7 +9,7 @@ use lunarbase_math::slot0::{
     set_lane_slot0_block_delay, set_lane_slot0_exists, set_lane_slot0_paused,
     set_lane_slot0_price_push_threshold, set_lane_slot0_slippage_k_bps,
 };
-use lunarbase_math::state::QuoteState;
+use lunarbase_math::state::{LaneState, QuoteState};
 use lunarbase_math::types::{Address, U256};
 use thiserror::Error;
 
@@ -37,6 +37,9 @@ pub enum ReducerError {
     /// An event value cannot fit the corresponding compact contract field.
     #[error("event value does not fit the contract storage width")]
     InvalidWidth,
+    /// A delta references a lane absent from the coherent bootstrap state.
+    #[error("event references an unknown lane")]
+    UnknownLane,
     /// The ERC-1967 implementation changed and must be revalidated before quoting.
     #[error("Core implementation upgraded")]
     ImplementationUpgraded,
@@ -179,32 +182,26 @@ impl QuoteReducer {
 
     fn apply_event(&mut self, event: QuoteEvent) -> Result<(), ReducerError> {
         match event {
-            QuoteEvent::LaneAdded {
-                asset,
-                price_push_threshold,
-            } => {
+            QuoteEvent::LaneAdded { asset } => {
                 let lane = self.state.lanes.entry(asset).or_default();
-                let slot0 =
-                    set_lane_slot0_price_push_threshold(lane.slot0, price_push_threshold, true)
-                        .map_err(|_| ReducerError::InvalidWidth)?;
-                let slot0 = set_lane_slot0_exists(slot0, true);
+                let slot0 = set_lane_slot0_exists(lane.slot0, true);
                 lane.slot0 = set_lane_slot0_paused(slot0, true);
             }
             QuoteEvent::LaneRemoved { asset } => {
                 self.state.lanes.remove(&asset);
             }
             QuoteEvent::LaneUpdated { asset, slot0 } => {
-                self.state.lanes.entry(asset).or_default().slot0 = slot0;
+                self.lane_mut(asset)?.slot0 = slot0;
             }
             QuoteEvent::SlippageKSet { asset, new_k } => {
                 if U256::from(new_k) > BPS {
                     return Err(ReducerError::InvalidSlippageK);
                 }
-                let lane = self.state.lanes.entry(asset).or_default();
+                let lane = self.lane_mut(asset)?;
                 lane.slot0 = set_lane_slot0_slippage_k_bps(lane.slot0, new_k);
             }
             QuoteEvent::LanePausedSet { asset, paused } => {
-                let lane = self.state.lanes.entry(asset).or_default();
+                let lane = self.lane_mut(asset)?;
                 lane.slot0 = set_lane_slot0_paused(lane.slot0, paused);
             }
             QuoteEvent::PricePushThresholdSet {
@@ -212,13 +209,13 @@ impl QuoteReducer {
                 price_push_threshold,
                 enabled,
             } => {
-                let lane = self.state.lanes.entry(asset).or_default();
+                let lane = self.lane_mut(asset)?;
                 lane.slot0 =
                     set_lane_slot0_price_push_threshold(lane.slot0, price_push_threshold, enabled)
                         .map_err(|_| ReducerError::InvalidWidth)?;
             }
             QuoteEvent::BlockDelaySet { asset, block_delay } => {
-                let lane = self.state.lanes.entry(asset).or_default();
+                let lane = self.lane_mut(asset)?;
                 lane.slot0 = set_lane_slot0_block_delay(lane.slot0, block_delay);
             }
             QuoteEvent::PartnerInfoSet { router, asset, fee }
@@ -243,7 +240,7 @@ impl QuoteReducer {
                 self.state.fee_profile.blacklist_fee_multiplier = multiplier;
             }
             QuoteEvent::DepositExecuted { asset, principal } => {
-                let lane = self.state.lanes.entry(asset).or_default();
+                let lane = self.lane_mut(asset)?;
                 let next = lane
                     .total_principal_amount
                     .checked_add(principal)
@@ -251,7 +248,7 @@ impl QuoteReducer {
                 lane.total_principal_amount = next;
             }
             QuoteEvent::WithdrawalExecuted { asset, principal } => {
-                let lane = self.state.lanes.entry(asset).or_default();
+                let lane = self.lane_mut(asset)?;
                 let next = lane
                     .total_principal_amount
                     .checked_sub(principal)
@@ -265,7 +262,7 @@ impl QuoteReducer {
             } => {
                 self.state.cash_reserve = cash_reserve;
                 if asset != self.state.cash {
-                    self.state.lanes.entry(asset).or_default().asset_reserve = asset_reserve;
+                    self.lane_mut(asset)?.asset_reserve = asset_reserve;
                 }
             }
             QuoteEvent::ImplementationUpgraded { .. } => {
@@ -273,6 +270,13 @@ impl QuoteReducer {
             }
         }
         Ok(())
+    }
+
+    fn lane_mut(&mut self, asset: Address) -> Result<&mut LaneState, ReducerError> {
+        self.state
+            .lanes
+            .get_mut(&asset)
+            .ok_or(ReducerError::UnknownLane)
     }
 
     /// Builds a durable v4 checkpoint. This clone is outside the quote path.
@@ -329,15 +333,12 @@ mod tests {
         let mut reducer = QuoteReducer::new(state, address(3));
 
         reducer
-            .apply_event(QuoteEvent::LaneAdded {
-                asset,
-                price_push_threshold: 9,
-            })
+            .apply_event(QuoteEvent::LaneAdded { asset })
             .unwrap();
         let fields = decode_lane_slot0(reducer.state().lanes[&asset].slot0);
         assert_eq!(fields.price, 100);
-        assert_eq!(fields.price_push_threshold, 9);
-        assert!(fields.threshold_enabled);
+        assert_eq!(fields.price_push_threshold, 0);
+        assert!(!fields.threshold_enabled);
         assert!(fields.exists);
         assert!(fields.paused);
 
@@ -405,6 +406,20 @@ mod tests {
             Err(ReducerError::ImplementationUpgraded)
         );
         assert_eq!(reducer.state().cash_reserve, 0);
+        assert!(reducer.state().lanes.is_empty());
+    }
+
+    #[test]
+    fn state_delta_for_unknown_lane_fails_closed() {
+        let asset = address(2);
+        let mut reducer = QuoteReducer::new(QuoteState::default(), address(3));
+        assert_eq!(
+            reducer.apply_event(QuoteEvent::LaneUpdated {
+                asset,
+                slot0: Default::default(),
+            }),
+            Err(ReducerError::UnknownLane)
+        );
         assert!(reducer.state().lanes.is_empty());
     }
 }

@@ -10,11 +10,13 @@ pub const SCHEMA_VERSION: u16 = 4;
 
 /// Pinned Solidity implementation used by both pure math packages.
 pub const MATH_COMPATIBILITY_VERSION: &str =
-    "lunarbase-contracts@ad46cf7688c9839edbbd82271d4bd4576b4a1528:math-v3";
+    "lunarbase-contracts@4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d:math-v4";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 /// Supported chain families.
 pub enum Network {
+    /// Standard EVM JSON-RPC using canonical `logs + newHeads` subscriptions.
+    Evm,
     /// Base, including Flashblocks-compatible realtime transports.
     Base,
     /// Monad, including execution-event and portable WebSocket transports.
@@ -24,12 +26,16 @@ pub enum Network {
 }
 
 impl Network {
-    /// Returns the default mainnet chain id for this network family.
-    pub const fn default_chain_id(self) -> u64 {
+    /// Returns the default mainnet chain id for a chain-specific source family.
+    ///
+    /// Generic EVM sources have no single default chain and therefore return
+    /// `None`; their EIP-155 chain id must always be supplied explicitly.
+    pub const fn default_chain_id(self) -> Option<u64> {
         match self {
-            Self::Base => 8453,
-            Self::Monad => 143,
-            Self::Arbitrum => 42161,
+            Self::Evm => None,
+            Self::Base => Some(8453),
+            Self::Monad => Some(143),
+            Self::Arbitrum => Some(42161),
         }
     }
 }
@@ -331,8 +337,6 @@ pub enum QuoteEvent {
     LaneAdded {
         /// ERC-20 asset identifying the lane.
         asset: Address,
-        /// Initial seven-bit price-push threshold.
-        price_push_threshold: u8,
     },
     /// Removes an asset lane from quote state.
     LaneRemoved {

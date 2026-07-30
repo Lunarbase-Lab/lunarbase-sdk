@@ -3,7 +3,7 @@
 Status: handoff specification for `lunarbase-math`.
 
 Contract reference: `lunarbase-contracts` branch `dev`, commit
-[`ad46cf7688c9839edbbd82271d4bd4576b4a1528`](https://github.com/Lunarbase-Lab/lunarbase-contracts/tree/ad46cf7688c9839edbbd82271d4bd4576b4a1528), inspected on 2026-07-27.
+[`4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d`](https://github.com/Lunarbase-Lab/lunarbase-contracts/tree/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d), inspected on 2026-07-30.
 
 This document is deliberately pinned to a commit. A later `dev` revision must not silently change the
 off-chain result. Any contract math or event-schema change requires a new compatibility version and new
@@ -34,42 +34,42 @@ management, and custody are out of scope unless added as a separate package late
 
 | Area | Canonical source |
 | --- | --- |
-| Core composition and immutable CASH | [`Core.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/Core.sol#L13-L20), [`Cash.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/modules/Cash.sol#L7-L16) |
-| Operator update path and packed write | [`Lanes.update_0x3260a5e6`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/modules/Lanes.sol#L34-L81) |
-| Public `quoteExactIn` and `quoteExactOut` sentinels | [`Lanes.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/modules/Lanes.sol#L89-L102) |
-| Swap settlement and emitted quote fields | [`Lanes.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/modules/Lanes.sol#L104-L136), [`LanesLib._settleSwap`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/libraries/LanesLib.sol#L233-L251) |
-| Lanes ABI and events | [`ILanes.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/interfaces/ILanes.sol#L8-L67) |
+| Core composition and immutable CASH | [`Core.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/Core.sol#L13-L20), [`Cash.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/modules/Cash.sol#L7-L16) |
+| Operator update path and packed write | [`Lanes.update_0x3260a5e6`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/modules/Lanes.sol#L34-L81) |
+| Public `quoteExactIn` and `quoteExactOut` sentinels | [`Lanes.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/modules/Lanes.sol#L89-L102) |
+| Swap settlement and emitted quote fields | [`Lanes.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/modules/Lanes.sol#L104-L136), [`LanesLib._settleSwap`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/libraries/LanesLib.sol#L233-L251) |
+| Lanes ABI and events | [`ILanes.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/interfaces/ILanes.sol#L8-L67) |
 
 ### Quote engine and pure helpers
 
 | Area | Canonical source |
 | --- | --- |
-| `Lane`, `QuoteResult`, quote input structs | [`LanesLib.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/libraries/LanesLib.sol#L26-L95) |
-| Quote entry points and result assembly | [`quoteExactIn`, `quoteExactOut`, `_quote`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/libraries/LanesLib.sol#L125-L193) |
-| Direct-vs-route selection and lane validation | [`_getQuote`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/libraries/LanesLib.sol#L253-L302) |
-| Direct quote | [`_getDirectQuote`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/libraries/LanesLib.sol#L304-L330) |
-| Routed quote through CASH | [`_getRouteQuote`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/libraries/LanesLib.sol#L332-L365) |
-| Fee selection, spread, principal valuation | [`LanesLib.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/libraries/LanesLib.sol#L367-L475) |
-| Lane validity predicate | [`_validate`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/libraries/LanesLib.sol#L478-L480) |
-| Anchor, fee, slippage, weighted slippage helpers | [`LaneHelpers.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/utils/LaneHelpers.sol#L7-L105) |
-| Partner fee adjustment | [`PartnerHelpers.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/utils/PartnerHelpers.sol#L18-L34) |
-| Partner/treasury split | [`SwapHelpers.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/utils/SwapHelpers.sol#L7-L23) |
-| `BPS`, `WAD`-adjacent constants | [`Constants.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/utils/Constants.sol#L4-L10) |
+| `Lane`, `QuoteResult`, quote input structs | [`LanesLib.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/libraries/LanesLib.sol#L26-L95) |
+| Quote entry points and result assembly | [`quoteExactIn`, `quoteExactOut`, `_quote`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/libraries/LanesLib.sol#L125-L193) |
+| Direct-vs-route selection and lane validation | [`_getQuote`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/libraries/LanesLib.sol#L253-L302) |
+| Direct quote | [`_getDirectQuote`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/libraries/LanesLib.sol#L304-L330) |
+| Routed quote through CASH | [`_getRouteQuote`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/libraries/LanesLib.sol#L332-L365) |
+| Fee selection, spread, principal valuation | [`LanesLib.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/libraries/LanesLib.sol#L367-L475) |
+| Lane validity predicate | [`_validate`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/libraries/LanesLib.sol#L478-L480) |
+| Anchor, fee, slippage, weighted slippage helpers | [`LaneHelpers.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/utils/LaneHelpers.sol#L7-L105) |
+| Partner fee adjustment | [`PartnerHelpers.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/utils/PartnerHelpers.sol#L18-L34) |
+| Partner/treasury split | [`SwapHelpers.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/utils/SwapHelpers.sol#L7-L23) |
+| `BPS`, `WAD`-adjacent constants | [`Constants.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/utils/Constants.sol#L4-L10) |
 | Exact Solady multiplication/division semantics | [`FixedPointMathLib.fullMulDiv`](https://github.com/Vectorized/solady/blob/v0.1.26/src/utils/FixedPointMathLib.sol#L452-L560), [`mulDiv`](https://github.com/Vectorized/solady/blob/v0.1.26/src/utils/FixedPointMathLib.sol#L593-L606) |
 
 ### State required by quotes
 
 | Area | Canonical source |
 | --- | --- |
-| Packed lane word layout | [`LaneSlot0.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/types/LaneSlot0.sol#L7-L60) |
-| ERC-7201 lanes state | [`LanesLib.State`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/libraries/LanesLib.sol#L48-L62) |
-| Partner state and quote getters | [`PartnersLib.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/libraries/PartnersLib.sol#L9-L41), [`partnerFeeBps`, `feeBpsForRouter`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/libraries/PartnersLib.sol#L128-L138) |
-| Partner events/getters | [`IPartners.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/interfaces/IPartners.sol#L6-L43) |
-| Reserve state and `totalPrincipalAmount` | [`ReservesLib.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/libraries/ReservesLib.sol#L8-L38), [`totalPrincipalAmount`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/libraries/ReservesLib.sol#L128-L130) |
-| Reserve public getter | [`IReserves.reserves`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/interfaces/IReserves.sol#L7-L16) |
-| Principal enters active liquidity | [`PositionManagerLib.executeDeposit`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/libraries/PositionManagerLib.sol#L200-L222) |
-| Principal leaves active liquidity | [`PositionManagerLib.executeWithdrawal`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/libraries/PositionManagerLib.sol#L267-L293) |
-| Principal-changing events | [`IPositionManager.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/ad46cf7688c9839edbbd82271d4bd4576b4a1528/src/interfaces/IPositionManager.sol#L44-L69) |
+| Packed lane word layout | [`LaneSlot0.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/types/LaneSlot0.sol#L7-L60) |
+| ERC-7201 lanes state | [`LanesLib.State`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/libraries/LanesLib.sol#L48-L62) |
+| Partner state and quote getters | [`PartnersLib.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/libraries/PartnersLib.sol#L9-L41), [`partnerFeeBps`, `feeBpsForRouter`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/libraries/PartnersLib.sol#L128-L138) |
+| Partner events/getters | [`IPartners.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/interfaces/IPartners.sol#L6-L43) |
+| Reserve state and `totalPrincipalAmount` | [`ReservesLib.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/libraries/ReservesLib.sol#L8-L38), [`totalPrincipalAmount`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/libraries/ReservesLib.sol#L128-L130) |
+| Reserve public getter | [`IReserves.reserves`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/interfaces/IReserves.sol#L7-L16) |
+| Principal enters active liquidity | [`PositionManagerLib.executeDeposit`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/libraries/PositionManagerLib.sol#L200-L222) |
+| Principal leaves active liquidity | [`PositionManagerLib.executeWithdrawal`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/libraries/PositionManagerLib.sol#L267-L293) |
+| Principal-changing events | [`IPositionManager.sol`](https://github.com/Lunarbase-Lab/lunarbase-contracts/blob/4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d/src/interfaces/IPositionManager.sol#L44-L69) |
 
 ## 3. Contract quote model
 

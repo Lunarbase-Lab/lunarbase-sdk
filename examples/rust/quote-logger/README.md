@@ -1,6 +1,6 @@
 # Realtime quote logger
 
-This runnable crate demonstrates the complete embeddable Rust Base client flow:
+This runnable crate demonstrates the complete embeddable Rust EVM client flow:
 
 ```text
 RPC snapshot + WebSocket updates → ordered client state → quoteMany → tracing
@@ -24,15 +24,19 @@ CORE_ADDRESS=0x...
 `WS_URL` is derived by replacing `http` with `ws`. Set it explicitly when the
 provider uses a different WebSocket endpoint.
 
+`SOURCE_PROFILE=evm` (the default) consumes canonical `logs + newHeads` on
+standard EVM chains. Set `SOURCE_PROFILE=base-flashblocks` for Base
+`pendingLogs + newHeads`.
+
 For exact partner fees, set `ROUTER_ADDRESS` and its actual
 `EXPECT_WHITELISTED` value. Without a router, the example uses a fixed
 non-whitelisted demonstration address.
 
 The example reads chain and implementation identity through
-`lunarbase-source-evm`, builds the Base Flashblocks source, and injects it into
+`lunarbase-source-evm` and injects the selected source into
 `lunarbase-client`. The common client then discovers cash and active lanes.
-`DEPLOYMENT_BLOCK` is optional but strongly recommended for production
-deployments because it limits the lane-discovery log range.
+`DEPLOYMENT_BLOCK` limits the lane-discovery range. On a non-archive public
+RPC, set comma-separated `LANE_ASSETS` to avoid historical discovery calls.
 
 ## Run
 

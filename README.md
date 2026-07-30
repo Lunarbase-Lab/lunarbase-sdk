@@ -30,7 +30,7 @@ recovery. Quote calculation performs no RPC, Redis access, state serialization,
 or full-state clone.
 
 The current SDK version is `0.3.0`. Its math compatibility baseline is
-`lunarbase-contracts@ad46cf7688c9839edbbd82271d4bd4576b4a1528:math-v3`.
+`lunarbase-contracts@4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d:math-v4`.
 Canonical Solidity/Rust/TypeScript differential tests live in
 `lunarbase-contracts`.
 

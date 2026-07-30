@@ -7,7 +7,7 @@ expect_whitelisted = true
 deployment_block = 0
 expected_implementation = "0x0000000000000000000000000000000000000000"
 expected_implementation_code_hash = "0x0000000000000000000000000000000000000000000000000000000000000000"
-contract_compatibility_version = "lunarbase-contracts@cfeb6b86f425c5207f3cf80c8b40adde07d6a60b:math-v2"
+contract_compatibility_version = "lunarbase-contracts@4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d:math-v4"
 http_rpc_url = "http://127.0.0.1:8545"
 # Parser WS for `--features monad`; ring path for `--features monad-native`.
 realtime_url = "ws://127.0.0.1:8080/ws/subscriptions"
