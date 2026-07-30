@@ -13,13 +13,14 @@ services:
 
   indexer:
     build:
-      context: .
+      context: ../..
       args:
         NETWORK_FEATURES: base
     restart: unless-stopped
     depends_on:
       redis:
         condition: service_healthy
+    command: ["--config", "/etc/lunarbase/indexer.toml"]
     volumes:
       - ./config/production.base.toml:/etc/lunarbase/indexer.toml:ro
     environment:

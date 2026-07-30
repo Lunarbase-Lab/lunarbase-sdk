@@ -13,8 +13,10 @@ NODE ?= node
 CONTRACTS_DIR ?=
 RUSTDOCFLAGS ?= -D warnings
 NETWORK ?= base
-CONFIG ?= config/$(NETWORK).toml
+CONFIG ?=
+INDEXER_ARGS ?=
 INDEXER_FEATURES ?= $(NETWORK)
+COMPOSE ?= docker compose -f examples/indexer/docker-compose.yml
 
 # Use the workspace-pinned pnpm through Corepack when available. Falling back
 # to a direct binary keeps the Makefile usable with Node installations that do
@@ -33,9 +35,9 @@ help:
 	@echo "  make build          Build all Rust crates and TypeScript packages"
 	@echo "  make build-release  Build all Rust targets in release mode plus TypeScript"
 	@echo "  make build-indexer  Build the selected indexer network in release mode"
-	@echo "  make run            Run lunarbase-indexer (Base by default)"
-	@echo "                      Select another source with NETWORK=evm|monad|arbitrum"
-	@echo "                      BSC testnet: make run NETWORK=evm CONFIG=config/bsc-testnet.toml"
+	@echo "  make run            Run lunarbase-indexer from CLI/LUNARBASE_* values"
+	@echo "                      Select source features with NETWORK=evm|monad|arbitrum"
+	@echo "                      Optional example: CONFIG=examples/indexer/config/bsc-testnet.toml"
 	@echo "  make check          Run Rust and TypeScript compile checks"
 	@echo "  make test           Run Rust and TypeScript tests"
 	@echo "  make test-runtime   Test only client runtime crates/packages"
@@ -80,7 +82,7 @@ build-indexer:
 run: run-indexer
 
 run-indexer:
-	$(CARGO) run -p lunarbase-indexer --no-default-features --features "$(INDEXER_FEATURES)" -- --config "$(CONFIG)"
+	$(CARGO) run -p lunarbase-indexer --no-default-features --features "$(INDEXER_FEATURES)" -- $(if $(strip $(CONFIG)),--config "$(CONFIG)") $(INDEXER_ARGS)
 
 check: check-rust check-ts
 
@@ -178,7 +180,7 @@ monad-parser-smoke:
 	$(CARGO) run -p lunarbase-source-monad --example monad-parser-smoke
 
 docker-build:
-	docker compose build
+	$(COMPOSE) build
 
 docker-build-monad-native:
 	docker build --platform linux/amd64 \
@@ -186,10 +188,10 @@ docker-build-monad-native:
 		--tag lunarbase-indexer:monad-native .
 
 docker-up:
-	docker compose up --build -d
+	$(COMPOSE) up --build -d
 
 docker-down:
-	docker compose down
+	$(COMPOSE) down
 
 release-artifacts:
 	mkdir -p dist

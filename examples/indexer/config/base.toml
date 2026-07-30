@@ -1,6 +1,6 @@
-# Experimental until Nitro-node block.number semantics are live validated.
-network = "arbitrum"
-chain_id = 42161
+# Example Base profile; replace every deployment-specific value.
+network = "base"
+chain_id = 8453
 core = "0x0000000000000000000000000000000000000001"
 router = "0x0000000000000000000000000000000000000002"
 expect_whitelisted = true
@@ -15,6 +15,7 @@ bind = "127.0.0.1:8080"
 queue_bound = 4096
 reconnect_delay_milliseconds = 1000
 source_stall_timeout_milliseconds = 30000
+# Omit `redis_url` to disable restart acceleration.
 redis_url = "redis://127.0.0.1/"
 checkpoint_interval_seconds = 30
 shutdown_timeout_seconds = 15

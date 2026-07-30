@@ -1,0 +1,41 @@
+# Runnable indexer configuration examples
+
+`lunarbase-indexer` does not require repository-owned configuration. Supply
+deployment identity and endpoints through CLI flags, `LUNARBASE_*` environment
+variables, or an optional TOML file maintained by the operator.
+
+The files under [`config`](config) are examples and live-test fixtures only.
+Copy one into deployment-owned infrastructure before changing it:
+
+```sh
+cargo run -p lunarbase-indexer \
+  --no-default-features --features base \
+  -- --config /absolute/path/to/deployment.toml
+```
+
+For containers and secret-managed environments, omit `--config` and provide
+the same values directly:
+
+```sh
+LUNARBASE_NETWORK=base \
+LUNARBASE_CHAIN_ID=8453 \
+LUNARBASE_CORE=0x... \
+LUNARBASE_ROUTER=0x... \
+LUNARBASE_EXPECTED_IMPLEMENTATION=0x... \
+LUNARBASE_EXPECTED_IMPLEMENTATION_CODE_HASH=0x... \
+LUNARBASE_HTTP_RPC_URL=https://... \
+LUNARBASE_REALTIME_URL=wss://... \
+lunarbase-indexer
+```
+
+Explicit CLI flags override environment values, which override the optional
+TOML. Operational defaults cover bind address, queue bounds, reconnect timing,
+checkpoint cadence, and shutdown timeout; deployment identity and source
+endpoints are always explicit.
+
+The adjacent [`prometheus-alerts.yml`](prometheus-alerts.yml) is an example for
+external monitoring and is not loaded by the indexer.
+
+[`docker-compose.yml`](docker-compose.yml) is likewise an example topology.
+Its build context points at the SDK root, while its mounted TOML remains inside
+this example directory.

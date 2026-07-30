@@ -4,20 +4,32 @@ Runnable Rust HTTP service built from the embeddable LunarBase clients.
 
 ## Run Base
 
-Edit `config/base.toml`, including Core proxy, implementation identity, router, RPC, and realtime
-endpoints:
+Set deployment identity and source endpoints through `LUNARBASE_*`:
 
 ```bash
+LUNARBASE_NETWORK=base \
+LUNARBASE_CHAIN_ID=8453 \
+LUNARBASE_CORE=0x... \
+LUNARBASE_ROUTER=0x... \
+LUNARBASE_EXPECTED_IMPLEMENTATION=0x... \
+LUNARBASE_EXPECTED_IMPLEMENTATION_CODE_HASH=0x... \
+LUNARBASE_HTTP_RPC_URL=https://... \
+LUNARBASE_REALTIME_URL=wss://... \
 make run
 ```
 
-Equivalent command:
+Every value also has a kebab-case CLI flag. An optional TOML is a lower
+precedence base layer:
 
 ```bash
 cargo run -p lunarbase-indexer \
   --no-default-features --features base \
-  -- --config config/base.toml
+  -- --config /absolute/path/to/deployment.toml \
+     --http-rpc-url https://override.example
 ```
+
+Precedence is CLI, then environment, then TOML, then safe operational defaults.
+Repository profiles under `examples/indexer/config` are examples only.
 
 Base is the default feature. Experimental builds use `monad`, `monad-native`,
 or `arbitrum`.

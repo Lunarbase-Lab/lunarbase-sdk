@@ -13,8 +13,10 @@ affect a running replica or its readiness.
 
 ## Start
 
-1. Copy `config/production.base.toml` and replace all deployment, implementation,
-   RPC, and realtime values.
+1. Store deployment, implementation, RPC, and realtime values in the
+   deployment system as CLI arguments, `LUNARBASE_*` variables, or an
+   operator-owned TOML. The repository profile under
+   `examples/indexer/config/production.base.toml` is only a topology example.
 2. Verify that the configured ERC-1967 implementation and its code hash belong to the pinned contract
    compatibility revision.
 3. Configure Redis only if faster restarts are useful.
@@ -23,7 +25,7 @@ affect a running replica or its readiness.
 For the local production-shaped stack:
 
 ```sh
-docker compose up --build -d
+docker compose -f examples/indexer/docker-compose.yml up --build -d
 curl -fsS http://127.0.0.1:8080/healthz
 curl -fsS http://127.0.0.1:8080/readyz
 curl -fsS http://127.0.0.1:8080/metrics
@@ -38,8 +40,8 @@ addresses or RPC credentials.
 - Readiness: `GET /readyz`; route quote traffic only on `200`.
 - Metrics: `GET /metrics`; Prometheus text format.
 
-Import `config/prometheus-alerts.yml` into Prometheus and route those alerts
-through the deployment's Alertmanager. At minimum monitor sustained
+Adapt `examples/indexer/prometheus-alerts.yml` in deployment-owned monitoring
+configuration and route those alerts through Alertmanager. At minimum monitor sustained
 not-readiness, gaps/recovery loops, queue saturation, quote errors and
 checkpoint failures. A checkpoint failure means slower restart only.
 

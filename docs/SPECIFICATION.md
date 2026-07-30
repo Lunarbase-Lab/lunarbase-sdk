@@ -876,15 +876,18 @@ lunarbase-math/
     monad-exec-events/
     arbitrum-nitro/
 
-  config/
-    base.toml
-    monad.toml
-    arbitrum.toml
-    prometheus-alerts.yml
+  examples/
+    indexer/
+      config/                  # non-authoritative deployment examples
+      docker-compose.yml       # local topology example
+      prometheus-alerts.yml    # external monitoring example
 ```
 
 Canonical Solidity FFI remains in the sibling `lunarbase-contracts`
 repository; this repository must not duplicate the contract harness.
+The indexer accepts deployment values through CLI flags, `LUNARBASE_*`
+environment variables, or an optional operator-owned TOML. No repository-root
+configuration is required at runtime.
 
 ## 24. Pure-library public API
 

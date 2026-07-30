@@ -43,18 +43,23 @@ packages/
 fixtures/
   quote-vectors.json
 
-config/
-  base.toml
-  monad.toml
-  arbitrum.toml
-  production.base.toml
-  prometheus-alerts.yml
+examples/
+  indexer/
+    config/
+      base.toml
+      monad.toml
+      arbitrum.toml
+    docker-compose.yml
+    prometheus-alerts.yml
 ```
 
 There are no per-network client wrappers or all-network facade packages.
 Applications always use the one common client and inject a concrete source.
 This prevents a Base-only integration from pulling Monad or Arbitrum
 dependencies while keeping lifecycle and reducer behavior identical.
+Indexer deployment values are supplied externally through CLI flags,
+environment variables, or an operator-owned file. Checked-in profiles exist
+only as examples and test fixtures.
 
 ## Data path
 

@@ -118,12 +118,16 @@ TypeScript realtime quote loggers. After creating the language-specific
 
 ### Runnable indexer
 
-Configure `config/base.toml`, especially the Core proxy, implementation identity, router,
-RPC, and realtime endpoints, then run:
+Supply deployment identity and endpoints with CLI flags or `LUNARBASE_*`
+environment variables, then run:
 
 ```bash
 make run
 ```
+
+An optional operator-owned TOML can provide a base layer. Checked-in profiles
+exist only under [`examples/indexer`](examples/indexer/README.md) as runnable
+examples and live-test fixtures.
 
 Base is the default feature. The service exposes `POST /v1/quote`,
 `POST /v1/quotes`, `GET /healthz`, `GET /readyz`, and `GET /metrics`. See the

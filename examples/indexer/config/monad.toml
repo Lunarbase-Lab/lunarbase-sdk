@@ -1,4 +1,4 @@
-# Experimental until execution-event-ring live validation and soak complete.
+# Experimental example until execution-event-ring live validation and soak complete.
 network = "monad"
 chain_id = 143
 core = "0x0000000000000000000000000000000000000001"

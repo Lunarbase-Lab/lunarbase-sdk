@@ -34,7 +34,7 @@ async fn main() {
 
 async fn run() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
-    let config = Config::load(&cli.config)?;
+    let config = Config::load(&cli)?;
     let metrics = Arc::new(Metrics::default());
     let signal = wait_for_signal();
     tokio::pin!(signal);

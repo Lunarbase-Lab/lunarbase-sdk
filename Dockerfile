@@ -35,4 +35,3 @@ COPY --from=builder /tmp/lunarbase-indexer /usr/local/bin/lunarbase-indexer
 USER lunarbase
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/lunarbase-indexer"]
-CMD ["--config", "/etc/lunarbase/indexer.toml"]

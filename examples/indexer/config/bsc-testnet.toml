@@ -1,3 +1,4 @@
+# Live BSC Testnet validation fixture. Never treat public endpoints as production defaults.
 network = "evm"
 chain_id = 97
 core = "0x11116c60551889C6c01DDAD3A1fB3Cc95CbeBBbB"

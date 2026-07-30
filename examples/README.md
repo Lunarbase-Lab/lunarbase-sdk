@@ -52,7 +52,8 @@ from RPC snapshots; a source gap is a recovery signal, never a reason to serve
 an unverified stale quote.
 
 The production Rust composition is available as `lunarbase-indexer`. After
-editing `config/base.toml`, run the default Base service with:
+supplying deployment parameters through CLI flags, `LUNARBASE_*`, or an
+operator-owned TOML, run the default Base service with:
 
 ```sh
 make run
@@ -62,6 +63,8 @@ Select another compiled source with `make run NETWORK=monad` or
 `make run NETWORK=arbitrum`.
 
 Production deployments should scrape `/metrics` and load
-`config/prometheus-alerts.yml` into their Prometheus/Alertmanager stack.
+[`indexer/prometheus-alerts.yml`](indexer/prometheus-alerts.yml) into their
+Prometheus/Alertmanager stack. Example TOML profiles live under
+[`indexer/config`](indexer/config).
 `SIGTERM` drains HTTP requests, cooperatively stops runtime workers, and
 best-effort writes a final checkpoint before the process exits.
