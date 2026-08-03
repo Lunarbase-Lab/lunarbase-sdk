@@ -6,17 +6,21 @@ import {
   EMPTY_SLOT0,
   U256_MAX,
   WAD,
+  applyLaneUpdateSlot0,
   calculateFeeBpsForRouter,
   createLaneState,
+  decimalNumberToBigInt,
   decodeLaneSlot0,
   encodeLaneSlot0,
+  encodeUpdateFees,
   fullMulDivDown,
+  laneFeeBpsFromConventionalBps,
+  lanePriceFromNumber,
+  modelQuoteToLaneSlot0Fields,
   mulDivDown256,
   parseAddress,
   quote,
   solidityExactInAmount,
-  applyLaneUpdateSlot0,
-  encodeUpdateFees,
   solidityExactOutAmount,
   solidityExactOutAmountForRequest,
   type LaneState,
@@ -62,6 +66,41 @@ interface GoldenVector {
 }
 
 const address = (last: string): Address => parseAddress(`0x${last.padStart(40, "0")}`);
+
+test("decimal numbers scale through their canonical representation without binary multiplication drift", () => {
+  assert.equal(decimalNumberToBigInt(2.824467842, 20), 282_446_784_200_000_000_000n);
+  assert.equal(decimalNumberToBigInt(1e-7, 18), 100_000_000_000n);
+  assert.equal(decimalNumberToBigInt(1.005, 2, "down"), 100n);
+  assert.equal(decimalNumberToBigInt(1.005, 2, "nearest"), 101n);
+  assert.equal(decimalNumberToBigInt(1.005, 2, "up"), 101n);
+  assert.throws(() => decimalNumberToBigInt(1.005, 2), /not exactly representable/);
+  assert.throws(() => decimalNumberToBigInt(Number.NaN, 18), /non-negative finite/);
+  assert.throws(() => decimalNumberToBigInt(-1, 18), /non-negative finite/);
+});
+
+test("model quote numbers convert into exact LaneSlot0 integer fields", () => {
+  const fields = modelQuoteToLaneSlot0Fields({
+    anchorPrice: 63_975.3802738,
+    askSpreadBps: 9.000016834202746,
+    bidSpreadBps: 1.0000000000006477,
+    cashDecimals: 18,
+    assetDecimals: 18,
+  });
+
+  assert.deepEqual(fields, {
+    price: 63_975_380_273_800_000_000_000n,
+    askFeeBps: 900n,
+    bidFeeBps: 100n,
+  });
+  const decoded = decodeLaneSlot0(encodeLaneSlot0({ ...EMPTY_SLOT0, ...fields, exists: true }));
+  assert.equal(decoded.price, fields.price);
+  assert.equal(decoded.askFeeBps, fields.askFeeBps);
+  assert.equal(decoded.bidFeeBps, fields.bidFeeBps);
+  assert.equal(lanePriceFromNumber(63_968.98273577262, 18, 18), 63_968_982_735_772_620_000_000n);
+  assert.equal(lanePriceFromNumber(2.824467842, 18, 16), 282_446_784_200_000_000_000n);
+  assert.equal(laneFeeBpsFromConventionalBps(9.009, "down"), 900n);
+  assert.equal(laneFeeBpsFromConventionalBps(9.009, "up"), 901n);
+});
 
 test("slot0 round-trips boundaries and reserved bits", () => {
   const fields = {

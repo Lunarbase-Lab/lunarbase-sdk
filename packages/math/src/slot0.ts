@@ -1,4 +1,5 @@
 import { assertU256, MathError, type Word } from "./constants.js";
+import { decimalNumberToBigInt, type DecimalRounding } from "./decimal.js";
 import type { LaneSlot0 } from "./types.js";
 
 function fieldMask(bits: bigint): bigint {
@@ -11,10 +12,93 @@ const SLOT0_PRICE_MASK = (1n << 112n) - 1n;
 const SLOT0_FEE_MASK = (1n << 20n) - 1n;
 const SLOT0_BLOCK_MASK = (1n << 40n) - 1n;
 const SLOT0_SLIPPAGE_K_MASK = (1n << 32n) - 1n;
+
+/** Decimal model fields required to construct one lane price update. */
+export interface LaneModelQuoteNumbers {
+  /** CASH per one lane asset; use the model's `S` anchor price. */
+  anchorPrice: number;
+  /** Ask spread expressed in conventional basis points. */
+  askSpreadBps: number;
+  /** Bid spread expressed in conventional basis points. */
+  bidSpreadBps: number;
+  /** Decimal precision of the Core settlement asset. */
+  cashDecimals: number;
+  /** Decimal precision of the lane asset. */
+  assetDecimals: number;
+}
+
+/** Integer fields from a model quote that are stored in `Lane.slot0`. */
+export interface LaneSlot0QuoteFields {
+  /** Decimal-adjusted WAD anchor price ready for the low `uint112`. */
+  price: bigint;
+  /** Ask spread in LunarBase protocol BPS, ready for `uint20`. */
+  askFeeBps: bigint;
+  /** Bid spread in LunarBase protocol BPS, ready for `uint20`. */
+  bidFeeBps: bigint;
+}
+
 function validateField(value: bigint, bits: bigint, field: string): void {
   assertU256(value, field);
   if (value > fieldMask(bits))
     throw new MathError("FIELD_OVERFLOW", `${field} does not fit in ${bits} bits`, field, bits);
+}
+
+/**
+ * Converts a model anchor price into the exact fixed-point value stored in
+ * slot0.
+ *
+ * Floating-point multiplication is deliberately avoided. The canonical
+ * decimal representation of `price` is scaled by
+ * `10 ** (cashDecimals - assetDecimals) * WAD`, matching `Lanes.sol`. The
+ * scaled result must be exact and fit the contract's `uint112` price field.
+ */
+export function lanePriceFromNumber(price: number, cashDecimals: number, assetDecimals: number): bigint {
+  validateTokenDecimals(cashDecimals, "cashDecimals");
+  validateTokenDecimals(assetDecimals, "assetDecimals");
+  const scaleDecimals = 18 + cashDecimals - assetDecimals;
+  if (scaleDecimals < 0)
+    throw new RangeError("cashDecimals - assetDecimals produces a sub-integer LaneSlot0 price scale");
+  const encoded = decimalNumberToBigInt(price, scaleDecimals, "exact");
+  validateField(encoded, 112n, "price");
+  return encoded;
+}
+
+/**
+ * Converts conventional basis points into LunarBase protocol BPS.
+ *
+ * The protocol denominator is `1_000_000`, so one conventional basis point is
+ * exactly 100 protocol units. A model spread can contain more than two
+ * fractional bps digits; `rounding` determines how those excess digits map to
+ * the integer `uint20` field.
+ */
+export function laneFeeBpsFromConventionalBps(spreadBps: number, rounding: DecimalRounding = "nearest"): bigint {
+  const encoded = decimalNumberToBigInt(spreadBps, 2, rounding);
+  validateField(encoded, 20n, "feeBps");
+  return encoded;
+}
+
+/**
+ * Decodes the quote-critical decimal fields produced by the pricing model.
+ *
+ * Pass model `S` as `anchorPrice` and `spreadAskBps`/`spreadBidBps` as the
+ * directional spreads. The legacy `feeAskX24` and `feeBidX24` values use a
+ * different Q24 representation and must not be packed into the new slot0 fee
+ * fields.
+ */
+export function modelQuoteToLaneSlot0Fields(
+  quote: LaneModelQuoteNumbers,
+  feeRounding: DecimalRounding = "nearest",
+): LaneSlot0QuoteFields {
+  return {
+    price: lanePriceFromNumber(quote.anchorPrice, quote.cashDecimals, quote.assetDecimals),
+    askFeeBps: laneFeeBpsFromConventionalBps(quote.askSpreadBps, feeRounding),
+    bidFeeBps: laneFeeBpsFromConventionalBps(quote.bidSpreadBps, feeRounding),
+  };
+}
+
+function validateTokenDecimals(value: number, field: string): void {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 0xff)
+    throw new RangeError(`${field} must fit an ERC-20 uint8`);
 }
 
 /** Decodes every packed field from the 256-bit lane storage word. */
