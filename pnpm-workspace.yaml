@@ -5,3 +5,4 @@ packages:
   - packages/source-monad
   - packages/source-arbitrum
   - examples/typescript/quote-logger
+  - examples/typescript/activity-actor

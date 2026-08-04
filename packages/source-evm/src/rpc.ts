@@ -1,4 +1,4 @@
-import { BPS, createLaneState, laneExists, type Address, type QuoteState } from "@lunarbase/math";
+import { BPS, createLaneState, laneExists, parseAddress, type Address, type QuoteState } from "@lunarbase/math";
 import type { AbiEvent as AbiEventType } from "ox/AbiEvent";
 import * as Hash from "ox/Hash";
 import * as Hex from "ox/Hex";
@@ -25,6 +25,7 @@ import {
 const BLOCK_TAGS = new Set<BlockTag>(["earliest", "finalized", "latest", "pending", "safe"]);
 const LOG_RANGE_CHUNK_BLOCKS = 10_000n;
 const SNAPSHOT_CONCURRENCY = 16;
+const addressKey = parseAddress;
 
 /** Typed failure from HTTP, JSON-RPC, or ABI response validation. */
 export class RpcError extends Error {
@@ -354,7 +355,7 @@ export class RpcSnapshotProvider {
           return [asset, createLaneState(Hex.toBigInt(lane), reserves[0], reserves[4])] as const;
         }),
       );
-      for (const [asset, lane] of entries) lanes.set(asset, lane);
+      for (const [asset, lane] of entries) lanes.set(addressKey(asset), lane);
     }
     const cashReserves = await this.rpc.client.readContract({
       abi: CORE_ABI,
@@ -382,7 +383,7 @@ export class RpcSnapshotProvider {
           return [asset, partner[1]] as const;
         }),
       );
-      for (const [asset, fee] of entries) partnerFeeBps.set(asset, fee);
+      for (const [asset, fee] of entries) partnerFeeBps.set(addressKey(asset), fee);
     }
     const verified = await this.rpc.blockCursor(pinnedBlock, config.chainId, commitment);
     if (verified.blockHash?.toLowerCase() !== cursor.blockHash.toLowerCase())
@@ -391,7 +392,7 @@ export class RpcSnapshotProvider {
   }
 
   private async resolveLaneAssets(config: DeploymentConfig, snapshotBlock: bigint): Promise<Address[]> {
-    if (config.explicitLaneAssets.length > 0) return [...config.explicitLaneAssets];
+    if (config.explicitLaneAssets.length > 0) return config.explicitLaneAssets.map(addressKey);
     const history = await this.rpc.getLogs(
       {
         fromBlock: config.deploymentBlock,
@@ -405,8 +406,8 @@ export class RpcSnapshotProvider {
     const active = new Set<Address>();
     for (const log of history) {
       const event = decodeCoreEvent(log);
-      if (event?.kind === "LaneAdded") active.add(event.asset);
-      else if (event?.kind === "LaneRemoved") active.delete(event.asset);
+      if (event?.kind === "LaneAdded") active.add(addressKey(event.asset));
+      else if (event?.kind === "LaneRemoved") active.delete(addressKey(event.asset));
     }
     return [...active];
   }

@@ -28,7 +28,7 @@ PNPM_CMD := $(shell if command -v corepack >/dev/null 2>&1; then printf '%s' "co
 .PHONY: help install build build-rust build-ts build-release build-indexer run run-indexer \
 	check check-rust check-ts fmt fmt-rust fmt-ts fmt-check fmt-check-rust fmt-check-ts lint lint-rust lint-ts \
 	test test-rust test-ts test-runtime test-process-e2e audit audit-rust audit-ts load monad-live-validate docs docs-rust ffi \
-	quote-logger quote-logger-rust quote-logger-ts monad-parser-smoke docker-build docker-build-monad-native docker-up docker-down release-artifacts release-check source-size-check verify ci clean check-pnpm
+	quote-logger quote-logger-rust quote-logger-ts activity-actor activity-actor-inspect activity-actor-wallet monad-parser-smoke docker-build docker-build-monad-native docker-up docker-down release-artifacts release-check source-size-check verify ci clean check-pnpm
 
 help:
 	@echo "LunarBase build targets:"
@@ -52,6 +52,9 @@ help:
 	@echo "  make ffi            Run Solidity differential FFI from lunarbase-contracts"
 	@echo "  make quote-logger-rust  Run the Rust realtime quote example"
 	@echo "  make quote-logger-ts    Run the TypeScript realtime quote example"
+	@echo "  make activity-actor-wallet  Generate a local testnet-only actor wallet"
+	@echo "  make activity-actor-inspect Inspect the BSC testnet pool without transactions"
+	@echo "  make activity-actor    Run the BSC testnet activity actor"
 	@echo "  make monad-parser-smoke  Connect the Rust Monad source to a local parser"
 	@echo "  make docker-up      Build and start indexer + Redis"
 	@echo "  make docker-build-monad-native  Build the x86_64 native Monad image"
@@ -176,6 +179,21 @@ quote-logger-ts: check-pnpm
 	$(PNPM_CMD) --filter @lunarbase/example-quote-logger build
 	$(PNPM_CMD) --filter @lunarbase/example-quote-logger start
 
+activity-actor-wallet: check-pnpm
+	$(PNPM_CMD) --filter @lunarbase/math build
+	$(PNPM_CMD) --filter @lunarbase/example-activity-actor build
+	$(PNPM_CMD) --filter @lunarbase/example-activity-actor wallet:new
+
+activity-actor-inspect: check-pnpm
+	$(PNPM_CMD) --filter @lunarbase/math build
+	$(PNPM_CMD) --filter @lunarbase/example-activity-actor build
+	$(PNPM_CMD) --filter @lunarbase/example-activity-actor inspect
+
+activity-actor: check-pnpm
+	$(PNPM_CMD) --filter @lunarbase/math build
+	$(PNPM_CMD) --filter @lunarbase/example-activity-actor build
+	$(PNPM_CMD) --filter @lunarbase/example-activity-actor run start --live
+
 monad-parser-smoke:
 	$(CARGO) run -p lunarbase-source-monad --example monad-parser-smoke
 
@@ -221,7 +239,7 @@ ci: verify
 
 clean: check-pnpm
 	$(CARGO) clean
-	$(PNPM_CMD) exec tsc -b packages/math/tsconfig.json packages/client/tsconfig.json packages/source-evm/tsconfig.json packages/source-monad/tsconfig.json packages/source-arbitrum/tsconfig.json examples/typescript/quote-logger/tsconfig.json --clean
+	$(PNPM_CMD) exec tsc -b packages/math/tsconfig.json packages/client/tsconfig.json packages/source-evm/tsconfig.json packages/source-monad/tsconfig.json packages/source-arbitrum/tsconfig.json examples/typescript/quote-logger/tsconfig.json examples/typescript/activity-actor/tsconfig.json --clean
 
 check-pnpm:
 	@if [ -n "$(PNPM_CMD)" ]; then :; else \

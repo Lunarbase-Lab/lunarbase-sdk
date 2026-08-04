@@ -8,6 +8,11 @@ logger:
 - [`typescript/quote-logger`](typescript/quote-logger/README.md) is a private
   pnpm workspace package built on `@lunarbase/client`.
 
+The [`typescript/activity-actor`](typescript/activity-actor/README.md) example
+is a separate BSC Testnet-only service. It creates a dedicated local wallet,
+checks pool readiness, mints permissionless mock tokens when needed, and sends
+small sequential exact-input swaps after an explicit double broadcast gate.
+
 Both load `RPC_URL` and `CORE_ADDRESS` from `.env`, bootstrap state through
 RPC, subscribe to WebSocket updates, and log exact-input quotes in both
 directions for every active lane. Each interval uses one `quoteMany` snapshot.

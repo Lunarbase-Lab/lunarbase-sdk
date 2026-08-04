@@ -1,8 +1,15 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { Commitment, quoteCriticalTopics } from "@lunarbase/client";
-import { parseAddress } from "@lunarbase/math";
-import { JsonRpcHttpClient } from "./rpc.js";
+import {
+  Commitment,
+  MATH_COMPATIBILITY_VERSION,
+  Network,
+  quoteCriticalTopics,
+  type ChainCursor,
+  type DeploymentConfig,
+} from "@lunarbase/client";
+import { parseAddress, type Address } from "@lunarbase/math";
+import { JsonRpcHttpClient, RpcSnapshotProvider, keccak256Hex } from "./rpc.js";
 
 type RpcRequest = {
   readonly id: number;
@@ -131,5 +138,63 @@ test("backfill splits ranges larger than ten thousand blocks", async () => {
       ["0xa", "0x2719"],
       ["0x271a", "0x271a"],
     ],
+  );
+});
+
+test("snapshot canonicalizes lane and partner address keys", async () => {
+  const blockHash = `0x${"11".repeat(32)}` as `0x${string}`;
+  const implementation = parseAddress("0x00000000000000000000000000000000000000aa");
+  const implementationWord = `0x${"0".repeat(24)}${implementation.slice(2)}` as `0x${string}`;
+  const runtimeCode = "0x6000" as const;
+  const core = parseAddress("0x0000000000000000000000000000000000000001");
+  const router = parseAddress("0x0000000000000000000000000000000000000002");
+  const laneAsset = "0x21f52a1d45DAb30b518b31CA8e44f91B588A8DEC" as Address;
+  const cash = "0x2c10647a0D96cab7fE26044CA6d3F854280dC906" as Address;
+  const cursor: ChainCursor = {
+    chainId: 97n,
+    blockNumber: 42n,
+    executionBlockNumber: 42n,
+    blockHash,
+    commitment: Commitment.Canonical,
+  };
+  const rpc = {
+    chainId: async () => 97n,
+    blockCursor: async () => cursor,
+    getStorageAtHash: async () => implementationWord,
+    getCodeAtHash: async () => runtimeCode,
+    client: {
+      readContract: async (request: { functionName: string; args?: readonly unknown[] }) => {
+        if (request.functionName === "cash") return cash;
+        if (request.functionName === "whitelist") return false;
+        if (request.functionName === "blacklistFeeMultiplier") return 1n;
+        if (request.functionName === "lane") return `0x${(1n << 200n).toString(16).padStart(64, "0")}` as `0x${string}`;
+        if (request.functionName === "reserves") {
+          const asset = String(request.args?.[0]).toLowerCase();
+          return asset === cash.toLowerCase() ? [2000n, 0n, 0n, 0n, 0n] : [1000n, 0n, 0n, 0n, 1000n];
+        }
+        if (request.functionName === "partners") return [0n, 0, 0, router];
+        throw new Error(`unexpected ${request.functionName}`);
+      },
+    },
+  } as unknown as JsonRpcHttpClient;
+  const config: DeploymentConfig = {
+    network: Network.Evm,
+    chainId: 97n,
+    core,
+    router,
+    expectWhitelisted: false,
+    deploymentBlock: 0n,
+    expectedImplementation: implementation,
+    expectedImplementationCodeHash: keccak256Hex(runtimeCode),
+    contractCompatibilityVersion: MATH_COMPATIBILITY_VERSION,
+    explicitLaneAssets: [laneAsset],
+  };
+
+  const snapshot = await new RpcSnapshotProvider(rpc).snapshot(config);
+
+  assert.deepEqual([...snapshot.state.lanes.keys()], [laneAsset.toLowerCase()]);
+  assert.deepEqual(
+    [...snapshot.state.feeProfile.partnerFeeBps.keys()].sort(),
+    [laneAsset.toLowerCase(), cash.toLowerCase()].sort(),
   );
 });
