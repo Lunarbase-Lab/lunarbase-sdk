@@ -1,0 +1,16 @@
+**/build/
+**/target/
+**/node_modules/
+**/dist/
+.pnpm-store/
+*.tsbuildinfo
+.DS_Store
+.env
+**/.actor.lock
+**/.pairing-state-*.json
+**/.pairing-state-*.json.*.tmp
+docs/*.aux
+docs/*.log
+docs/*.out
+docs/*.pdf
+docs/*.synctex.gz

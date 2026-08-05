@@ -1,0 +1,28 @@
+[package]
+name = "lunarbase-pmm-v2-source-monad"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Monad execution-event data source for LunarBase"
+keywords = ["lunarbase", "monad", "evm", "rpc", "websocket"]
+categories = ["api-bindings", "asynchronous", "network-programming"]
+
+[lib]
+name = "lunarbase_source_monad"
+
+[lints]
+workspace = true
+
+[dependencies]
+async-stream.workspace = true
+futures-util.workspace = true
+lunarbase-client.workspace = true
+lunarbase-math.workspace = true
+lunarbase-source-evm.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+url.workspace = true

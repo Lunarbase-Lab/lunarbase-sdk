@@ -1,0 +1,24 @@
+[package]
+name = "lunarbase-pmm-v2-math"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Pure U256 LunarBase off-chain quote math"
+keywords = ["lunarbase", "pmm", "defi", "evm", "quote"]
+categories = ["algorithms", "mathematics"]
+
+[lib]
+name = "lunarbase_math"
+
+[lints]
+workspace = true
+
+[dependencies]
+alloy-primitives.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -1,0 +1,322 @@
+{
+  "schemaVersion": "1",
+  "mathCompatibilityVersion": "lunarbase-pmm-v2",
+  "vectors": [
+    {
+      "name": "direct-cash-to-asset-exact-in",
+      "cash": "0x0000000000000000000000000000000000000001",
+      "assetIn": "0x0000000000000000000000000000000000000001",
+      "assetOut": "0x0000000000000000000000000000000000000002",
+      "mode": "ExactIn",
+      "amount": "100",
+      "executionBlockNumber": "100",
+      "blacklistFeeMultiplier": "1",
+      "whitelisted": false,
+      "partnerFeeBps": "500000",
+      "laneIn": null,
+      "laneOut": {
+        "price": "2000000000000000000",
+        "askFeeBps": "10000",
+        "bidFeeBps": "0",
+        "latestUpdateBlock": "100",
+        "exists": true,
+        "paused": false,
+        "blockDelay": "0",
+        "slippageKBps": "0",
+        "principal": "1000000"
+      },
+      "expected": {
+        "amountIn": "100",
+        "amountOut": "49",
+        "feeAsset": "0x0000000000000000000000000000000000000002",
+        "feeAmount": "1",
+        "partnerFee": "1",
+        "treasuryFee": "0"
+      }
+    },
+    {
+      "name": "direct-asset-to-cash-exact-out",
+      "cash": "0x0000000000000000000000000000000000000001",
+      "assetIn": "0x0000000000000000000000000000000000000002",
+      "assetOut": "0x0000000000000000000000000000000000000001",
+      "mode": "ExactOut",
+      "amount": "100",
+      "executionBlockNumber": "100",
+      "blacklistFeeMultiplier": "1",
+      "whitelisted": false,
+      "partnerFeeBps": "500000",
+      "laneIn": {
+        "price": "2000000000000000000",
+        "askFeeBps": "0",
+        "bidFeeBps": "10000",
+        "latestUpdateBlock": "100",
+        "exists": true,
+        "paused": false,
+        "blockDelay": "0",
+        "slippageKBps": "0",
+        "principal": "1000000"
+      },
+      "laneOut": null,
+      "expected": {
+        "amountIn": "51",
+        "amountOut": "100",
+        "feeAsset": "0x0000000000000000000000000000000000000002",
+        "feeAmount": "1",
+        "partnerFee": "1",
+        "treasuryFee": "0"
+      }
+    },
+    {
+      "name": "route-double-slippage",
+      "cash": "0x0000000000000000000000000000000000000001",
+      "assetIn": "0x0000000000000000000000000000000000000004",
+      "assetOut": "0x0000000000000000000000000000000000000005",
+      "mode": "ExactIn",
+      "amount": "100",
+      "executionBlockNumber": "100",
+      "blacklistFeeMultiplier": "1",
+      "whitelisted": false,
+      "partnerFeeBps": "0",
+      "laneIn": {
+        "price": "2000000000000000000",
+        "askFeeBps": "0",
+        "bidFeeBps": "10000",
+        "latestUpdateBlock": "100",
+        "exists": true,
+        "paused": false,
+        "blockDelay": "0",
+        "slippageKBps": "1000",
+        "principal": "1000000"
+      },
+      "laneOut": {
+        "price": "500000000000000000",
+        "askFeeBps": "10000",
+        "bidFeeBps": "0",
+        "latestUpdateBlock": "100",
+        "exists": true,
+        "paused": false,
+        "blockDelay": "0",
+        "slippageKBps": "1000",
+        "principal": "2000000"
+      },
+      "expected": {
+        "amountIn": "100",
+        "amountOut": "392",
+        "feeAsset": "0x0000000000000000000000000000000000000005",
+        "feeAmount": "8",
+        "partnerFee": "0",
+        "treasuryFee": "8"
+      }
+    },
+    {
+      "name": "zero-and-sentinel-boundaries",
+      "cash": "0x0000000000000000000000000000000000000001",
+      "assetIn": "0x0000000000000000000000000000000000000001",
+      "assetOut": "0x0000000000000000000000000000000000000002",
+      "mode": "ExactOut",
+      "amount": "0",
+      "executionBlockNumber": "100",
+      "blacklistFeeMultiplier": "0",
+      "whitelisted": false,
+      "partnerFeeBps": "0",
+      "laneIn": null,
+      "laneOut": null,
+      "expectedPublicAmount": "0"
+    },
+    {
+      "name": "direct-cash-to-asset-exact-out",
+      "cash": "0x0000000000000000000000000000000000000001",
+      "assetIn": "0x0000000000000000000000000000000000000001",
+      "assetOut": "0x0000000000000000000000000000000000000002",
+      "mode": "ExactOut",
+      "amount": "100",
+      "executionBlockNumber": "100",
+      "blacklistFeeMultiplier": "1",
+      "whitelisted": false,
+      "partnerFeeBps": "500000",
+      "laneIn": null,
+      "laneOut": {
+        "price": "2000000000000000000",
+        "askFeeBps": "10000",
+        "bidFeeBps": "0",
+        "latestUpdateBlock": "100",
+        "exists": true,
+        "paused": false,
+        "blockDelay": "0",
+        "slippageKBps": "0",
+        "principal": "1000000"
+      },
+      "expected": {
+        "amountIn": "202",
+        "amountOut": "100",
+        "feeAsset": "0x0000000000000000000000000000000000000001",
+        "feeAmount": "2",
+        "partnerFee": "2",
+        "treasuryFee": "0"
+      }
+    },
+    {
+      "name": "direct-asset-to-cash-exact-in",
+      "cash": "0x0000000000000000000000000000000000000001",
+      "assetIn": "0x0000000000000000000000000000000000000002",
+      "assetOut": "0x0000000000000000000000000000000000000001",
+      "mode": "ExactIn",
+      "amount": "100",
+      "executionBlockNumber": "100",
+      "blacklistFeeMultiplier": "1",
+      "whitelisted": false,
+      "partnerFeeBps": "500000",
+      "laneIn": {
+        "price": "2000000000000000000",
+        "askFeeBps": "0",
+        "bidFeeBps": "10000",
+        "latestUpdateBlock": "100",
+        "exists": true,
+        "paused": false,
+        "blockDelay": "0",
+        "slippageKBps": "0",
+        "principal": "1000000"
+      },
+      "laneOut": null,
+      "expected": {
+        "amountIn": "100",
+        "amountOut": "198",
+        "feeAsset": "0x0000000000000000000000000000000000000001",
+        "feeAmount": "2",
+        "partnerFee": "2",
+        "treasuryFee": "0"
+      }
+    },
+    {
+      "name": "route-exact-out",
+      "cash": "0x0000000000000000000000000000000000000001",
+      "assetIn": "0x0000000000000000000000000000000000000004",
+      "assetOut": "0x0000000000000000000000000000000000000005",
+      "mode": "ExactOut",
+      "amount": "100",
+      "executionBlockNumber": "100",
+      "blacklistFeeMultiplier": "1",
+      "whitelisted": false,
+      "partnerFeeBps": "0",
+      "laneIn": {
+        "price": "2000000000000000000",
+        "askFeeBps": "0",
+        "bidFeeBps": "10000",
+        "latestUpdateBlock": "100",
+        "exists": true,
+        "paused": false,
+        "blockDelay": "0",
+        "slippageKBps": "1000",
+        "principal": "1000000"
+      },
+      "laneOut": {
+        "price": "500000000000000000",
+        "askFeeBps": "10000",
+        "bidFeeBps": "0",
+        "latestUpdateBlock": "100",
+        "exists": true,
+        "paused": false,
+        "blockDelay": "0",
+        "slippageKBps": "1000",
+        "principal": "2000000"
+      },
+      "expected": {
+        "amountIn": "26",
+        "amountOut": "100",
+        "feeAsset": "0x0000000000000000000000000000000000000004",
+        "feeAmount": "1",
+        "partnerFee": "0",
+        "treasuryFee": "1"
+      }
+    },
+    {
+      "name": "blacklist-fee-saturates-at-bps",
+      "cash": "0x0000000000000000000000000000000000000001",
+      "assetIn": "0x0000000000000000000000000000000000000001",
+      "assetOut": "0x0000000000000000000000000000000000000002",
+      "mode": "ExactIn",
+      "amount": "100",
+      "executionBlockNumber": "100",
+      "blacklistFeeMultiplier": "1000",
+      "whitelisted": false,
+      "partnerFeeBps": "500000",
+      "laneIn": null,
+      "laneOut": {
+        "price": "2000000000000000000",
+        "askFeeBps": "10000",
+        "bidFeeBps": "0",
+        "latestUpdateBlock": "100",
+        "exists": true,
+        "paused": false,
+        "blockDelay": "0",
+        "slippageKBps": "0",
+        "principal": "1000000"
+      },
+      "expected": {
+        "amountIn": "100",
+        "amountOut": "25",
+        "feeAsset": "0x0000000000000000000000000000000000000002",
+        "feeAmount": "25",
+        "partnerFee": "25",
+        "treasuryFee": "0"
+      }
+    },
+    {
+      "name": "whitelist-bypasses-overflowing-multiplier",
+      "cash": "0x0000000000000000000000000000000000000001",
+      "assetIn": "0x0000000000000000000000000000000000000001",
+      "assetOut": "0x0000000000000000000000000000000000000002",
+      "mode": "ExactIn",
+      "amount": "100",
+      "executionBlockNumber": "100",
+      "blacklistFeeMultiplier": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+      "whitelisted": true,
+      "partnerFeeBps": "500000",
+      "laneIn": null,
+      "laneOut": {
+        "price": "2000000000000000000",
+        "askFeeBps": "10000",
+        "bidFeeBps": "0",
+        "latestUpdateBlock": "100",
+        "exists": true,
+        "paused": false,
+        "blockDelay": "0",
+        "slippageKBps": "0",
+        "principal": "1000000"
+      },
+      "expected": {
+        "amountIn": "100",
+        "amountOut": "49",
+        "feeAsset": "0x0000000000000000000000000000000000000002",
+        "feeAmount": "1",
+        "partnerFee": "1",
+        "treasuryFee": "0"
+      }
+    },
+    {
+      "name": "checked-partner-fee-overflow",
+      "cash": "0x0000000000000000000000000000000000000001",
+      "assetIn": "0x0000000000000000000000000000000000000001",
+      "assetOut": "0x0000000000000000000000000000000000000002",
+      "mode": "ExactIn",
+      "amount": "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+      "executionBlockNumber": "100",
+      "blacklistFeeMultiplier": "1",
+      "whitelisted": false,
+      "partnerFeeBps": "1000000",
+      "laneIn": null,
+      "laneOut": {
+        "price": "2000000000000000000",
+        "askFeeBps": "10000",
+        "bidFeeBps": "0",
+        "latestUpdateBlock": "100",
+        "exists": true,
+        "paused": false,
+        "blockDelay": "0",
+        "slippageKBps": "0",
+        "principal": "1000000"
+      },
+      "expectedPublicAmount": "0"
+    }
+  ]
+}

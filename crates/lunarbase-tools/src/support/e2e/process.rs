@@ -1,0 +1,78 @@
+use crate::support::e2e::environment::{E2eError, MockChain};
+use crate::support::e2e::{ASSET, CORE, EMPTY_CODE_HASH, IMPLEMENTATION, ROUTER};
+use std::path::Path;
+use std::process::Stdio;
+use std::time::Duration;
+use tokio::process::{Child, Command};
+use tokio::time::timeout;
+
+pub(super) fn write_config(
+    path: &Path,
+    mock: &MockChain,
+    redis_url: Option<&str>,
+    port: u16,
+) -> Result<(), E2eError> {
+    let redis = redis_url
+        .map(|url| format!("redis_url = \"{url}\"\n"))
+        .unwrap_or_default();
+    let contents = format!(
+        r#"network = "base"
+chain_id = 8453
+core = "{CORE}"
+router = "{ROUTER}"
+expect_whitelisted = true
+deployment_block = 0
+expected_implementation = "{IMPLEMENTATION}"
+expected_implementation_code_hash = "{EMPTY_CODE_HASH}"
+http_rpc_url = "{}"
+realtime_url = "{}"
+bind = "127.0.0.1:{port}"
+explicit_lane_assets = ["{ASSET}"]
+queue_bound = 128
+reconnect_delay_milliseconds = 100
+{redis}checkpoint_interval_seconds = 1
+shutdown_timeout_seconds = 4
+"#,
+        mock.rpc_url(),
+        mock.websocket_url(),
+    );
+    std::fs::write(path, contents)?;
+    Ok(())
+}
+
+pub(super) fn spawn_indexer(binary: &Path, config: &Path) -> Result<Child, E2eError> {
+    let mut command = Command::new(binary);
+    command
+        .arg("--config")
+        .arg(config)
+        .env("RUST_LOG", "lunarbase_indexer=info")
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true);
+    Ok(command.spawn()?)
+}
+
+pub(super) async fn terminate(child: &mut Child) -> Result<(), E2eError> {
+    let Some(pid) = child.id() else {
+        return Ok(());
+    };
+    let status = Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .status()
+        .await?;
+    if !status.success() {
+        return Err(E2eError::Scenario(format!(
+            "failed to send SIGTERM to process {pid}"
+        )));
+    }
+    let exit = timeout(Duration::from_secs(8), child.wait())
+        .await
+        .map_err(|_| E2eError::Scenario(format!("process {pid} ignored SIGTERM")))??;
+    if !exit.success() {
+        return Err(E2eError::Scenario(format!(
+            "process {pid} exited unsuccessfully: {exit}"
+        )));
+    }
+    Ok(())
+}

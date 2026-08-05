@@ -1,0 +1,44 @@
+[package]
+name = "lunarbase-indexer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Runnable LunarBase indexing and quote HTTP service"
+publish = false
+
+[features]
+default = ["base"]
+evm = ["dep:lunarbase-source-evm"]
+base = ["evm"]
+monad = ["dep:lunarbase-source-monad"]
+monad-native = [
+    "monad",
+    "dep:lunarbase-source-monad-native",
+    "lunarbase-source-monad-native/native-event-ring",
+]
+arbitrum = ["dep:lunarbase-source-arbitrum"]
+all-networks = ["base", "monad", "arbitrum"]
+
+[lints]
+workspace = true
+
+[dependencies]
+alloy-primitives.workspace = true
+axum.workspace = true
+clap.workspace = true
+lunarbase-source-arbitrum = { workspace = true, optional = true }
+lunarbase-source-evm = { workspace = true, optional = true }
+lunarbase-client.workspace = true
+lunarbase-source-monad = { workspace = true, optional = true }
+lunarbase-source-monad-native = { workspace = true, optional = true }
+lunarbase-math.workspace = true
+redis.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

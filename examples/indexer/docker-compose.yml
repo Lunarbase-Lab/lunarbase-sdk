@@ -1,0 +1,43 @@
+services:
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    restart: unless-stopped
+    volumes:
+      - lunarbase-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 1s
+      retries: 20
+
+  indexer:
+    build:
+      context: ../..
+      args:
+        NETWORK_FEATURES: base
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: ["--config", "/etc/lunarbase/indexer.toml"]
+    volumes:
+      - ./config/production.base.toml:/etc/lunarbase/indexer.toml:ro
+    environment:
+      RUST_LOG: lunarbase_indexer=info
+      LUNARBASE_CORE: "${LUNARBASE_CORE:?set LUNARBASE_CORE}"
+      LUNARBASE_ROUTER: "${LUNARBASE_ROUTER:?set LUNARBASE_ROUTER}"
+      LUNARBASE_DEPLOYMENT_BLOCK: "${LUNARBASE_DEPLOYMENT_BLOCK:?set LUNARBASE_DEPLOYMENT_BLOCK}"
+      LUNARBASE_EXPECTED_IMPLEMENTATION: "${LUNARBASE_EXPECTED_IMPLEMENTATION:?set LUNARBASE_EXPECTED_IMPLEMENTATION}"
+      LUNARBASE_EXPECTED_IMPLEMENTATION_CODE_HASH: "${LUNARBASE_EXPECTED_IMPLEMENTATION_CODE_HASH:?set LUNARBASE_EXPECTED_IMPLEMENTATION_CODE_HASH}"
+      LUNARBASE_EXPECT_WHITELISTED: "${LUNARBASE_EXPECT_WHITELISTED:-true}"
+      LUNARBASE_HTTP_RPC_URL: "${LUNARBASE_HTTP_RPC_URL:-http://host.docker.internal:8545}"
+      LUNARBASE_REALTIME_URL: "${LUNARBASE_REALTIME_URL:-ws://host.docker.internal:8546}"
+    ports:
+      - "8080:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    stop_grace_period: 25s
+
+volumes:
+  lunarbase-redis:

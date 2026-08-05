@@ -1,0 +1,46 @@
+{
+  "name": "@lunarbase-lab/pmm-v2-source-arbitrum",
+  "version": "0.3.0",
+  "description": "Arbitrum Nitro data source for LunarBase",
+  "keywords": [
+    "lunarbase",
+    "arbitrum",
+    "nitro",
+    "evm",
+    "rpc"
+  ],
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Lunarbase-Lab/lunarbase-sdk.git",
+    "directory": "packages/source-arbitrum"
+  },
+  "type": "module",
+  "files": [
+    "dist",
+    "!dist/**/*.test.*"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@lunarbase-lab/pmm-v2-client": "workspace:*",
+    "@lunarbase-lab/pmm-v2-source-evm": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "prepack": "node --input-type=module --eval \"import { access } from 'node:fs/promises'; await Promise.all(['dist/index.js', 'dist/index.d.ts'].map((file) => access(file)))\""
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "sideEffects": false
+}

@@ -1,0 +1,22 @@
+{
+  "name": "@lunarbase-lab/sdk-workspace",
+  "private": true,
+  "version": "0.3.0",
+  "repository": "git+https://github.com/Lunarbase-Lab/lunarbase-sdk.git",
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "build": "node scripts/clean-dist.mjs packages/math/dist packages/client/dist packages/source-evm/dist packages/source-monad/dist packages/source-arbitrum/dist examples/typescript/quote-logger/dist examples/typescript/activity-actor/dist examples/typescript/quote-oracle/dist && tsc -p packages/math/tsconfig.json && tsc -p packages/client/tsconfig.json && tsc -p packages/source-evm/tsconfig.json && tsc -p packages/source-monad/tsconfig.json && tsc -p packages/source-arbitrum/tsconfig.json && tsc -p examples/typescript/quote-logger/tsconfig.json && tsc -p examples/typescript/activity-actor/tsconfig.json && tsc -p examples/typescript/quote-oracle/tsconfig.json",
+    "test": "pnpm build && pnpm test:compiled",
+    "test:compiled": "node --test packages/math/dist/*.test.js packages/client/dist/*.test.js packages/client/dist/**/*.test.js packages/source-evm/dist/*.test.js packages/source-monad/dist/*.test.js packages/source-arbitrum/dist/*.test.js examples/typescript/quote-logger/dist/*.test.js examples/typescript/activity-actor/dist/*.test.js",
+    "format": "prettier --write \"**/*.{ts,mts,cts,js,mjs,cjs,json,yml,yaml,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,mts,cts,js,mjs,cjs,json,yml,yaml,md}\"",
+    "lint": "eslint packages examples/typescript scripts --max-warnings=0"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "eslint": "10.7.0",
+    "prettier": "3.9.5",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.64.0"
+  }
+}

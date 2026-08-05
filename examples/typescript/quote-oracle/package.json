@@ -1,0 +1,22 @@
+{
+  "name": "@lunarbase-lab/example-quote-oracle",
+  "private": true,
+  "version": "0.3.0",
+  "description": "Cross-language quote parity test adapter",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@lunarbase-lab/pmm-v2-math": "workspace:*",
+    "ox": "0.14.30"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.1",
+    "typescript": "6.0.3"
+  },
+  "scripts": {
+    "build": "node ../../../scripts/clean-dist.mjs dist && tsc -p tsconfig.json"
+  }
+}

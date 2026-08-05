@@ -1,0 +1,17 @@
+# BSC Testnet example. Replace all deployment placeholders before use.
+network = "evm"
+chain_id = 97
+core = "0x0000000000000000000000000000000000000001"
+router = "0x000000000000000000000000000000000000dEaD"
+expect_whitelisted = false
+deployment_block = 0
+expected_implementation = "0x0000000000000000000000000000000000000005"
+expected_implementation_code_hash = "0x1111111111111111111111111111111111111111111111111111111111111111"
+contract_compatibility_version = "lunarbase-pmm-v2"
+http_rpc_url = "https://bsc-testnet-rpc.publicnode.com"
+realtime_url = "wss://bsc-testnet-rpc.publicnode.com"
+explicit_lane_assets = [
+  "0x0000000000000000000000000000000000000004",
+  "0x0000000000000000000000000000000000000003",
+]
+bind = "127.0.0.1:8097"

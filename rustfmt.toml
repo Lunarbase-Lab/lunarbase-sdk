@@ -1,0 +1,5 @@
+# Repository-wide rustfmt policy.
+edition = "2024"
+max_width = 100
+newline_style = "Unix"
+use_small_heuristics = "Default"

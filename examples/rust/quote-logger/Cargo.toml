@@ -1,0 +1,23 @@
+[package]
+name = "lunarbase-quote-logger"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+description = "Runnable realtime quote logger built on the LunarBase Rust client"
+
+[lints]
+workspace = true
+
+[dependencies]
+clap.workspace = true
+dotenvy.workspace = true
+lunarbase-source-evm.workspace = true
+lunarbase-client.workspace = true
+lunarbase-math.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true

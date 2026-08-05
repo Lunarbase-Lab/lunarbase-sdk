@@ -1,0 +1,28 @@
+[package]
+name = "lunarbase-source-monad-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Native Monad event-ring adapter for the LunarBase indexer"
+publish = false
+
+[features]
+default = []
+native-event-ring = ["dep:monad-event-ring", "dep:monad-exec-events"]
+
+[lints]
+workspace = true
+
+[dependencies]
+async-stream.workspace = true
+lunarbase-client.workspace = true
+lunarbase-math.workspace = true
+lunarbase-source-evm.workspace = true
+lunarbase-source-monad.workspace = true
+tokio.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+monad-event-ring = { version = "=0.1.0", git = "https://github.com/category-labs/monad-bft", tag = "release/exec-events-sdk-v1.0", optional = true }
+monad-exec-events = { version = "=0.1.0", git = "https://github.com/category-labs/monad-bft", tag = "release/exec-events-sdk-v1.0", optional = true }

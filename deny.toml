@@ -1,0 +1,45 @@
+[advisories]
+# Unmaintained advisories are denied for direct workspace dependencies.
+unmaintained = "workspace"
+
+[licenses]
+confidence-threshold = 0.8
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+exceptions = [
+    { allow = ["GPL-3.0-or-later"], crate = "monad-event-ring@0.1.0" },
+    { allow = ["GPL-3.0-or-later"], crate = "monad-exec-events@0.1.0" },
+]
+
+[[licenses.clarify]]
+name = "monad-event-ring"
+version = "=0.1.0"
+expression = "GPL-3.0-or-later"
+license-files = [{ path = "../LICENSE", hash = 0xc5a651aa }]
+
+[[licenses.clarify]]
+name = "monad-exec-events"
+version = "=0.1.0"
+expression = "GPL-3.0-or-later"
+license-files = [{ path = "../LICENSE", hash = 0xc5a651aa }]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = ["https://github.com/category-labs/monad-bft"]

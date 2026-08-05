@@ -1,0 +1,62 @@
+# Example external Prometheus/Alertmanager rules for lunarbase-indexer.
+groups:
+  - name: lunarbase-indexer
+    rules:
+      - alert: LunarBaseIndexerNotReady
+        expr: lunarbase_ready == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: LunarBase indexer is not serving quotes
+          description: Readiness has remained false for two minutes.
+
+      - alert: LunarBaseIndexerRecoveryLoop
+        expr: increase(lunarbase_recovery_failures_total[10m]) > 3
+        labels:
+          severity: critical
+        annotations:
+          summary: LunarBase canonical recovery repeatedly fails
+          description: More than three recovery attempts failed in ten minutes.
+
+      - alert: LunarBaseIndexerSourceGaps
+        expr: increase(lunarbase_gaps_total[10m]) > 5
+        labels:
+          severity: warning
+        annotations:
+          summary: LunarBase realtime source is unstable
+          description: More than five source gaps were observed in ten minutes.
+
+      - alert: LunarBaseIndexerSourceStalled
+        expr: lunarbase_ready == 1 and lunarbase_source_update_age_seconds > 30
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: LunarBase realtime source is not advancing
+          description: A ready replica has received no realtime update for more than 30 seconds.
+
+      - alert: LunarBaseIndexerQueueSaturation
+        expr: lunarbase_queue_depth / lunarbase_queue_capacity > 0.8
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: LunarBase update queue is close to capacity
+          description: Queue utilization has exceeded 80 percent for one minute.
+
+      - alert: LunarBaseIndexerQuoteErrors
+        expr: increase(lunarbase_quote_errors_total[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: LunarBase quote requests are failing
+          description: At least one quote request failed in the last five minutes.
+
+      - alert: LunarBaseIndexerCheckpointFailures
+        expr: increase(lunarbase_checkpoint_failure_total[30m]) > 3
+        labels:
+          severity: warning
+        annotations:
+          summary: LunarBase Redis checkpoint acceleration is unavailable
+          description: Checkpoint failures do not affect live quotes but slow restarts.

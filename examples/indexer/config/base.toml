@@ -1,0 +1,21 @@
+# Example Base profile; replace every deployment-specific value.
+network = "base"
+chain_id = 8453
+core = "0x0000000000000000000000000000000000000001"
+router = "0x0000000000000000000000000000000000000002"
+expect_whitelisted = true
+deployment_block = 0
+expected_implementation = "0x0000000000000000000000000000000000000000"
+expected_implementation_code_hash = "0x0000000000000000000000000000000000000000000000000000000000000000"
+contract_compatibility_version = "lunarbase-pmm-v2"
+http_rpc_url = "http://127.0.0.1:8545"
+realtime_url = "ws://127.0.0.1:8546"
+explicit_lane_assets = []
+bind = "127.0.0.1:8080"
+queue_bound = 4096
+reconnect_delay_milliseconds = 1000
+source_stall_timeout_milliseconds = 30000
+# Omit `redis_url` to disable restart acceleration.
+redis_url = "redis://127.0.0.1/"
+checkpoint_interval_seconds = 30
+shutdown_timeout_seconds = 15
