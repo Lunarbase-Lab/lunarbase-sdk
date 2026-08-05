@@ -1,16 +1,20 @@
 //! Provider-independent runtime model shared by every network source.
 
+use lunarbase_math::arithmetic::BPS;
+use lunarbase_math::slot0::{
+    lane_slot0_ask_fee_bps, lane_slot0_bid_fee_bps, lane_slot0_slippage_k_bps,
+};
 use lunarbase_math::state::QuoteState;
 use lunarbase_math::types::{Address, B256, Bytes, U256};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use thiserror::Error;
 
 /// Current durable checkpoint schema.
-pub const SCHEMA_VERSION: u16 = 4;
+pub const SCHEMA_VERSION: u16 = 5;
 
-/// Pinned Solidity implementation used by both pure math packages.
-pub const MATH_COMPATIBILITY_VERSION: &str =
-    "lunarbase-contracts@4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d:math-v4";
+/// Quote-math compatibility profile implemented by both SDKs.
+pub const MATH_COMPATIBILITY_VERSION: &str = "lunarbase-pmm-v2";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 /// Supported chain families.
@@ -137,6 +141,9 @@ impl ChainCursor {
 pub struct ContractLog {
     /// Contract that emitted the log.
     pub address: Address,
+    /// Canonical transaction identity when the source transport provides it.
+    #[serde(default)]
+    pub transaction_hash: Option<B256>,
     /// Indexed ABI topics, with the event signature at index zero.
     pub topics: Vec<B256>,
     /// Unindexed ABI-encoded event payload.
@@ -243,7 +250,7 @@ pub struct DeploymentConfig {
     pub expected_implementation: Address,
     /// Pinned runtime bytecode hash of `expected_implementation`.
     pub expected_implementation_code_hash: B256,
-    /// Human-readable contracts revision expected by the client package.
+    /// Quote-math compatibility profile expected by the client.
     pub contract_compatibility_version: String,
     /// Optional fixed lane assets that avoid discovery scans during bootstrap.
     pub explicit_lane_assets: Vec<Address>,
@@ -305,10 +312,18 @@ pub struct Checkpoint {
     pub expected_implementation_code_hash: B256,
     /// EIP-155 chain identifier that owns the checkpoint.
     pub chain_id: u64,
+    /// Network source family used to create the checkpoint.
+    pub network: Network,
     /// Core contract whose state is serialized.
     pub core: Address,
     /// Configured router whose fee profile is embedded in the state.
     pub router: Address,
+    /// First deployment block used for lane discovery and recovery.
+    pub deployment_block: u64,
+    /// Router whitelist policy used when the state was bootstrapped.
+    pub expect_whitelisted: bool,
+    /// Fixed lane policy used when the state was bootstrapped.
+    pub explicit_lane_assets: Vec<Address>,
     /// Last fully applied and verified source position.
     pub cursor: ChainCursor,
     /// Complete in-memory quote state at `cursor`.
@@ -321,13 +336,70 @@ impl Checkpoint {
     pub fn is_compatible(&self, deployment: &DeploymentConfig) -> bool {
         self.schema_version == SCHEMA_VERSION
             && self.math_compatibility_version == MATH_COMPATIBILITY_VERSION
+            && self.math_compatibility_version == deployment.contract_compatibility_version
             && self.expected_implementation == deployment.expected_implementation
             && self.expected_implementation_code_hash
                 == deployment.expected_implementation_code_hash
             && self.chain_id == deployment.chain_id
+            && self.network == deployment.network
             && self.core == deployment.core
             && self.router == deployment.router
+            && self.deployment_block == deployment.deployment_block
+            && self.expect_whitelisted == deployment.expect_whitelisted
+            && same_address_set(&self.explicit_lane_assets, &deployment.explicit_lane_assets)
+            && self.has_valid_structure()
     }
+
+    /// Validates restart-state structure before it reaches the quote reducer.
+    pub fn has_valid_structure(&self) -> bool {
+        let event_coordinates_are_paired =
+            self.cursor.transaction_index.is_some() == self.cursor.log_index.is_some();
+        let transport_coordinates_are_paired =
+            self.cursor.source_sub_index.is_none() || self.cursor.source_sequence.is_some();
+        let unique_explicit_lanes = self
+            .explicit_lane_assets
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        let lanes_are_valid = self.state.lanes.iter().all(|(asset, lane)| {
+            *asset != Address::ZERO
+                && *asset != self.state.cash
+                && lane.exists()
+                && lane_slot0_ask_fee_bps(lane.slot0) <= BPS
+                && lane_slot0_bid_fee_bps(lane.slot0) <= BPS
+                && U256::from(lane_slot0_slippage_k_bps(lane.slot0)) <= BPS
+        });
+        let partner_fees_are_valid = self
+            .state
+            .fee_profile
+            .partner_fee_bps
+            .iter()
+            .all(|(asset, fee)| *asset != Address::ZERO && U256::from(*fee) <= BPS);
+
+        self.chain_id != 0
+            && self.cursor.chain_id == self.chain_id
+            && self.cursor.block_number >= self.deployment_block
+            && self
+                .cursor
+                .block_hash
+                .is_some_and(|hash| hash != B256::ZERO)
+            && event_coordinates_are_paired
+            && transport_coordinates_are_paired
+            && self.expected_implementation != Address::ZERO
+            && self.expected_implementation_code_hash != B256::ZERO
+            && self.core != Address::ZERO
+            && self.router != Address::ZERO
+            && self.state.cash != Address::ZERO
+            && self.state.fee_profile.whitelisted == self.expect_whitelisted
+            && unique_explicit_lanes.len() == self.explicit_lane_assets.len()
+            && !unique_explicit_lanes.contains(&Address::ZERO)
+            && lanes_are_valid
+            && partner_fees_are_valid
+    }
+}
+
+fn same_address_set(left: &[Address], right: &[Address]) -> bool {
+    left.len() == right.len() && left.iter().all(|asset| right.contains(asset))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

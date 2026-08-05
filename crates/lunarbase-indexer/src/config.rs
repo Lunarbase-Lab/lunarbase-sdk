@@ -5,7 +5,6 @@ use lunarbase_client::indexer::client_types::ClientConnectConfig;
 use lunarbase_client::model::{
     ContractFilter, DeploymentConfig, MATH_COMPATIBILITY_VERSION, Network,
 };
-use lunarbase_client::protocol::abi::quote_critical_topics;
 use lunarbase_math::types::{Address, B256};
 use serde::Deserialize;
 use std::{net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
@@ -51,7 +50,7 @@ pub struct ConfigValues {
     /// Exact non-zero runtime bytecode hash of the implementation.
     #[arg(long, env = "LUNARBASE_EXPECTED_IMPLEMENTATION_CODE_HASH")]
     pub expected_implementation_code_hash: Option<String>,
-    /// Contracts revision expected by the runtime and checkpoint schema.
+    /// Quote-math compatibility profile expected by the runtime.
     #[arg(long, env = "LUNARBASE_CONTRACT_COMPATIBILITY_VERSION")]
     pub contract_compatibility_version: Option<String>,
     /// HTTP JSON-RPC endpoint used only for bootstrap and recovery.
@@ -269,7 +268,7 @@ impl ConfigValues {
         let client = ClientConnectConfig {
             filter: ContractFilter {
                 address: core,
-                topics: quote_critical_topics().to_vec(),
+                topics: Vec::new(),
             },
             deployment,
             buffer_capacity: queue_bound,
@@ -369,6 +368,10 @@ mod tests {
         assert_eq!(config.client.deployment.chain_id, 8453);
         assert_eq!(config.client.buffer_capacity, 4096);
         assert!(config.client.deployment.expect_whitelisted);
+        assert!(
+            config.client.filter.topics.is_empty(),
+            "the runnable indexer must receive every Core event"
+        );
     }
 
     #[test]

@@ -96,30 +96,23 @@ impl RpcSnapshotProvider {
         let assets = self
             .resolve_lane_assets(config, cursor.block_number)
             .await?;
-        let cash = self
-            .read(config.core, core::cashCall {}, block_hash)
-            .await?;
-        let whitelist = self
-            .read(
+        let (cash, whitelist, blacklist_fee_multiplier) = tokio::try_join!(
+            self.read(config.core, core::cashCall {}, block_hash),
+            self.read(
                 config.core,
                 core::whitelistCall {
                     account: config.router,
                 },
                 block_hash,
-            )
-            .await?;
+            ),
+            self.read(config.core, core::blacklistFeeMultiplierCall {}, block_hash,),
+        )?;
         if whitelist != config.expect_whitelisted {
             return Err(SourceError::Unavailable(format!(
                 "configured router whitelist status mismatch: expected {}, got {}",
                 config.expect_whitelisted, whitelist
             )));
         }
-        let blacklist_fee_multiplier = if whitelist {
-            U256::from(1)
-        } else {
-            self.read(config.core, core::blacklistFeeMultiplierCall {}, block_hash)
-                .await?
-        };
         let mut state = QuoteState {
             cash,
             ..Default::default()

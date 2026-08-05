@@ -1,13 +1,13 @@
 //! Minimal read-only Alloy HTTP client without transaction fillers.
 
-use crate::rpc::codec::{parse_rpc_head, parse_rpc_log};
+use crate::rpc::codec::{parse_rpc_head, parse_rpc_log, validate_canonical_hex_u64};
 use alloy_primitives::{Bytes, U64, keccak256};
 use alloy_rpc_client::RpcClient;
 use lunarbase_client::model::{BackfillRequest, ChainCursor, Commitment, ContractLog, SourceError};
 use lunarbase_math::types::Address;
 use lunarbase_math::types::B256;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{collections::VecDeque, str::FromStr, sync::Arc};
 use thiserror::Error;
 
@@ -36,6 +36,8 @@ impl From<RpcError> for SourceError {
 pub struct RpcHttpClient {
     /// Original validated endpoint retained for diagnostics and configuration views.
     endpoint: Arc<str>,
+    /// Bounded HTTP client retained for strict JSON-RPC envelope validation.
+    http: reqwest::Client,
     /// Low-level Alloy RPC client without consensus, signing, or transaction fillers.
     client: RpcClient,
 }
@@ -58,9 +60,10 @@ impl RpcHttpClient {
             .timeout(RPC_TIMEOUT)
             .build()
             .map_err(|error| RpcError::Invalid(format!("build HTTP RPC client: {error}")))?;
-        let client = RpcClient::new_http_with_client(http, url);
+        let client = RpcClient::new_http_with_client(http.clone(), url);
         Ok(Self {
             endpoint: Arc::from(endpoint),
+            http,
             client,
         })
     }
@@ -175,32 +178,74 @@ impl RpcHttpClient {
         chain_id: u64,
         commitment: Commitment,
     ) -> Result<ChainCursor, RpcError> {
+        self.block_cursor_inner(block_tag, chain_id, commitment, false)
+            .await
+    }
+
+    /// Resolves a block cursor only from an exact response with explicit execution context.
+    pub async fn block_cursor_with_execution_context(
+        &self,
+        block_tag: &str,
+        chain_id: u64,
+        commitment: Commitment,
+    ) -> Result<ChainCursor, RpcError> {
+        let tag = validate_block_tag(block_tag)?;
+        let request_id = format!("execution-context:{tag}");
+        let response = self
+            .http
+            .post(self.endpoint())
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": &request_id,
+                "method": "eth_getBlockByNumber",
+                "params": [tag, false],
+            }))
+            .send()
+            .await
+            .map_err(|error| RpcError::Transport(error.to_string()))?
+            .error_for_status()
+            .map_err(|error| RpcError::Transport(error.to_string()))?
+            .json::<Value>()
+            .await
+            .map_err(|error| RpcError::Invalid(format!("invalid JSON-RPC response: {error}")))?;
+        if response.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+            return Err(RpcError::Invalid(
+                "JSON-RPC response version is not 2.0".into(),
+            ));
+        }
+        if response.get("id").and_then(Value::as_str) != Some(request_id.as_str()) {
+            return Err(RpcError::Invalid("JSON-RPC response id mismatch".into()));
+        }
+        if let Some(error) = response.get("error").filter(|error| !error.is_null()) {
+            return Err(RpcError::Transport(format!(
+                "JSON-RPC returned an error: {error}"
+            )));
+        }
+        let result = response
+            .get("result")
+            .ok_or_else(|| RpcError::Invalid("JSON-RPC response has no result".into()))?;
+        validate_canonical_hex_u64(result.get("number"), "block.number")?;
+        validate_canonical_hex_u64(result.get("l1BlockNumber"), "block.l1BlockNumber")?;
+        normalize_block_cursor(result, chain_id, commitment, true)
+    }
+
+    async fn block_cursor_inner(
+        &self,
+        block_tag: &str,
+        chain_id: u64,
+        commitment: Commitment,
+        require_execution_context: bool,
+    ) -> Result<ChainCursor, RpcError> {
         let tag = validate_block_tag(block_tag)?;
         let value: Value = self
             .client
             .request("eth_getBlockByNumber", (tag, false))
             .await
             .map_err(|error| RpcError::Transport(error.to_string()))?;
-        let head = parse_rpc_head(&value)?;
-        Ok(ChainCursor {
-            chain_id,
-            block_number: head.number,
-            execution_block_number: head.l1_block_number.unwrap_or(head.number),
-            block_hash: head.hash,
-            transaction_index: None,
-            log_index: None,
-            source_sequence: None,
-            source_sub_index: None,
-            commitment,
-        })
+        normalize_block_cursor(&value, chain_id, commitment, require_execution_context)
     }
 
-    /// Fetches canonical logs with topic0 OR semantics.
-    ///
-    /// Large ranges are split into bounded requests. Providers that still
-    /// reject a dense chunk with a range/result-limit error are retried by
-    /// deterministic bisection rather than forcing callers to know provider
-    /// limits.
+    /// Fetches canonical logs with topic0 OR semantics and bounded range splitting.
     pub async fn get_logs(
         &self,
         request: &BackfillRequest,
@@ -242,12 +287,42 @@ impl RpcHttpClient {
     }
 
     #[cfg(test)]
-    pub(super) fn from_client(client: RpcClient) -> Self {
+    pub(crate) fn from_client(client: RpcClient) -> Self {
         Self {
             endpoint: Arc::from("mock://alloy"),
+            http: reqwest::Client::new(),
             client,
         }
     }
+}
+
+fn normalize_block_cursor(
+    value: &Value,
+    chain_id: u64,
+    commitment: Commitment,
+    require_execution_context: bool,
+) -> Result<ChainCursor, RpcError> {
+    let head = parse_rpc_head(value)?;
+    let execution_block_number = match head.l1_block_number {
+        Some(block_number) => block_number,
+        None if require_execution_context => {
+            return Err(RpcError::Invalid(
+                "eth_getBlockByNumber result has no l1BlockNumber".into(),
+            ));
+        }
+        None => head.number,
+    };
+    Ok(ChainCursor {
+        chain_id,
+        block_number: head.number,
+        execution_block_number,
+        block_hash: head.hash,
+        transaction_index: None,
+        log_index: None,
+        source_sequence: None,
+        source_sub_index: None,
+        commitment,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]

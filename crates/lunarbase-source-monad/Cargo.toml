@@ -1,15 +1,16 @@
 [package]
-name = "lunarbase-source-monad"
+name = "lunarbase-pmm-v2-source-monad"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-description = "Experimental Monad execution-events data source for LunarBase"
+description = "Monad execution-event data source for LunarBase"
+keywords = ["lunarbase", "monad", "evm", "rpc", "websocket"]
+categories = ["api-bindings", "asynchronous", "network-programming"]
 
-[features]
-default = []
-native-event-ring = ["dep:monad-event-ring", "dep:monad-exec-events"]
+[lib]
+name = "lunarbase_source_monad"
 
 [lints]
 workspace = true
@@ -25,7 +26,3 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 url.workspace = true
-
-[target.'cfg(target_os = "linux")'.dependencies]
-monad-event-ring = { git = "https://github.com/category-labs/monad-bft", tag = "release/exec-events-sdk-v1.0", optional = true }
-monad-exec-events = { git = "https://github.com/category-labs/monad-bft", tag = "release/exec-events-sdk-v1.0", optional = true }

@@ -9,18 +9,23 @@ import {
 } from "./actor.js";
 import { readConfig, type ActorConfig } from "./config.js";
 import { errorMessage, log } from "./logger.js";
+import { pairingPhaseAfterHistoryReset, pairingPhaseFromPlan, replayPairingHistory } from "./pairing-recovery.js";
+import { createPairingStateStore, type PairingCheckpoint } from "./pairing-state.js";
 import { acquireProcessLock } from "./process-lock.js";
 import {
   directedPairs,
-  findSafeReturnAmount,
+  findSafeReturnAmountWithExactOut,
   isWithinReserveCap,
   minimumOutput,
+  PPM,
   randomBigIntInclusive,
   randomDelayMilliseconds,
   PairedSwapPlan,
   SessionReserveBudget,
   shuffled,
 } from "./strategy.js";
+
+const UINT256_MAX = (1n << 256n) - 1n;
 
 interface Options {
   readonly inspect: boolean;
@@ -137,33 +142,105 @@ function observeReserves(snapshot: PoolSnapshot, budget: SessionReserveBudget<Ad
   for (const token of snapshot.tokens) budget.observe(token.address, token.assetReserve);
 }
 
+function maximumAllowedOutput(
+  config: ActorConfig,
+  budget: SessionReserveBudget<Address>,
+  token: TokenSnapshot,
+): bigint {
+  const reserveLimit = (token.assetReserve * BigInt(config.maximumOutputReservePpm)) / PPM;
+  const status = budget.status(token.address);
+  const budgetRemaining = status.limit > status.spent ? status.limit - status.spent : 0n;
+  const hardLimit = reserveLimit < budgetRemaining ? reserveLimit : budgetRemaining;
+  return (hardLimit * (PPM - BigInt(config.slippagePpm))) / PPM;
+}
+
+function sessionAllowanceTarget(
+  config: ActorConfig,
+  budget: SessionReserveBudget<Address>,
+  token: TokenSnapshot,
+): bigint {
+  const maximumInput = parseUnits(config.maximumSwapAmount, token.decimals);
+  if (maximumInput <= 0n || maximumInput > UINT256_MAX)
+    throw new RangeError("MAX_SWAP_AMOUNT must be a positive uint256 at token precision");
+  const tranche = maximumInput * BigInt(config.allowanceBatchSwaps);
+  const returnBudget = budget.status(token.address).limit;
+  if (tranche > UINT256_MAX || returnBudget > UINT256_MAX - tranche)
+    throw new RangeError("configured allowance tranche exceeds uint256");
+  return tranche + returnBudget;
+}
+
+function worstCaseNextInput(config: ActorConfig, budget: SessionReserveBudget<Address>, token: TokenSnapshot): bigint {
+  const maximumOpeningInput = parseUnits(config.maximumSwapAmount, token.decimals);
+  if (maximumOpeningInput <= 0n || maximumOpeningInput > UINT256_MAX)
+    throw new RangeError("MAX_SWAP_AMOUNT must be a positive uint256 at token precision");
+  const maximumReturnInput = budget.status(token.address).limit;
+  return maximumOpeningInput > maximumReturnInput ? maximumOpeningInput : maximumReturnInput;
+}
+
+function inputHasReadyRoute(snapshot: PoolSnapshot, input: TokenSnapshot, cash: Address): boolean {
+  return snapshot.tokens.some(
+    (output) => output.address !== input.address && routeReady(snapshot, input, output, cash),
+  );
+}
+
+function refreshAllowanceTargets(
+  config: ActorConfig,
+  snapshot: PoolSnapshot,
+  budget: SessionReserveBudget<Address>,
+  targets: Map<Address, bigint>,
+): void {
+  for (const token of snapshot.tokens) targets.set(token.address, sessionAllowanceTarget(config, budget, token));
+}
+
+async function primeSessionAllowances(
+  config: ActorConfig,
+  actor: ActivityActor,
+  snapshot: PoolSnapshot,
+  budget: SessionReserveBudget<Address>,
+  targets: ReadonlyMap<Address, bigint>,
+): Promise<void> {
+  for (const token of snapshot.tokens) {
+    const target = targets.get(token.address);
+    const required = worstCaseNextInput(config, budget, token);
+    if (target === undefined || token.allowance >= required || !inputHasReadyRoute(snapshot, token, config.cash))
+      continue;
+    const transaction = await actor.approve(token.address, target);
+    log("info", "session_approval_confirmed", {
+      token: token.id,
+      tokenAddress: token.address,
+      spender: config.core,
+      amount: formatUnits(target, token.decimals),
+      allowanceBatchSwaps: config.allowanceBatchSwaps,
+      hash: transaction.hash,
+      blockNumber: transaction.blockNumber,
+      gasUsed: transaction.gasUsed,
+    });
+  }
+}
+
 async function restorePairingPlan(
   config: ActorConfig,
   actor: ActivityActor,
-): Promise<{ plan: PairedSwapPlan<Address> | undefined; eventCount: number }> {
+  checkpoint: PairingCheckpoint | undefined,
+): Promise<{
+  plan: PairedSwapPlan<Address> | undefined;
+  eventCount: number;
+  checkpoint: PairingCheckpoint;
+  reset: boolean;
+  requestedFromBlock: bigint;
+}> {
   const supported = new Set<Address>([config.cash, config.asset1, config.asset2]);
-  const history = await actor.swapHistory(config.pairingStartBlock);
-  let plan: PairedSwapPlan<Address> | undefined;
-
-  for (const event of history) {
-    if (!supported.has(event.assetIn) || !supported.has(event.assetOut) || event.assetIn === event.assetOut)
-      throw new Error("pairing history contains an unsupported or self-directed swap");
-    if (event.amountIn <= 0n || event.amountOut <= 0n)
-      throw new Error("pairing history contains a non-positive swap amount");
-
-    if (plan === undefined) {
-      plan = new PairedSwapPlan({ assetIn: event.assetIn, assetOut: event.assetOut });
-      plan.recordConfirmed(event.assetIn, event.assetOut, event.amountOut);
-      continue;
-    }
-
-    const pending = plan.pendingReturn;
-    if (pending === undefined || event.amountIn > pending.maximumAmountIn)
-      throw new Error("pairing history return exceeds its opening-leg output");
-    plan.recordConfirmed(event.assetIn, event.assetOut, event.amountOut);
-    plan = undefined;
-  }
-  return { plan, eventCount: history.length };
+  const requestedFromBlock = checkpoint === undefined ? config.pairingStartBlock : checkpoint.cursor.blockNumber + 1n;
+  const history = await actor.swapHistory(requestedFromBlock, checkpoint?.cursor);
+  const initialPhase = history.reset ? pairingPhaseAfterHistoryReset() : (checkpoint?.phase ?? { kind: "opening" });
+  const plan = replayPairingHistory(initialPhase, history.events, supported);
+  return {
+    plan,
+    eventCount: history.events.length,
+    checkpoint: { cursor: history.cursor, phase: pairingPhaseFromPlan(plan) },
+    reset: history.reset,
+    requestedFromBlock: history.requestedFromBlock,
+  };
 }
 
 function completeCycleSwapLimit(maximumSwaps: number, startsWithReturn: boolean): number {
@@ -224,12 +301,30 @@ async function main(): Promise<void> {
     logSnapshot(snapshot, actor.account.address);
     if (options.inspect) return;
 
-    const recoveredPairing = await restorePairingPlan(config, actor);
+    const pairingState = createPairingStateStore({
+      chainId: config.chainId,
+      pool: config.core,
+      actor: actor.account.address,
+    });
+    const previousCheckpoint = await pairingState.load();
+    const recoveredPairing = await restorePairingPlan(config, actor, previousCheckpoint);
+    if (recoveredPairing.reset)
+      log("warn", "pairing_history_reset", {
+        requestedFromBlock: recoveredPairing.requestedFromBlock,
+        resetAtBlock: recoveredPairing.checkpoint.cursor.blockNumber,
+        maximumReplayBlocks: config.pairingMaximumReplayBlocks,
+        discardedPendingReturn: previousCheckpoint?.phase.kind === "return",
+        reason: "replay range exceeds configured maximum; old history was not queried",
+      });
+    if (live) await pairingState.save(recoveredPairing.checkpoint);
     let pairingPlan = recoveredPairing.plan;
     const runSwapLimit = completeCycleSwapLimit(config.maximumSwaps, pairingPlan !== undefined);
     const recoveredReturn = pairingPlan?.pendingReturn;
     log("info", "pairing_state_recovered", {
-      pairingStartBlock: config.pairingStartBlock,
+      pairingStartBlock: recoveredPairing.requestedFromBlock,
+      checkpointBlock: recoveredPairing.checkpoint.cursor.blockNumber,
+      checkpointPath: live ? pairingState.path : undefined,
+      reset: recoveredPairing.reset,
       eventCount: recoveredPairing.eventCount,
       phase: recoveredReturn === undefined ? "opening" : "return",
       requiredAssetIn: recoveredReturn?.assetIn,
@@ -240,6 +335,9 @@ async function main(): Promise<void> {
 
     const outputBudget = new SessionReserveBudget<Address>(config.maximumSessionOutputReservePpm);
     observeReserves(snapshot, outputBudget);
+    const allowanceTargets = new Map<Address, bigint>();
+    refreshAllowanceTargets(config, snapshot, outputBudget, allowanceTargets);
+    if (live) await primeSessionAllowances(config, actor, snapshot, outputBudget, allowanceTargets);
 
     let successfulSwaps = 0;
     let consecutiveFailures = 0;
@@ -248,6 +346,7 @@ async function main(): Promise<void> {
       try {
         snapshot = await actor.inspect();
         observeReserves(snapshot, outputBudget);
+        refreshAllowanceTargets(config, snapshot, outputBudget, allowanceTargets);
         const candidate = await selectCandidate(config, actor, snapshot, outputBudget, pairingPlan);
         if (candidate === undefined) {
           log("warn", "pool_not_ready", {
@@ -267,7 +366,12 @@ async function main(): Promise<void> {
           });
           controller.abort();
         } else {
-          await prepareInput(config, actor, candidate);
+          await prepareInput(
+            config,
+            actor,
+            candidate,
+            allowanceTargets.get(candidate.input.address) ?? candidate.amountIn,
+          );
           const refreshedSnapshot = await actor.inspect();
           observeReserves(refreshedSnapshot, outputBudget);
           const refreshedInput = refreshedSnapshot.tokens.find((token) => token.address === candidate.input.address);
@@ -385,9 +489,11 @@ async function selectCandidate(
     if (!routeReady(snapshot, input, output, config.cash)) return undefined;
 
     const maximumAmountIn = input.actorBalance < pending.maximumAmountIn ? input.actorBalance : pending.maximumAmountIn;
-    const safe = await findSafeReturnAmount(
+    const safe = await findSafeReturnAmountWithExactOut(
       maximumAmountIn,
+      maximumAllowedOutput(config, outputBudget, output),
       (amountIn) => actor.quoteExactIn(amountIn, input.address, output.address),
+      (amountOut) => actor.quoteExactOut(amountOut, input.address, output.address),
       (quotedOutput) =>
         isWithinReserveCap(quotedOutput, output.assetReserve, config.maximumOutputReservePpm) &&
         outputBudget.allows(output.address, quotedOutput),
@@ -473,8 +579,13 @@ async function assertRouteStillReady(config: ActorConfig, actor: ActivityActor, 
     throw new Error("route quote became unavailable before a preparation transaction");
 }
 
-async function prepareInput(config: ActorConfig, actor: ActivityActor, candidate: Candidate): Promise<void> {
-  let balance = await actor.balance(candidate.input.address);
+async function prepareInput(
+  config: ActorConfig,
+  actor: ActivityActor,
+  candidate: Candidate,
+  allowanceTarget: bigint,
+): Promise<void> {
+  let balance = candidate.input.actorBalance;
   if (balance < candidate.amountIn && candidate.allowMint && candidate.input.mintAmount !== undefined) {
     await assertRouteStillReady(config, actor, candidate);
     const transaction = await actor.mint(candidate.input.address);
@@ -485,18 +596,19 @@ async function prepareInput(config: ActorConfig, actor: ActivityActor, candidate
       blockNumber: transaction.blockNumber,
       gasUsed: transaction.gasUsed,
     });
-    balance = await actor.balance(candidate.input.address);
+    balance += candidate.input.mintAmount;
   }
   if (balance < candidate.amountIn) throw new Error(`insufficient ${candidate.input.symbol} balance`);
 
-  if ((await actor.allowance(candidate.input.address)) < candidate.amountIn) {
+  if (candidate.input.allowance < candidate.amountIn) {
     await assertRouteStillReady(config, actor, candidate);
-    const transaction = await actor.approve(candidate.input.address, candidate.amountIn);
+    const approvalAmount = allowanceTarget < candidate.amountIn ? candidate.amountIn : allowanceTarget;
+    const transaction = await actor.approve(candidate.input.address, approvalAmount);
     log("info", "approval_confirmed", {
       token: candidate.input.id,
       tokenAddress: candidate.input.address,
-      spender: config.pool,
-      amount: formatUnits(candidate.amountIn, candidate.input.decimals),
+      spender: config.core,
+      amount: formatUnits(approvalAmount, candidate.input.decimals),
       hash: transaction.hash,
       blockNumber: transaction.blockNumber,
       gasUsed: transaction.gasUsed,

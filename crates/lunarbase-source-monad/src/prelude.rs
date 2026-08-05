@@ -5,6 +5,3 @@ pub use crate::execution::{
     MonadSequenceTracker,
 };
 pub use crate::parser::{MonadParserConfig, MonadParserSource};
-
-#[cfg(all(feature = "native-event-ring", target_os = "linux"))]
-pub use crate::native::{MonadEventRingConfig, MonadEventRingSource};

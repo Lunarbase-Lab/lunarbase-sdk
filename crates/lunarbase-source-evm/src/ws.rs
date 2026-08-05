@@ -1,10 +1,12 @@
 //! Generic Ethereum JSON-RPC WebSocket source.
 //!
 //! The HTTP endpoint remains the authority for block-tagged snapshots and
-//! canonical backfill.  This module only consumes the low-latency `logs` and
-//! `newHeads` subscriptions and normalizes them into the same source model as
-//! network-specific sources. A closed socket is deliberately terminal:
-//! callers must recover from the HTTP source before claiming freshness again.
+//! canonical backfill. Standard EVM `logs` and `newHeads` subscriptions are
+//! not ordered relative to each other, so a normal EVM profile closes block
+//! `N` only after a later head arrives and a bounded grace period has elapsed.
+//! Provider-specific pending-log profiles may consume subscription logs
+//! immediately. A closed socket is deliberately terminal: callers must
+//! recover from the HTTP source before claiming freshness again.
 
 use crate::rpc::backend::RpcHttpBackend;
 use crate::rpc::client::RpcHttpClient;
@@ -22,13 +24,19 @@ use lunarbase_client::{
     state::ordering::CursorReorderBuffer,
 };
 use serde_json::Value;
-use std::sync::Arc;
+use std::{collections::VecDeque, sync::Arc, time::Instant};
 
 mod connection;
+mod ordering;
 pub(crate) mod protocol;
 
 use connection::{establish, websocket_payload};
-use protocol::{WsHead, head_discontinuity, parse_ws_head};
+use ordering::{
+    drain_completed_block, is_at_or_before_watermark, observe_standard_head,
+    standard_head_deadline, take_ready_standard_head, validate_preceding_startup_logs,
+    with_execution_context,
+};
+use protocol::{WsHead, head_discontinuity, parse_ws_head_with_execution_context, same_head};
 
 /// Bounds transport frames and the number of updates that may wait for a
 /// block-head watermark.  Both bounds are required for predictable memory
@@ -79,6 +87,10 @@ impl WsRpcConfig {
             ));
         }
         Ok(())
+    }
+
+    fn holds_standard_logs_until_successor(&self) -> bool {
+        self.logs_subscription == "logs"
     }
 }
 
@@ -169,6 +181,14 @@ impl ChainDataSource for EvmRpcSource {
         &self,
         deployment: &DeploymentConfig,
     ) -> Result<BootstrapSnapshot, SourceError> {
+        if deployment.network != self.http.network() {
+            return Err(SourceError::NetworkMismatch);
+        }
+        if deployment.chain_id != self.http.chain_id() {
+            return Err(SourceError::Unavailable(
+                "RPC source chain id mismatch".into(),
+            ));
+        }
         RpcSnapshotProvider::new(self.http.rpc().clone(), self.http.snapshot_tag().to_owned())
             .snapshot(deployment)
             .await
@@ -186,6 +206,7 @@ impl ChainDataSource for EvmRpcSource {
             &self.config.logs_subscription,
             self.http.chain_id(),
             self.config.max_frame_bytes,
+            self.config.reorder_capacity,
         )
         .await?;
         let logs_subscription = established.logs_subscription;
@@ -195,6 +216,7 @@ impl ChainDataSource for EvmRpcSource {
         let (mut writer, mut reader) = socket.split();
 
         let chain_id = self.http.chain_id();
+        let http = self.http.clone();
         let config = self.config.clone();
         let stream = stream! {
             let mut reorder = match CursorReorderBuffer::new(config.reorder_capacity) {
@@ -205,13 +227,59 @@ impl ChainDataSource for EvmRpcSource {
                 }
             };
             let mut last_head: Option<WsHead> = None;
+            let mut open_standard_heads = VecDeque::new();
+            let mut first_standard_head_block = None;
+            let mut published_watermark: Option<ChainCursor> = None;
             let mut source_sequence = 0_u64;
 
             loop {
                 let payload = if let Some(payload) = buffered.pop_front() {
                     payload
                 } else {
-                    let Some(message) = reader.next().await else {
+                    let message = if config.holds_standard_logs_until_successor()
+                        && let Some(deadline) = standard_head_deadline(&open_standard_heads)
+                    {
+                        tokio::select! {
+                            biased;
+                            message = reader.next() => message,
+                            () = tokio::time::sleep_until(deadline.into()) => {
+                                let Some(completed_head) =
+                                    take_ready_standard_head(&mut open_standard_heads, Instant::now())
+                                else {
+                                    continue;
+                                };
+                                let mut updates = match drain_completed_block(
+                                    &mut reorder,
+                                    &completed_head,
+                                    first_standard_head_block == Some(completed_head.cursor.block_number),
+                                ) {
+                                    Ok(updates) => updates,
+                                    Err(error) => {
+                                        yield Err(error);
+                                        break;
+                                    }
+                                };
+                                if let Err(error) = validate_preceding_startup_logs(
+                                    &mut updates,
+                                    &completed_head,
+                                    &http,
+                                )
+                                .await
+                                {
+                                    yield Err(error);
+                                    break;
+                                }
+                                for update in updates {
+                                    yield Ok(update);
+                                }
+                                published_watermark = Some(completed_head.cursor);
+                                continue;
+                            }
+                        }
+                    } else {
+                        reader.next().await
+                    };
+                    let Some(message) = message else {
                         yield Ok(ChainUpdate::Gap {
                             cursor: last_head.as_ref().map(|head| head.cursor.clone()),
                             reason: "RPC WebSocket closed; canonical recovery required".into(),
@@ -296,6 +364,22 @@ impl ChainDataSource for EvmRpcSource {
                     };
                     source_sequence = source_sequence.saturating_add(1);
                     log.cursor.source_sequence = Some(source_sequence);
+                    if log.removed {
+                        yield Ok(ChainUpdate::Gap {
+                            cursor: Some(log.cursor),
+                            reason: "RPC retracted a subscription log; canonical recovery required".into(),
+                        });
+                        break;
+                    }
+                    if config.holds_standard_logs_until_successor()
+                        && is_at_or_before_watermark(&log.cursor, published_watermark.as_ref())
+                    {
+                        yield Ok(ChainUpdate::Gap {
+                            cursor: Some(log.cursor),
+                            reason: "RPC delivered a log after its block watermark; canonical recovery required".into(),
+                        });
+                        break;
+                    }
                     if let Some(head) = last_head.as_ref()
                         && head.cursor.block_number == log.cursor.block_number
                     {
@@ -310,7 +394,9 @@ impl ChainDataSource for EvmRpcSource {
                             break;
                         }
                     }
-                    if let Some(head) = last_head.as_ref() {
+                    if !config.holds_standard_logs_until_successor()
+                        && let Some(head) = last_head.as_ref()
+                    {
                         for update in reorder.drain_through(&head.cursor) {
                             yield Ok(with_execution_context(update, &head.cursor));
                         }
@@ -318,15 +404,30 @@ impl ChainDataSource for EvmRpcSource {
                     continue;
                 }
                 if heads_subscription == subscription {
-                    let mut head = match parse_ws_head(result, chain_id) {
+                    let mut head = match parse_ws_head_with_execution_context(
+                        result,
+                        chain_id,
+                        http.network() == Network::Arbitrum,
+                    ) {
                         Ok(head) => head,
                         Err(error) => {
                             yield Err(SourceError::Unavailable(format!("invalid RPC head notification: {error}")));
                             break;
                         }
                     };
+                    if last_head
+                        .as_ref()
+                        .is_some_and(|previous| same_head(previous, &head))
+                    {
+                        continue;
+                    }
                     source_sequence = source_sequence.saturating_add(1);
                     head.cursor.source_sequence = Some(source_sequence);
+                    if config.holds_standard_logs_until_successor()
+                        && first_standard_head_block.is_none()
+                    {
+                        first_standard_head_block = Some(head.cursor.block_number);
+                    }
                     if let Some(previous) = last_head.as_ref() {
                         if head.cursor.block_number
                             > previous.cursor.block_number.saturating_add(1)
@@ -349,15 +450,26 @@ impl ChainDataSource for EvmRpcSource {
                                     break;
                                 }
                             };
+                            open_standard_heads.clear();
+                            first_standard_head_block = Some(head.cursor.block_number);
                         }
                     }
                     last_head = Some(head.clone());
+                    if config.holds_standard_logs_until_successor() {
+                        observe_standard_head(
+                            &mut open_standard_heads,
+                            head.clone(),
+                            Instant::now(),
+                        );
+                    }
                     if let Err(error) = reorder.push(ChainUpdate::Head(head.cursor.clone())) {
                         yield Err(error);
                         break;
                     }
-                    for update in reorder.drain_through(&head.cursor) {
-                        yield Ok(with_execution_context(update, &head.cursor));
+                    if !config.holds_standard_logs_until_successor() {
+                        for update in reorder.drain_through(&head.cursor) {
+                            yield Ok(with_execution_context(update, &head.cursor));
+                        }
                     }
                 }
             }
@@ -372,15 +484,6 @@ impl ChainDataSource for EvmRpcSource {
     async fn validate_checkpoint(&self, checkpoint: &Checkpoint) -> Result<bool, SourceError> {
         self.http.validate_checkpoint(checkpoint).await
     }
-}
-
-fn with_execution_context(mut update: ChainUpdate, head: &ChainCursor) -> ChainUpdate {
-    if let ChainUpdate::Log(log) = &mut update
-        && log.cursor.block_number == head.block_number
-    {
-        log.cursor.execution_block_number = head.execution_block_number;
-    }
-    update
 }
 
 #[cfg(test)]

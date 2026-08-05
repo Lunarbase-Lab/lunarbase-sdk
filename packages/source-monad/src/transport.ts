@@ -11,7 +11,7 @@ import {
   type ContractFilter,
   type ContractLog,
   type DeploymentConfig,
-} from "@lunarbase/client";
+} from "@lunarbase-lab/pmm-v2-client";
 import {
   BoundedFrameQueue,
   defaultWebSocketFactory,
@@ -24,7 +24,7 @@ import {
   type SocketEvent,
   type WebSocketFactory,
   type WebSocketLike,
-} from "@lunarbase/source-evm";
+} from "@lunarbase-lab/pmm-v2-source-evm";
 import * as Hex from "ox/Hex";
 import { MonadExecutionNormalizer, type ExecutionEvent, type ExecutionEventReader } from "./execution.js";
 
@@ -34,14 +34,15 @@ export interface MonadParserConfig {
   readonly maxFrameBytes: number;
   /** Maximum decoded parser messages waiting for consumption. */
   readonly queueCapacity: number;
+  /** Maximum time for opening and acknowledging both subscriptions. */
+  readonly handshakeTimeoutMilliseconds: number;
 }
 
 export const DEFAULT_MONAD_PARSER_CONFIG: MonadParserConfig = Object.freeze({
   maxFrameBytes: 64 * 1024,
   queueCapacity: 4096,
+  handshakeTimeoutMilliseconds: 10_000,
 });
-
-const HANDSHAKE_TIMEOUT_MILLISECONDS = 10_000;
 
 interface EstablishedParserSocket {
   readonly socket: WebSocketLike;
@@ -52,7 +53,7 @@ interface EstablishedParserSocket {
   readonly close: () => void;
 }
 
-/** Complete portable Monad source; TypeScript intentionally has no native ring binding. */
+/** Portable Monad parser source with canonical RPC recovery. */
 export class MonadParserSource implements ChainDataSource, ExecutionEventReader {
   /** Network family exposed through the common data-source interface. */
   readonly network = Network.Monad;
@@ -203,6 +204,10 @@ export class MonadParserSource implements ChainDataSource, ExecutionEventReader 
         if (subscription === logsSubscription && type === "log" && result.kind === "event") {
           const log = parseParserLog(result, this.chainId, commitments);
           if (log.address.toLowerCase() !== filter.address.toLowerCase()) continue;
+          if (log.removed) {
+            yield executionGap("Monad parser retracted a log; canonical recovery required");
+            return;
+          }
           yield {
             kind: "Log",
             log: {
@@ -234,6 +239,7 @@ async function establishParserSocket(
   config: MonadParserConfig,
   signal?: AbortSignal,
 ): Promise<EstablishedParserSocket> {
+  const handshakeDeadline = performance.now() + config.handshakeTimeoutMilliseconds;
   const queue = new BoundedFrameQueue(config.queueCapacity);
   const onOpen = () => queue.open();
   const onMessage = (event: SocketEvent) => {
@@ -264,10 +270,10 @@ async function establishParserSocket(
   };
   try {
     if (socket.readyState === 1) queue.open();
-    await withHandshakeTimeout(queue.waitUntilOpen(signal));
+    await beforeHandshakeDeadline(queue.waitUntilOpen(signal), handshakeDeadline);
     socket.send(subscriptionRequest(1, "logs", sidecarFilter(filter)));
     socket.send(subscriptionRequest(2, "all"));
-    const acknowledgements = await readParserAcknowledgements(queue, signal);
+    const acknowledgements = await readParserAcknowledgements(queue, config.queueCapacity, handshakeDeadline, signal);
     return { socket, queue, close, ...acknowledgements };
   } catch (error) {
     close();
@@ -277,28 +283,67 @@ async function establishParserSocket(
 
 async function readParserAcknowledgements(
   queue: BoundedFrameQueue,
+  prefetchCapacity: number,
+  handshakeDeadline: number,
   signal?: AbortSignal,
 ): Promise<Pick<EstablishedParserSocket, "logsSubscription" | "allSubscription" | "prefetched">> {
-  let logsSubscription: string | undefined;
-  let allSubscription: string | undefined;
-  const prefetched: string[] = [];
-  while (!logsSubscription || !allSubscription) {
-    const frame = await withHandshakeTimeout(queue.next(signal));
+  const state: ParserHandshakeState = { prefetched: [] };
+  while (!state.logsSubscription || !state.allSubscription) {
+    const frame = await beforeHandshakeDeadline(queue.next(signal), handshakeDeadline);
     if (frame === undefined) throw new RpcError("TRANSPORT", "Monad parser closed during handshake");
-    const value = JSON.parse(frame) as Record<string, unknown>;
-    if (value.error) throw new RpcError("TRANSPORT", `Monad parser subscription error: ${JSON.stringify(value.error)}`);
-    if (Number(value.id) === 1 && typeof value.result === "string") logsSubscription = value.result;
-    else if (Number(value.id) === 2 && typeof value.result === "string") allSubscription = value.result;
-    else prefetched.push(frame);
+    observeParserHandshakeFrame(state, frame, prefetchCapacity);
   }
-  return { logsSubscription, allSubscription, prefetched };
+  return {
+    logsSubscription: state.logsSubscription,
+    allSubscription: state.allSubscription,
+    prefetched: state.prefetched,
+  };
 }
 
-function withHandshakeTimeout<T>(operation: Promise<T>): Promise<T> {
+interface ParserHandshakeState {
+  logsSubscription?: string;
+  allSubscription?: string;
+  readonly prefetched: string[];
+}
+
+function observeParserHandshakeFrame(state: ParserHandshakeState, frame: string, prefetchCapacity: number): void {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(frame) as unknown;
+  } catch (error) {
+    throw new RpcError("INVALID", `invalid Monad parser handshake JSON: ${message(error)}`);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
+    throw new RpcError("INVALID", "Monad parser handshake frame is not an object");
+  const value = parsed as Record<string, unknown>;
+  if (value.error !== undefined && value.error !== null)
+    throw new RpcError("TRANSPORT", `Monad parser subscription error: ${JSON.stringify(value.error)}`);
+
+  if (!("id" in value)) {
+    if (state.prefetched.length >= prefetchCapacity)
+      throw new RpcError("INVALID", "Monad parser handshake prefetch exceeded configured queue capacity");
+    state.prefetched.push(frame);
+    return;
+  }
+  if (typeof value.id !== "number" || !Number.isSafeInteger(value.id) || (value.id !== 1 && value.id !== 2))
+    throw new RpcError("INVALID", "Monad parser acknowledgement has an unexpected numeric id");
+  if (typeof value.result !== "string" || value.result.length === 0)
+    throw new RpcError("INVALID", "Monad parser acknowledgement has no subscription id");
+
+  const key = value.id === 1 ? "logsSubscription" : "allSubscription";
+  const previous = state[key];
+  if (previous !== undefined && previous !== value.result)
+    throw new RpcError("INVALID", `Monad parser acknowledgement ${value.id} changed subscription id`);
+  state[key] = value.result;
+}
+
+function beforeHandshakeDeadline<T>(operation: Promise<T>, deadline: number): Promise<T> {
+  const remaining = deadline - performance.now();
+  if (remaining <= 0) return Promise.reject(new RpcError("TRANSPORT", "Monad parser subscription handshake timed out"));
   return new Promise((resolve, reject) => {
     const timer = setTimeout(
       () => reject(new RpcError("TRANSPORT", "Monad parser subscription handshake timed out")),
-      HANDSHAKE_TIMEOUT_MILLISECONDS,
+      remaining,
     );
     operation.then(
       (value) => {
@@ -340,13 +385,19 @@ function parseParserHead(value: Record<string, unknown>, chainId: bigint, commit
     chainId,
     blockNumber,
     executionBlockNumber: blockNumber,
-    blockHash:
-      value.blockHash === undefined || value.blockHash === null
-        ? undefined
-        : parseHash(value.blockHash, "head.blockHash"),
+    blockHash: parserHeadHash(value),
     sourceSequence: parseU64(value.seqno, "head.seqno"),
     commitment,
   };
+}
+
+function parserHeadHash(value: Record<string, unknown>): Hex.Hex | undefined {
+  const header =
+    value.header && typeof value.header === "object" ? (value.header as Record<string, unknown>) : undefined;
+  const blockTag =
+    header?.blockTag && typeof header.blockTag === "object" ? (header.blockTag as Record<string, unknown>) : undefined;
+  const candidate = value.blockHash ?? blockTag?.id;
+  return candidate === undefined || candidate === null ? undefined : parseHash(candidate, "head.blockHash");
 }
 
 function parseParserLog(
@@ -368,7 +419,7 @@ function parseParserLog(
       blockHash,
       transactionIndex: hexU64(transactionIndex),
       logIndex: hexU64(logIndex),
-      removed: value.removed === true,
+      removed: parseRemoved(value.removed),
     },
     chainId,
     commitments.get(blockNumber) ?? Commitment.Realtime,
@@ -376,6 +427,12 @@ function parseParserLog(
   log.cursor.sourceSequence = parseU64(value.seqno, "log.seqno");
   log.cursor.sourceSubIndex = logIndex;
   return log;
+}
+
+function parseRemoved(value: unknown): boolean {
+  if (value === undefined) return false;
+  if (typeof value === "boolean") return value;
+  throw new RpcError("INVALID", "log.removed is not boolean");
 }
 
 function parseCommitment(value: unknown): Commitment {

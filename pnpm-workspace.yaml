@@ -6,3 +6,4 @@ packages:
   - packages/source-arbitrum
   - examples/typescript/quote-logger
   - examples/typescript/activity-actor
+  - examples/typescript/quote-oracle

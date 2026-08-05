@@ -1,33 +1,29 @@
-# `@lunarbase/client`
+# `@lunarbase-lab/pmm-v2-client`
 
-Universal TypeScript reducer and embeddable realtime LunarBase client.
+Realtime TypeScript client for LunarBase quotes.
+
+Status: **fully supported**.
 
 ## Install
 
 ```bash
-pnpm add @lunarbase/math @lunarbase/client
+npm install @lunarbase-lab/pmm-v2-math @lunarbase-lab/pmm-v2-client
 ```
 
-Applications normally add one network package as well.
-
-## Connect a source
+## Use
 
 ```ts
-import { connect } from "@lunarbase/client";
+import { connect } from "@lunarbase-lab/pmm-v2-client";
 
 const client = await connect(config, dataSource, optionalCheckpoint);
-const single = client.quote(request);
-const batch = client.quoteMany(requests);
+const quote = client.quote(request);
+const quotes = client.quoteMany(requests);
 const health = client.health();
-const checkpoint = client.checkpoint();
 await client.shutdown();
 ```
 
-Implement `ChainDataSource` only for a custom transport. It combines snapshot,
-backfill, realtime subscription, and checkpoint validation.
+## Guarantees
 
-`quote` and `quoteMany` are synchronous in-memory operations. A batch is
-evaluated in one event-loop turn against one state snapshot. The client does
-not expose mutable state maps and does not depend on Redis.
-`DeploymentConfig` is transport-free; endpoint configuration belongs to the
-injected source.
+- `quote` and `quoteMany` read one coherent in-memory state snapshot.
+- `ChainDataSource` covers bootstrap, backfill, ordered updates, and checkpoint validation.
+- Gaps and canonical mismatches suspend readiness until recovery completes.

@@ -1,5 +1,5 @@
 /** Strict Core event ABI decoder backed by Ox. */
-import type { Address, Word } from "@lunarbase/math";
+import type { Address, Word } from "@lunarbase-lab/pmm-v2-math";
 import * as AbiEvent from "ox/AbiEvent";
 import * as Hex from "ox/Hex";
 import type { ContractLog, QuoteEvent } from "../model.js";

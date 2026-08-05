@@ -51,8 +51,7 @@ impl CursorReorderBuffer {
         self.poisoned
     }
 
-    /// Inserts one update. Any repeated cursor is treated as a continuity
-    /// failure and recovered canonically instead of maintaining dedup state.
+    /// Inserts one update. Any repeated cursor requires canonical recovery.
     ///
     /// # Errors
     ///
@@ -183,6 +182,7 @@ mod tests {
         let mut buffer = CursorReorderBuffer::new(4).unwrap();
         let log = ChainUpdate::Log(ContractLog {
             address: Address::ZERO,
+            transaction_hash: None,
             topics: vec![],
             data: Bytes::new(),
             removed: false,

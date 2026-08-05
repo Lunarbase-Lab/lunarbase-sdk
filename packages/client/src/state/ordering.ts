@@ -68,11 +68,13 @@ export class CursorReorderBuffer {
 }
 
 function cursorKey(cursor: ChainCursor, rank: number): CursorKey {
+  const transportOrder =
+    cursor.transactionIndex === undefined && cursor.logIndex === undefined ? (cursor.sourceSequence ?? 0n) : 0n;
   return [
     cursor.blockNumber,
     cursor.transactionIndex ?? 0n,
     cursor.logIndex ?? 0n,
-    cursor.sourceSequence ?? 0n,
+    transportOrder,
     cursor.sourceSubIndex ?? 0n,
     rank,
   ];
@@ -94,11 +96,12 @@ function updateKey(update: ChainUpdate): CursorKey {
 function watermarkKey(cursor: ChainCursor): CursorKey {
   if (cursor.transactionIndex === undefined && cursor.logIndex === undefined)
     return [cursor.blockNumber, (1n << 32n) - 1n, (1n << 32n) - 1n, (1n << 64n) - 1n, (1n << 32n) - 1n, 255];
+  const transportOrder = 0n;
   return [
     cursor.blockNumber,
     cursor.transactionIndex ?? 0n,
     cursor.logIndex ?? 0n,
-    cursor.sourceSequence ?? 0n,
+    transportOrder,
     cursor.sourceSubIndex ?? 0n,
     255,
   ];

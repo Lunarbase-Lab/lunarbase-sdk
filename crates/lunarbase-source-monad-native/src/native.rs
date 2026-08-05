@@ -27,7 +27,7 @@ use std::{
 };
 use tokio::sync::mpsc;
 
-use crate::execution::{
+use lunarbase_source_monad::execution::{
     ExecutionEvent, ExecutionEventStream, ExecutionHead, ExecutionLog, MonadExecutionNormalizer,
 };
 
@@ -194,8 +194,12 @@ fn read_ring(
             EventPayloadResult::Ready(event) => event,
         };
         match convert_event(event, info, block_number, &filter, &mut block_log_index) {
-            Ok(Some(event)) if sender.blocking_send(Ok(event)).is_err() => return,
-            Ok(_) => {}
+            Ok(Some(event)) => {
+                if sender.blocking_send(Ok(event)).is_err() {
+                    return;
+                }
+            }
+            Ok(None) => {}
             Err(error) => {
                 let _ = sender.blocking_send(Err(error));
                 return;

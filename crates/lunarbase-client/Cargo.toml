@@ -1,11 +1,16 @@
 [package]
-name = "lunarbase-client"
+name = "lunarbase-pmm-v2-client"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 description = "Network-independent LunarBase reducer and realtime client runtime"
+keywords = ["lunarbase", "pmm", "defi", "evm", "realtime"]
+categories = ["api-bindings", "asynchronous"]
+
+[lib]
+name = "lunarbase_client"
 
 [lints]
 workspace = true

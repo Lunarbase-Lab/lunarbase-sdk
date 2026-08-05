@@ -1,22 +1,13 @@
-# Production-shaped Base example. Copy it outside the SDK before deployment.
+# Base runtime profile for the Docker Compose example.
 network = "base"
 chain_id = 8453
-core = "0x0000000000000000000000000000000000000001"
-router = "0x0000000000000000000000000000000000000002"
 expect_whitelisted = true
-deployment_block = 0
-expected_implementation = "0x0000000000000000000000000000000000000000"
-expected_implementation_code_hash = "0x0000000000000000000000000000000000000000000000000000000000000000"
-contract_compatibility_version = "lunarbase-contracts@4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d:math-v4"
-http_rpc_url = "http://host.docker.internal:8545"
-realtime_url = "ws://host.docker.internal:8546"
+contract_compatibility_version = "lunarbase-pmm-v2"
 explicit_lane_assets = []
 bind = "0.0.0.0:8080"
 queue_bound = 16384
 reconnect_delay_milliseconds = 500
 source_stall_timeout_milliseconds = 30000
-
-# Optional restart acceleration only. Remove this line to run without Redis.
 redis_url = "redis://redis:6379/"
 checkpoint_interval_seconds = 30
 shutdown_timeout_seconds = 20

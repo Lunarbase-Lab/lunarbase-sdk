@@ -1,17 +1,17 @@
-# Live BSC Testnet validation fixture. Never treat public endpoints as production defaults.
+# BSC Testnet example. Replace all deployment placeholders before use.
 network = "evm"
 chain_id = 97
-core = "0x11116c60551889C6c01DDAD3A1fB3Cc95CbeBBbB"
+core = "0x0000000000000000000000000000000000000001"
 router = "0x000000000000000000000000000000000000dEaD"
 expect_whitelisted = false
 deployment_block = 0
-expected_implementation = "0xCFa7de4418707d4FDC06e4634A4B2aE95Af528c7"
-expected_implementation_code_hash = "0xdd4f26f3b1ff31ea9aef19ddffd549ca8669c91fc4d0355e9677c6f5b2b96897"
-contract_compatibility_version = "lunarbase-contracts@4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d:math-v4"
+expected_implementation = "0x0000000000000000000000000000000000000005"
+expected_implementation_code_hash = "0x1111111111111111111111111111111111111111111111111111111111111111"
+contract_compatibility_version = "lunarbase-pmm-v2"
 http_rpc_url = "https://bsc-testnet-rpc.publicnode.com"
 realtime_url = "wss://bsc-testnet-rpc.publicnode.com"
 explicit_lane_assets = [
-  "0xcCE41dEACC72cd4C7b92358bf824eCA1f33Ec269",
-  "0x21f52a1d45dab30b518b31ca8e44f91b588a8dec",
+  "0x0000000000000000000000000000000000000004",
+  "0x0000000000000000000000000000000000000003",
 ]
 bind = "127.0.0.1:8097"

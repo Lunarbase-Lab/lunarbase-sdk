@@ -1,18 +1,22 @@
-# `lunarbase-source-monad`
+# `lunarbase-pmm-v2-source-monad`
 
-Experimental Monad execution-events implementations of the common
-`ChainDataSource` contract.
+Monad execution-event data source for `lunarbase-pmm-v2-client`.
 
-## Portable parser client
+Status: **maintenance**. Updates focus on compatibility, reliability, and security fixes.
+
+## Install
 
 ```toml
 [dependencies]
-lunarbase-client = { git = "https://github.com/Lunarbase-Lab/lunarbase-sdk.git", rev = "<approved-revision>" }
-lunarbase-source-monad = { git = "https://github.com/Lunarbase-Lab/lunarbase-sdk.git", rev = "<approved-revision>" }
+lunarbase-client = { package = "lunarbase-pmm-v2-client", version = "0.3.0" }
+lunarbase-source-monad = { package = "lunarbase-pmm-v2-source-monad", version = "0.3.0" }
 ```
+
+## Use
 
 ```rust
 use std::sync::Arc;
+
 use lunarbase_client::prelude::ConnectedQuoteClient;
 use lunarbase_source_monad::prelude::{MonadParserConfig, MonadParserSource};
 
@@ -28,25 +32,10 @@ let source = Arc::new(MonadParserSource::new(
 let client = ConnectedQuoteClient::connect(config, source, optional_checkpoint).await?;
 ```
 
-The portable implementation consumes the parser WebSocket and uses RPC for
-bootstrap and canonical recovery.
+`ws_url` must point to a compatible Monad parser WebSocket endpoint.
 
-## Native event ring
+## Behavior
 
-On Linux, enable the colocated shared-memory reader:
-
-```toml
-lunarbase-source-monad = {
-  git = "https://github.com/Lunarbase-Lab/lunarbase-sdk.git",
-  rev = "<approved-revision>",
-  features = ["native-event-ring"]
-}
-```
-
-Then construct `MonadEventRingSource` from `lunarbase_source_monad::prelude`
-and pass it to `ConnectedQuoteClient::connect`. The native feature depends on
-the official Monad execution-events crates and is intended to run beside a
-Monad node.
-
-This package remains experimental until parser and native-ring sequencing,
-gap recovery, commitment transitions, and long-running node soak tests pass.
+- HTTP RPC provides bootstrap, backfill, and canonical recovery.
+- Parser sequence positions are retained in client updates.
+- Gaps and reconnects require canonical recovery before readiness.

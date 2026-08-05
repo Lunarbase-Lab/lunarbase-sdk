@@ -1,4 +1,4 @@
-import { decodeLaneSlot0 } from "@lunarbase/math";
+import { decodeLaneSlot0 } from "@lunarbase-lab/pmm-v2-math";
 import {
   createPublicClient,
   createWalletClient,
@@ -17,6 +17,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { bscTestnet } from "viem/chains";
 import { CORE_ACTOR_ABI, MOCK_TOKEN_ABI } from "./abi.js";
 import type { ActorConfig } from "./config.js";
+import type { PairingCursor } from "./pairing-state.js";
 
 const ERC1967_IMPLEMENTATION_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc" as const;
 
@@ -69,12 +70,41 @@ export interface SubmittedSwapTransaction extends SubmittedTransaction {
 export interface ObservedSwap {
   readonly transactionHash: Hash;
   readonly blockNumber: bigint;
+  readonly blockHash: Hash;
   readonly transactionIndex: number;
   readonly logIndex: number;
   readonly assetIn: Address;
   readonly assetOut: Address;
   readonly amountIn: bigint;
   readonly amountOut: bigint;
+}
+
+export interface SwapHistoryResult {
+  readonly events: readonly ObservedSwap[];
+  readonly cursor: PairingCursor;
+  readonly reset: boolean;
+  readonly requestedFromBlock: bigint;
+}
+
+function sameObservedSwap(left: ObservedSwap, right: ObservedSwap): boolean {
+  return (
+    left.transactionHash === right.transactionHash &&
+    left.blockNumber === right.blockNumber &&
+    left.blockHash === right.blockHash &&
+    left.transactionIndex === right.transactionIndex &&
+    left.logIndex === right.logIndex &&
+    left.assetIn === right.assetIn &&
+    left.assetOut === right.assetOut &&
+    left.amountIn === right.amountIn &&
+    left.amountOut === right.amountOut
+  );
+}
+
+interface TokenMetadata {
+  readonly name: string;
+  readonly symbol: string;
+  readonly decimals: number;
+  readonly mintAmount?: bigint;
 }
 
 /** A submission may have reached the RPC, so retrying could queue conflicting activity. */
@@ -108,9 +138,27 @@ export class ConfirmedSwapLogError extends Error {
 export function createActor(config: ActorConfig, liveArgument = false) {
   const account = privateKeyToAccount(config.actorPrivateKey);
   const writesEnabled = config.broadcast && liveArgument;
-  const transport = http(config.rpcUrl, { batch: false, retryCount: 0, timeout: 15_000 });
-  const publicClient = createPublicClient({ chain: bscTestnet, batch: { multicall: false }, transport });
+  const transport = http(config.rpcUrl, {
+    batch: { batchSize: 100, wait: 0 },
+    retryCount: 0,
+    timeout: 15_000,
+  });
+  const publicClient = createPublicClient({
+    chain: bscTestnet,
+    batch: { multicall: true },
+    pollingInterval: config.receiptPollingMilliseconds,
+    transport,
+  });
+  const historyClient = createPublicClient({
+    chain: bscTestnet,
+    transport: http(config.rpcUrl, {
+      batch: false,
+      retryCount: 0,
+      timeout: 15_000,
+    }),
+  });
   const walletClient = createWalletClient({ account, chain: bscTestnet, transport });
+  const tokenMetadata = new Map<Address, TokenMetadata>();
 
   async function requireCode(address: Address, label: string, blockHash: Hash): Promise<void> {
     const code = await publicClient.getCode({ address, blockHash });
@@ -118,13 +166,14 @@ export function createActor(config: ActorConfig, liveArgument = false) {
   }
 
   async function requireDeploymentIdentity(blockHash: Hash): Promise<Address> {
-    const [word, proxyCode] = await Promise.all([
+    const [word, proxyCode, implementationCode] = await Promise.all([
       publicClient.getStorageAt({
-        address: config.pool,
+        address: config.core,
         slot: ERC1967_IMPLEMENTATION_SLOT,
         blockHash,
       }),
-      publicClient.getCode({ address: config.pool, blockHash }),
+      publicClient.getCode({ address: config.core, blockHash }),
+      publicClient.getCode({ address: config.expectedImplementation, blockHash }),
     ]);
     if (word === undefined || !/^0x[0-9a-fA-F]{64}$/.test(word))
       throw new Error("Core has an invalid ERC-1967 implementation word");
@@ -138,7 +187,6 @@ export function createActor(config: ActorConfig, liveArgument = false) {
     if (keccak256(proxyCode) !== config.expectedProxyCodeHash)
       throw new Error("Core proxy runtime hash does not match the pinned deployment");
 
-    const implementationCode = await publicClient.getCode({ address: implementation, blockHash });
     if (implementationCode === undefined || implementationCode === "0x")
       throw new Error("Core implementation has no runtime code");
     if (keccak256(implementationCode) !== config.expectedImplementationCodeHash)
@@ -147,10 +195,20 @@ export function createActor(config: ActorConfig, liveArgument = false) {
   }
 
   async function inspectToken(id: TokenId, address: Address, blockNumber: bigint): Promise<TokenSnapshot> {
-    const [name, symbol, decimals, actorBalance, allowance, reserves] = await Promise.all([
-      publicClient.readContract({ address, abi: MOCK_TOKEN_ABI, functionName: "name", blockNumber }),
-      publicClient.readContract({ address, abi: MOCK_TOKEN_ABI, functionName: "symbol", blockNumber }),
-      publicClient.readContract({ address, abi: MOCK_TOKEN_ABI, functionName: "decimals", blockNumber }),
+    const cachedMetadata = tokenMetadata.get(address);
+    const metadataPromise =
+      cachedMetadata === undefined
+        ? Promise.all([
+            publicClient.readContract({ address, abi: MOCK_TOKEN_ABI, functionName: "name", blockNumber }),
+            publicClient.readContract({ address, abi: MOCK_TOKEN_ABI, functionName: "symbol", blockNumber }),
+            publicClient.readContract({ address, abi: MOCK_TOKEN_ABI, functionName: "decimals", blockNumber }),
+            publicClient
+              .readContract({ address, abi: MOCK_TOKEN_ABI, functionName: "MINT_AMOUNT", blockNumber })
+              .catch(() => undefined),
+          ]).then(([name, symbol, decimals, mintAmount]) => ({ name, symbol, decimals, mintAmount }))
+        : Promise.resolve(cachedMetadata);
+    const [metadata, actorBalance, allowance, reserves] = await Promise.all([
+      metadataPromise,
       publicClient.readContract({
         address,
         abi: MOCK_TOKEN_ABI,
@@ -162,35 +220,22 @@ export function createActor(config: ActorConfig, liveArgument = false) {
         address,
         abi: MOCK_TOKEN_ABI,
         functionName: "allowance",
-        args: [account.address, config.pool],
+        args: [account.address, config.core],
         blockNumber,
       }),
       publicClient.readContract({
-        address: config.pool,
+        address: config.core,
         abi: CORE_ACTOR_ABI,
         functionName: "reserves",
         args: [address],
         blockNumber,
       }),
     ]);
-    let mintAmount: bigint | undefined;
-    try {
-      mintAmount = await publicClient.readContract({
-        address,
-        abi: MOCK_TOKEN_ABI,
-        functionName: "MINT_AMOUNT",
-        blockNumber,
-      });
-    } catch {
-      mintAmount = undefined;
-    }
+    if (cachedMetadata === undefined) tokenMetadata.set(address, metadata);
     return {
       id,
       address,
-      name,
-      symbol,
-      decimals,
-      mintAmount,
+      ...metadata,
       actorBalance,
       allowance,
       assetReserve: reserves[0],
@@ -200,7 +245,7 @@ export function createActor(config: ActorConfig, liveArgument = false) {
 
   async function inspectLane(asset: Address, blockNumber: bigint): Promise<LaneSnapshot> {
     const word = await publicClient.readContract({
-      address: config.pool,
+      address: config.core,
       abi: CORE_ACTOR_ABI,
       functionName: "lane",
       args: [asset],
@@ -237,13 +282,13 @@ export function createActor(config: ActorConfig, liveArgument = false) {
 
     const [globallyPaused, onchainCash, actorGasBalance, tokens, laneEntries] = await Promise.all([
       publicClient.readContract({
-        address: config.pool,
+        address: config.core,
         abi: CORE_ACTOR_ABI,
         functionName: "paused",
         blockNumber: block.number,
       }),
       publicClient.readContract({
-        address: config.pool,
+        address: config.core,
         abi: CORE_ACTOR_ABI,
         functionName: "cash",
         blockNumber: block.number,
@@ -284,13 +329,16 @@ export function createActor(config: ActorConfig, liveArgument = false) {
   async function requireWritePreconditions(): Promise<bigint> {
     if (!writesEnabled) throw new Error("write gate is closed; BROADCAST=true and --live are both required");
 
-    await assertNoPendingTransactions();
-    const [chainId, block, gasBalance, gasPrice] = await Promise.all([
+    const [latestNonce, pendingNonce, chainId, block, gasBalance, gasPrice] = await Promise.all([
+      publicClient.getTransactionCount({ address: account.address, blockTag: "latest" }),
+      publicClient.getTransactionCount({ address: account.address, blockTag: "pending" }),
       publicClient.getChainId(),
       publicClient.getBlock({ blockTag: "latest", includeTransactions: false }),
       publicClient.getBalance({ address: account.address }),
       publicClient.getGasPrice(),
     ]);
+    if (latestNonce !== pendingNonce)
+      throw new Error(`actor has unresolved transactions: latest nonce ${latestNonce}, pending nonce ${pendingNonce}`);
     if (chainId !== config.chainId) throw new Error("RPC chain changed before write");
     if (block.hash === null) throw new Error("latest block has no hash before write");
     if (gasBalance < parseEther(config.minimumGasBalance))
@@ -355,7 +403,7 @@ export function createActor(config: ActorConfig, liveArgument = false) {
       address: token,
       abi: MOCK_TOKEN_ABI,
       functionName: "approve",
-      args: [config.pool, amount],
+      args: [config.core, amount],
       gasPrice,
     });
     return submitted(await submit(() => walletClient.writeContract(request)));
@@ -375,17 +423,27 @@ export function createActor(config: ActorConfig, liveArgument = false) {
       address: token,
       abi: MOCK_TOKEN_ABI,
       functionName: "allowance",
-      args: [account.address, config.pool],
+      args: [account.address, config.core],
     });
   }
 
   async function quoteExactIn(amountIn: bigint, assetIn: Address, assetOut: Address): Promise<bigint> {
     return publicClient.readContract({
       account: account.address,
-      address: config.pool,
+      address: config.core,
       abi: CORE_ACTOR_ABI,
       functionName: "quoteExactIn",
       args: [amountIn, assetIn, assetOut],
+    });
+  }
+
+  async function quoteExactOut(amountOut: bigint, assetIn: Address, assetOut: Address): Promise<bigint> {
+    return publicClient.readContract({
+      account: account.address,
+      address: config.core,
+      abi: CORE_ACTOR_ABI,
+      functionName: "quoteExactOut",
+      args: [assetIn, amountOut, assetOut],
     });
   }
 
@@ -399,7 +457,7 @@ export function createActor(config: ActorConfig, liveArgument = false) {
     const gasPrice = await requireWritePreconditions();
     const { request } = await publicClient.simulateContract({
       account,
-      address: config.pool,
+      address: config.core,
       abi: CORE_ACTOR_ABI,
       functionName: "swapExactIn",
       args: [
@@ -421,7 +479,7 @@ export function createActor(config: ActorConfig, liveArgument = false) {
       swapLogs = parseEventLogs({
         abi: CORE_ACTOR_ABI,
         eventName: "SwapExecuted",
-        logs: receipt.logs.filter((entry) => getAddress(entry.address) === config.pool),
+        logs: receipt.logs.filter((entry) => getAddress(entry.address) === config.core),
         strict: true,
       }).filter(
         (entry) =>
@@ -442,61 +500,20 @@ export function createActor(config: ActorConfig, liveArgument = false) {
     return { ...submitted(receipt), amountIn, amountOut: actualAmountOut };
   }
 
-  async function swapHistory(fromBlock: bigint): Promise<ObservedSwap[]> {
+  async function swapHistory(fromBlock: bigint, previousCursor?: PairingCursor): Promise<SwapHistoryResult> {
     if (fromBlock < 0n) throw new RangeError("pairing start block must be non-negative");
-    const latestBlock = await publicClient.getBlockNumber();
-    if (fromBlock > latestBlock) return [];
+    const latestBlock = await historyClient.getBlockNumber();
 
-    const confirmationLag = BigInt(config.confirmations - 1);
+    const confirmationLag = BigInt(config.pairingFinalityConfirmations - 1);
     const confirmedTo = latestBlock >= confirmationLag ? latestBlock - confirmationLag : 0n;
-    if (fromBlock > confirmedTo) throw new Error("pairing history begins inside the unconfirmed block tail");
+    if (fromBlock > confirmedTo + 1n) throw new Error("pairing history begins inside the provisional block tail");
 
-    const anchorBefore = await publicClient.getBlock({ blockNumber: confirmedTo, includeTransactions: false });
+    const anchorBefore = await historyClient.getBlock({ blockNumber: confirmedTo, includeTransactions: false });
     if (anchorBefore.hash === null) throw new Error("confirmed pairing-history anchor has no hash");
 
-    const history: ObservedSwap[] = [];
-    const chunkSize = 5_000n;
-    for (let chunkStart = fromBlock; chunkStart <= confirmedTo; chunkStart += chunkSize) {
-      const chunkEnd = chunkStart + chunkSize - 1n < confirmedTo ? chunkStart + chunkSize - 1n : confirmedTo;
-      const events = await publicClient.getContractEvents({
-        address: config.pool,
-        abi: CORE_ACTOR_ABI,
-        eventName: "SwapExecuted",
-        args: { router: account.address },
-        fromBlock: chunkStart,
-        toBlock: chunkEnd,
-        strict: true,
-      });
-      for (const event of events) {
-        const { args, blockNumber, logIndex, transactionHash, transactionIndex } = event;
-        if (
-          blockNumber === null ||
-          logIndex === null ||
-          transactionHash === null ||
-          transactionIndex === null ||
-          args.assetIn === undefined ||
-          args.assetOut === undefined ||
-          args.amountIn === undefined ||
-          args.amountOut === undefined ||
-          args.exactIn !== true
-        )
-          throw new Error("actor SwapExecuted history contains an incomplete or non-exact-input event");
-        history.push({
-          transactionHash,
-          blockNumber,
-          transactionIndex,
-          logIndex,
-          assetIn: getAddress(args.assetIn),
-          assetOut: getAddress(args.assetOut),
-          amountIn: args.amountIn,
-          amountOut: args.amountOut,
-        });
-      }
-    }
-
     if (confirmedTo < latestBlock) {
-      const unconfirmed = await publicClient.getContractEvents({
-        address: config.pool,
+      const unconfirmed = await historyClient.getContractEvents({
+        address: config.core,
         abi: CORE_ACTOR_ABI,
         eventName: "SwapExecuted",
         args: { router: account.address },
@@ -505,14 +522,83 @@ export function createActor(config: ActorConfig, liveArgument = false) {
         strict: true,
       });
       if (unconfirmed.length > 0)
-        throw new Error("actor has a SwapExecuted event awaiting the configured confirmations");
+        throw new Error("actor has a SwapExecuted event awaiting the configured pairing finality");
     }
 
-    const anchorAfter = await publicClient.getBlock({ blockNumber: confirmedTo, includeTransactions: false });
+    const replayBlocks = fromBlock <= confirmedTo ? confirmedTo - fromBlock + 1n : 0n;
+    const reset = replayBlocks > BigInt(config.pairingMaximumReplayBlocks);
+    if (previousCursor !== undefined) {
+      if (previousCursor.blockNumber + 1n !== fromBlock)
+        throw new Error("pairing checkpoint cursor must be exactly adjacent to its replay range");
+    }
+    if (!reset && previousCursor !== undefined) {
+      const previousAnchor = await historyClient.getBlock({
+        blockNumber: previousCursor.blockNumber,
+        includeTransactions: false,
+      });
+      if (previousAnchor.hash === null || previousAnchor.hash !== previousCursor.blockHash)
+        throw new Error("pairing checkpoint block hash is no longer canonical");
+    }
+
+    const history: ObservedSwap[] = [];
+    const chunkSize = 5_000n;
+    if (!reset) {
+      for (let chunkStart = fromBlock; chunkStart <= confirmedTo; chunkStart += chunkSize) {
+        const chunkEnd = chunkStart + chunkSize - 1n < confirmedTo ? chunkStart + chunkSize - 1n : confirmedTo;
+        const events = await historyClient.getContractEvents({
+          address: config.core,
+          abi: CORE_ACTOR_ABI,
+          eventName: "SwapExecuted",
+          args: { router: account.address },
+          fromBlock: chunkStart,
+          toBlock: chunkEnd,
+          strict: true,
+        });
+        for (const event of events) {
+          const { args, blockHash, blockNumber, logIndex, removed, transactionHash, transactionIndex } = event;
+          if (
+            removed ||
+            blockHash === null ||
+            blockNumber === null ||
+            logIndex === null ||
+            transactionHash === null ||
+            transactionIndex === null ||
+            args.assetIn === undefined ||
+            args.assetOut === undefined ||
+            args.amountIn === undefined ||
+            args.amountOut === undefined ||
+            args.exactIn !== true
+          )
+            throw new Error("actor SwapExecuted history contains an incomplete or non-exact-input event");
+          history.push({
+            transactionHash,
+            blockNumber,
+            blockHash,
+            transactionIndex,
+            logIndex,
+            assetIn: getAddress(args.assetIn),
+            assetOut: getAddress(args.assetOut),
+            amountIn: args.amountIn,
+            amountOut: args.amountOut,
+          });
+        }
+      }
+    }
+
+    const anchorAfter = await historyClient.getBlock({ blockNumber: confirmedTo, includeTransactions: false });
     if (anchorAfter.hash === null || anchorAfter.hash !== anchorBefore.hash)
       throw new Error("pairing-history anchor changed while logs were being read");
 
-    history.sort((left, right) =>
+    const uniqueHistory = new Map<string, ObservedSwap>();
+    for (const event of history) {
+      const key = `${event.transactionHash}:${event.logIndex}`;
+      const duplicate = uniqueHistory.get(key);
+      if (duplicate === undefined) uniqueHistory.set(key, event);
+      else if (!sameObservedSwap(duplicate, event))
+        throw new Error("actor SwapExecuted history contains conflicting duplicate logs");
+    }
+    const orderedHistory = [...uniqueHistory.values()];
+    orderedHistory.sort((left, right) =>
       left.blockNumber !== right.blockNumber
         ? left.blockNumber < right.blockNumber
           ? -1
@@ -521,7 +607,12 @@ export function createActor(config: ActorConfig, liveArgument = false) {
           ? left.transactionIndex - right.transactionIndex
           : left.logIndex - right.logIndex,
     );
-    return history;
+    return {
+      events: orderedHistory,
+      cursor: { blockNumber: confirmedTo, blockHash: anchorAfter.hash },
+      reset,
+      requestedFromBlock: fromBlock,
+    };
   }
 
   return {
@@ -534,6 +625,7 @@ export function createActor(config: ActorConfig, liveArgument = false) {
     balance,
     allowance,
     quoteExactIn,
+    quoteExactOut,
     swapExactIn,
     swapHistory,
   };

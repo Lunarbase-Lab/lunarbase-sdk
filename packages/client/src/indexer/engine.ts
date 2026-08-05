@@ -1,10 +1,12 @@
 /** Synchronous in-memory quote engine around the ordered reducer. */
-import type { QuoteRequest } from "@lunarbase/math";
+import type { QuoteRequest } from "@lunarbase-lab/pmm-v2-math";
+import { checkpointMatchesDeployment } from "../bootstrap.js";
 import { decodeCoreEvent } from "../protocol/abi.js";
 import { QuoteReducer } from "../state/reducer.js";
 import { Commitment, IndexerError, MATH_COMPATIBILITY_VERSION } from "../model.js";
 import type {
   BootstrapSnapshot,
+  ChainCursor,
   ChainUpdate,
   Checkpoint,
   ClientBatchQuote,
@@ -21,19 +23,27 @@ export class QuoteIndexer {
     private reducer: QuoteReducer,
     /** Immutable deployment identity used for compatibility checks. */
     private readonly deployment: DeploymentConfig,
+    /** Canonical state boundary already represented by the reducer. */
+    private canonicalFloor?: ChainCursor,
   ) {}
 
   /** Builds a ready indexer from one coherent source snapshot. */
   static fromSnapshot(snapshot: BootstrapSnapshot, deployment: DeploymentConfig): QuoteIndexer {
-    const indexer = new QuoteIndexer(new QuoteReducer(snapshot.state, deployment.router), deployment);
+    if (snapshot.cursor.chainId !== deployment.chainId)
+      throw new IndexerError("SOURCE", "snapshot cursor chain id mismatch");
+    const indexer = new QuoteIndexer(new QuoteReducer(snapshot.state, deployment.router), deployment, {
+      ...snapshot.cursor,
+    });
     indexer.verifyImplementation(snapshot);
     indexer.reducer.bootstrap(snapshot.cursor);
     return indexer;
   }
 
-  /** Restores an already validated v4 checkpoint. */
+  /** Restores a compatible checkpoint. */
   static fromCheckpoint(checkpoint: Checkpoint, deployment: DeploymentConfig): QuoteIndexer {
-    return new QuoteIndexer(QuoteReducer.fromCheckpoint(checkpoint), deployment);
+    if (!checkpointMatchesDeployment(checkpoint, deployment))
+      throw new IndexerError("CODE_HASH_MISMATCH", "checkpoint deployment or state mismatch");
+    return new QuoteIndexer(QuoteReducer.fromCheckpoint(checkpoint), deployment, { ...checkpoint.cursor });
   }
 
   /** Atomically replaces state after snapshot/recovery and replays handoff updates. */
@@ -42,6 +52,7 @@ export class QuoteIndexer {
     replacement.replayHandoff(buffered, snapshot.cursor);
     replacement.reducer.publishReady();
     this.reducer = replacement.reducer;
+    this.canonicalFloor = replacement.canonicalFloor ? { ...replacement.canonicalFloor } : undefined;
   }
 
   /** Applies buffered subscription messages newer than the installed state. */
@@ -53,13 +64,27 @@ export class QuoteIndexer {
       return compareCursor(a, b);
     });
     for (const update of ordered) {
-      if (update.kind === "Gap") throw new IndexerError("GAP", update.reason);
-      if (update.kind === "Reorg") throw new IndexerError("GAP", "reorg during snapshot handoff");
-      const cursor = updateCursor(update);
-      if (!cursor) continue;
-      if (snapshotCovers(cursor, snapshotCursor)) continue;
-      this.applyCoreUpdate(update);
+      try {
+        if (update.kind === "Gap") throw new IndexerError("GAP", update.reason);
+        if (update.kind === "Reorg") throw new IndexerError("GAP", "reorg during snapshot handoff");
+        const cursor = updateCursor(update);
+        if (!cursor) continue;
+        if (snapshotCovers(cursor, snapshotCursor)) continue;
+        this.applyCoreUpdate(update);
+      } catch (error) {
+        this.reducer.markNotReady();
+        throw error;
+      }
     }
+  }
+
+  /** Records a completed canonical recovery range. */
+  setCanonicalFloor(cursor: ChainCursor): void {
+    if (cursor.chainId !== this.deployment.chainId) {
+      this.reducer.markNotReady();
+      throw new IndexerError("REDUCER", "canonical floor chain id mismatch");
+    }
+    this.canonicalFloor = { ...cursor };
   }
 
   /** Applies one normalized update through the pinned Core ABI decoder. */
@@ -68,6 +93,7 @@ export class QuoteIndexer {
       switch (update.kind) {
         case "Log": {
           if (update.log.removed) throw new IndexerError("GAP", "removed log requires canonical recovery");
+          if (this.canonicalFloor && canonicalFloorCoversLog(update.log.cursor, this.canonicalFloor)) break;
           const event = decodeCoreEvent(update.log);
           if (event) this.reducer.apply(update.log.cursor, event);
           break;
@@ -149,13 +175,23 @@ export class QuoteIndexer {
   }
 }
 
-function snapshotCovers(
-  update: import("../model.js").ChainCursor,
-  snapshot: import("../model.js").ChainCursor,
-): boolean {
+function snapshotCovers(update: ChainCursor, snapshot: ChainCursor): boolean {
+  if (update.chainId !== snapshot.chainId) throw new IndexerError("REDUCER", "cursor chain id mismatch");
   if (update.blockNumber < snapshot.blockNumber) return true;
   if (update.blockNumber > snapshot.blockNumber) return false;
   if (update.blockHash === undefined || snapshot.blockHash === undefined)
     throw new IndexerError("GAP", "same-block handoff has no hash identity; canonical recovery required");
   return update.blockHash.toLowerCase() === snapshot.blockHash.toLowerCase();
+}
+
+function canonicalFloorCoversLog(update: ChainCursor, floor: ChainCursor): boolean {
+  if (update.chainId !== floor.chainId) throw new IndexerError("REDUCER", "cursor chain id mismatch");
+  if (update.blockNumber < floor.blockNumber) return true;
+  if (update.blockNumber > floor.blockNumber) return false;
+  if (update.blockHash === undefined || floor.blockHash === undefined)
+    throw new IndexerError("GAP", "same-block realtime log has no canonical hash identity");
+  if (update.blockHash.toLowerCase() !== floor.blockHash.toLowerCase())
+    throw new IndexerError("REDUCER", "block hash mismatch");
+  const floorIsBlockComplete = floor.transactionIndex === undefined && floor.logIndex === undefined;
+  return floorIsBlockComplete || compareCursor(update, floor) <= 0;
 }

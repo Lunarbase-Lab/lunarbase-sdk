@@ -5,9 +5,9 @@ use lunarbase_client::source::SourceStream;
 use lunarbase_math::types::{Address, B256, Bytes};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-/// Block lifecycle notification from the parser or native ring.
+/// Block lifecycle notification from an execution-event source.
 pub struct ExecutionHead {
-    /// Monotonic execution-event ring or parser sequence.
+    /// Monotonic source sequence.
     pub sequence: u64,
     /// EVM-visible Monad block height.
     pub block_number: u64,
@@ -20,7 +20,7 @@ pub struct ExecutionHead {
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// EVM log before normalization into the common client model.
 pub struct ExecutionLog {
-    /// Monotonic execution-event ring or parser sequence.
+    /// Monotonic source sequence.
     pub sequence: u64,
     /// Deterministic position inside one source sequence.
     pub source_sub_index: u32,
@@ -58,12 +58,12 @@ pub enum ExecutionEvent {
     },
 }
 
-/// Stream emitted by parser and native event-ring readers.
+/// Stream emitted by execution-event readers.
 pub type ExecutionEventStream =
     std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<ExecutionEvent, SourceError>> + Send>>;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-/// Tracks sparse parser or contiguous ring sequence positions.
+/// Tracks accepted source sequence positions.
 pub struct MonadSequenceTracker {
     /// Latest source sequence accepted from the filtered stream.
     last_sequence: Option<u64>,
@@ -96,7 +96,7 @@ impl MonadSequenceTracker {
         }
     }
 
-    /// Resets ordering after an explicit parser/ring gap.
+    /// Resets ordering after an explicit source gap.
     pub fn rewind(&mut self) {
         self.last_sequence = None;
         self.last_sub_index = 0;
@@ -104,11 +104,11 @@ impl MonadSequenceTracker {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-/// Converts parser or native ring events into common runtime updates.
+/// Converts execution events into common runtime updates.
 pub struct MonadExecutionNormalizer {
     /// EIP-155 chain identifier attached to every normalized cursor.
     chain_id: u64,
-    /// Duplicate/regression guard for sparse parser and ring messages.
+    /// Duplicate and regression guard for source messages.
     tracker: MonadSequenceTracker,
 }
 
@@ -133,7 +133,7 @@ impl MonadExecutionNormalizer {
         }
     }
 
-    /// Converts one EVM log while preserving global ring ordering.
+    /// Converts one EVM log while preserving source ordering.
     pub fn normalize_log(&mut self, log: ExecutionLog) -> Result<Option<ChainUpdate>, SourceError> {
         if !self
             .tracker
@@ -143,6 +143,7 @@ impl MonadExecutionNormalizer {
         }
         Ok(Some(ChainUpdate::Log(ContractLog {
             address: log.address,
+            transaction_hash: None,
             topics: log.topics,
             data: log.data,
             removed: false,

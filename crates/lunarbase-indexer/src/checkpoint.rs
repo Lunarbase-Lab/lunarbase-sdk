@@ -1,10 +1,14 @@
-//! Best-effort v4 Redis checkpoint acceleration.
+//! Redis checkpoint persistence for faster restarts.
 
-use lunarbase_client::model::{ChainCursor, Checkpoint, Commitment, DeploymentConfig};
+use lunarbase_client::model::{ChainCursor, Checkpoint, Commitment, DeploymentConfig, Network};
 use lunarbase_math::state::{FeeProfile, LaneState, QuoteState};
 use lunarbase_math::types::{Address, B256, U256};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, str::FromStr, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+    time::Duration,
+};
 use thiserror::Error;
 
 const REDIS_TIMEOUT: Duration = Duration::from_secs(2);
@@ -36,12 +40,12 @@ pub enum CheckpointError {
 }
 
 impl RedisCheckpointStore {
-    /// Creates the v4 deployment-specific key.
+    /// Creates the current deployment-specific key.
     pub fn new(url: impl Into<String>, deployment: &DeploymentConfig) -> Self {
         Self {
             url: url.into(),
             key: format!(
-                "lunarbase:v4:{}:{:#x}:{:#x}",
+                "lunarbase:v5:{}:{:#x}:{:#x}",
                 deployment.chain_id, deployment.core, deployment.router
             ),
         }
@@ -112,8 +116,12 @@ struct CheckpointDto {
     expected_implementation: String,
     expected_implementation_code_hash: String,
     chain_id: u64,
+    network: Network,
     core: String,
     router: String,
+    deployment_block: u64,
+    expect_whitelisted: bool,
+    explicit_lane_assets: Vec<String>,
     cursor: CursorDto,
     state: StateDto,
 }
@@ -198,6 +206,13 @@ impl From<&Checkpoint> for CheckpointDto {
             })
             .collect::<Vec<_>>();
         partner_fee_bps.sort_by(|left, right| left.asset.cmp(&right.asset));
+        let mut explicit_lane_assets = checkpoint
+            .explicit_lane_assets
+            .iter()
+            .copied()
+            .map(address_hex)
+            .collect::<Vec<_>>();
+        explicit_lane_assets.sort();
         Self {
             schema_version: checkpoint.schema_version,
             math_compatibility_version: checkpoint.math_compatibility_version.clone(),
@@ -206,8 +221,12 @@ impl From<&Checkpoint> for CheckpointDto {
                 checkpoint.expected_implementation_code_hash,
             ),
             chain_id: checkpoint.chain_id,
+            network: checkpoint.network,
             core: address_hex(checkpoint.core),
             router: address_hex(checkpoint.router),
+            deployment_block: checkpoint.deployment_block,
+            expect_whitelisted: checkpoint.expect_whitelisted,
+            explicit_lane_assets,
             cursor: CursorDto::from(&checkpoint.cursor),
             state: StateDto {
                 cash: address_hex(checkpoint.state.cash),
@@ -231,50 +250,103 @@ impl TryFrom<CheckpointDto> for Checkpoint {
     type Error = CheckpointError;
 
     fn try_from(dto: CheckpointDto) -> Result<Self, Self::Error> {
-        let lanes = dto
-            .state
-            .lanes
-            .into_iter()
-            .map(|lane| {
-                Ok((
-                    parse_address(&lane.asset)?,
+        let CheckpointDto {
+            schema_version,
+            math_compatibility_version,
+            expected_implementation,
+            expected_implementation_code_hash,
+            chain_id,
+            network,
+            core,
+            router,
+            deployment_block,
+            expect_whitelisted,
+            explicit_lane_assets,
+            cursor,
+            state,
+        } = dto;
+        let StateDto {
+            cash,
+            cash_reserve,
+            lanes: lane_values,
+            fee_profile,
+        } = state;
+        let FeeProfileDto {
+            whitelisted,
+            blacklist_fee_multiplier,
+            partner_fee_bps: partner_fee_values,
+        } = fee_profile;
+
+        let mut lanes = HashMap::with_capacity(lane_values.len());
+        for lane in lane_values {
+            let asset = parse_address(&lane.asset)?;
+            if lanes
+                .insert(
+                    asset,
                     LaneState::new(
                         parse_u256(&lane.slot0)?,
                         lane.asset_reserve,
                         lane.total_principal_amount,
                     ),
-                ))
-            })
-            .collect::<Result<HashMap<_, _>, CheckpointError>>()?;
-        let partner_fee_bps = dto
-            .state
-            .fee_profile
-            .partner_fee_bps
-            .into_iter()
-            .map(|fee| Ok((parse_address(&fee.asset)?, fee.fee_bps)))
-            .collect::<Result<HashMap<_, _>, CheckpointError>>()?;
-        Ok(Checkpoint {
-            schema_version: dto.schema_version,
-            math_compatibility_version: dto.math_compatibility_version,
-            expected_implementation: parse_address(&dto.expected_implementation)?,
-            expected_implementation_code_hash: parse_hash(&dto.expected_implementation_code_hash)?,
-            chain_id: dto.chain_id,
-            core: parse_address(&dto.core)?,
-            router: parse_address(&dto.router)?,
-            cursor: dto.cursor.try_into()?,
+                )
+                .is_some()
+            {
+                return Err(CheckpointError::Invalid("duplicate lane asset".into()));
+            }
+        }
+
+        let mut partner_fee_bps = HashMap::with_capacity(partner_fee_values.len());
+        for fee in partner_fee_values {
+            let asset = parse_address(&fee.asset)?;
+            if partner_fee_bps.insert(asset, fee.fee_bps).is_some() {
+                return Err(CheckpointError::Invalid(
+                    "duplicate partner-fee asset".into(),
+                ));
+            }
+        }
+
+        let mut parsed_explicit_lanes = Vec::with_capacity(explicit_lane_assets.len());
+        let mut unique_explicit_lanes = HashSet::with_capacity(explicit_lane_assets.len());
+        for value in explicit_lane_assets {
+            let asset = parse_address(&value)?;
+            if !unique_explicit_lanes.insert(asset) {
+                return Err(CheckpointError::Invalid(
+                    "duplicate explicit lane asset".into(),
+                ));
+            }
+            parsed_explicit_lanes.push(asset);
+        }
+
+        let checkpoint = Checkpoint {
+            schema_version,
+            math_compatibility_version,
+            expected_implementation: parse_address(&expected_implementation)?,
+            expected_implementation_code_hash: parse_hash(&expected_implementation_code_hash)?,
+            chain_id,
+            network,
+            core: parse_address(&core)?,
+            router: parse_address(&router)?,
+            deployment_block,
+            expect_whitelisted,
+            explicit_lane_assets: parsed_explicit_lanes,
+            cursor: cursor.try_into()?,
             state: QuoteState {
-                cash: parse_address(&dto.state.cash)?,
-                cash_reserve: dto.state.cash_reserve,
+                cash: parse_address(&cash)?,
+                cash_reserve,
                 lanes,
                 fee_profile: FeeProfile {
-                    whitelisted: dto.state.fee_profile.whitelisted,
-                    blacklist_fee_multiplier: parse_u256(
-                        &dto.state.fee_profile.blacklist_fee_multiplier,
-                    )?,
+                    whitelisted,
+                    blacklist_fee_multiplier: parse_u256(&blacklist_fee_multiplier)?,
                     partner_fee_bps,
                 },
             },
-        })
+        };
+        if !checkpoint.has_valid_structure() {
+            return Err(CheckpointError::Invalid(
+                "checkpoint violates structural state invariants".into(),
+            ));
+        }
+        Ok(checkpoint)
     }
 }
 
@@ -342,11 +414,12 @@ fn hash_hex(value: B256) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::checkpoint::{CheckpointDto, RedisCheckpointStore};
+    use crate::checkpoint::{CheckpointDto, CheckpointError, RedisCheckpointStore};
     use lunarbase_client::model::{
         ChainCursor, Checkpoint, Commitment, DeploymentConfig, MATH_COMPATIBILITY_VERSION, Network,
         SCHEMA_VERSION,
     };
+    use lunarbase_math::slot0::set_lane_slot0_exists;
     use lunarbase_math::state::{LaneState, QuoteState};
     use lunarbase_math::types::{Address, B256, U256};
 
@@ -377,9 +450,10 @@ mod tests {
             cash_reserve: 16,
             ..QuoteState::default()
         };
-        state
-            .lanes
-            .insert(address(4), LaneState::new(U256::from(17), 18, 19));
+        state.lanes.insert(
+            address(4),
+            LaneState::new(set_lane_slot0_exists(U256::from(17), true), 18, 19),
+        );
         state.fee_profile.partner_fee_bps.insert(address(4), 21);
         Checkpoint {
             schema_version: SCHEMA_VERSION,
@@ -387,8 +461,12 @@ mod tests {
             expected_implementation: address(3),
             expected_implementation_code_hash: B256::new([3; 32]),
             chain_id: 8453,
+            network: Network::Base,
             core: address(1),
             router: address(2),
+            deployment_block: 10,
+            expect_whitelisted: true,
+            explicit_lane_assets: vec![address(4)],
             cursor: ChainCursor::execution_block(
                 8453,
                 100,
@@ -401,11 +479,11 @@ mod tests {
     }
 
     #[test]
-    fn key_is_bound_to_v4_chain_core_and_router() {
+    fn key_is_bound_to_current_schema_chain_core_and_router() {
         let store = RedisCheckpointStore::new("redis://localhost/", &deployment());
         assert_eq!(
             store.key,
-            format!("lunarbase:v4:8453:{}:{}", address(1), address(2))
+            format!("lunarbase:v5:8453:{}:{}", address(1), address(2))
         );
     }
 
@@ -418,5 +496,58 @@ mod tests {
         assert_eq!(actual, expected);
         let value: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert_eq!(value["schemaVersion"], SCHEMA_VERSION);
+        assert_eq!(value["network"], "Base");
+        assert_eq!(value["deploymentBlock"], 10);
+        assert_eq!(value["expectWhitelisted"], true);
+        assert!(actual.has_valid_structure());
+    }
+
+    #[test]
+    fn dto_rejects_duplicate_lane_and_partner_fee_assets() {
+        let original = CheckpointDto::from(&checkpoint());
+
+        let mut duplicate_lane = serde_json::to_value(&original).unwrap();
+        let lane = duplicate_lane["state"]["lanes"][0].clone();
+        duplicate_lane["state"]["lanes"]
+            .as_array_mut()
+            .unwrap()
+            .push(lane);
+        let dto: CheckpointDto = serde_json::from_value(duplicate_lane).unwrap();
+        assert!(matches!(
+            Checkpoint::try_from(dto),
+            Err(CheckpointError::Invalid(message)) if message.contains("duplicate lane")
+        ));
+
+        let mut duplicate_fee = serde_json::to_value(CheckpointDto::from(&checkpoint())).unwrap();
+        let fee = duplicate_fee["state"]["feeProfile"]["partnerFeeBps"][0].clone();
+        duplicate_fee["state"]["feeProfile"]["partnerFeeBps"]
+            .as_array_mut()
+            .unwrap()
+            .push(fee);
+        let dto: CheckpointDto = serde_json::from_value(duplicate_fee).unwrap();
+        assert!(matches!(
+            Checkpoint::try_from(dto),
+            Err(CheckpointError::Invalid(message)) if message.contains("duplicate partner-fee")
+        ));
+    }
+
+    #[test]
+    fn dto_rejects_state_that_violates_quote_invariants() {
+        let mut invalid_fee = serde_json::to_value(CheckpointDto::from(&checkpoint())).unwrap();
+        invalid_fee["state"]["feeProfile"]["partnerFeeBps"][0]["feeBps"] =
+            serde_json::json!(1_000_001);
+        let dto: CheckpointDto = serde_json::from_value(invalid_fee).unwrap();
+        assert!(matches!(
+            Checkpoint::try_from(dto),
+            Err(CheckpointError::Invalid(message)) if message.contains("structural")
+        ));
+
+        let mut inactive_lane = serde_json::to_value(CheckpointDto::from(&checkpoint())).unwrap();
+        inactive_lane["state"]["lanes"][0]["slot0"] = serde_json::json!("0");
+        let dto: CheckpointDto = serde_json::from_value(inactive_lane).unwrap();
+        assert!(matches!(
+            Checkpoint::try_from(dto),
+            Err(CheckpointError::Invalid(message)) if message.contains("structural")
+        ));
     }
 }

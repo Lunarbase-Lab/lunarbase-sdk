@@ -8,11 +8,16 @@ import {
   WAD,
   applyLaneUpdateSlot0,
   calculateFeeBpsForRouter,
+  ceilDiv,
+  checkedAdd,
+  checkedMul,
+  checkedSub,
   createLaneState,
   decimalNumberToBigInt,
   decodeLaneSlot0,
   encodeLaneSlot0,
   encodeUpdateFees,
+  ensureDenominator,
   fullMulDivDown,
   laneFeeBpsFromConventionalBps,
   lanePriceFromNumber,
@@ -49,7 +54,6 @@ interface GoldenExpected {
 interface GoldenVector {
   name: string;
   cash: string;
-  router: string;
   assetIn: string;
   assetOut: string;
   mode: "ExactIn" | "ExactOut";
@@ -122,6 +126,14 @@ test("slot0 round-trips boundaries and reserved bits", () => {
 test("full-width and checked-product multiplication differ", () => {
   assert.equal(fullMulDivDown(U256_MAX, 2n, 2n), U256_MAX);
   assert.throws(() => mulDivDown256(U256_MAX, 2n, 2n));
+});
+
+test("checked arithmetic rejects operands outside uint256", () => {
+  assert.throws(() => checkedAdd(-1n, 2n), /outside uint256/);
+  assert.throws(() => checkedSub(U256_MAX + 1n, U256_MAX), /outside uint256/);
+  assert.throws(() => checkedMul(-1n, 0n), /outside uint256/);
+  assert.throws(() => ceilDiv(-1n, 1n), /outside uint256/);
+  assert.throws(() => ensureDenominator(-1n), /outside uint256/);
 });
 
 test("zero multiplier and whitelist behavior are explicit", () => {
@@ -352,7 +364,9 @@ test("route preserves contract evaluation order before zero-price sentinel", () 
 test("shared golden vectors match TypeScript engine", () => {
   const fixture = JSON.parse(
     readFileSync(new URL("../../../fixtures/quote-vectors.json", import.meta.url), "utf8"),
-  ) as { vectors: GoldenVector[] };
+  ) as { schemaVersion: string; mathCompatibilityVersion: string; vectors: GoldenVector[] };
+  assert.equal(fixture.schemaVersion, "1");
+  assert.equal(fixture.mathCompatibilityVersion, "lunarbase-pmm-v2");
   for (const vector of fixture.vectors) {
     const cash = parseAddress(vector.cash);
     const assetIn = parseAddress(vector.assetIn);

@@ -23,6 +23,7 @@ export interface ReserveBudgetStatus {
 }
 
 const UINT256_MAX = (1n << 256n) - 1n;
+const EXACT_OUT_VERIFICATION_ATTEMPTS = 4;
 
 function samePair<T>(pair: DirectedPair<T>, assetIn: T, assetOut: T): boolean {
   return pair.assetIn === assetIn && pair.assetOut === assetOut;
@@ -30,6 +31,10 @@ function samePair<T>(pair: DirectedPair<T>, assetIn: T, assetOut: T): boolean {
 
 function requirePositiveUint256(value: bigint, label: string): void {
   if (value <= 0n || value > UINT256_MAX) throw new RangeError(`${label} must be a positive uint256`);
+}
+
+function requireUint256(value: bigint, label: string): void {
+  if (value < 0n || value > UINT256_MAX) throw new RangeError(`${label} must be a uint256`);
 }
 
 /**
@@ -92,6 +97,43 @@ export async function findSafeReturnAmount(
   for (let attempt = 0; attempt < 256 && amountIn > 0n; attempt += 1) {
     const quotedOutput = await quote(amountIn);
     if (quotedOutput < 0n || quotedOutput > UINT256_MAX) throw new RangeError("quote must return a uint256");
+    if (quotedOutput > 0n && (await allows(quotedOutput))) return { amountIn, quotedOutput };
+    amountIn >>= 1n;
+  }
+  return undefined;
+}
+
+/**
+ * Sizes a guarded return leg with a bounded number of quote calls. If the
+ * maximum input is unsafe, an exact-output quote targets the caller's output
+ * ceiling. Verification starts one input unit below the exact-output result to
+ * absorb rounding, then performs at most three additional halving probes.
+ */
+export async function findSafeReturnAmountWithExactOut(
+  maximumAmountIn: bigint,
+  maximumAllowedOutput: bigint,
+  quoteExactIn: (amountIn: bigint) => bigint | Promise<bigint>,
+  quoteExactOut: (amountOut: bigint) => bigint | Promise<bigint>,
+  allows: (quotedOutput: bigint) => boolean | Promise<boolean>,
+): Promise<SafeReturnAmount | undefined> {
+  requireUint256(maximumAmountIn, "maximumAmountIn");
+  requireUint256(maximumAllowedOutput, "maximumAllowedOutput");
+  if (maximumAmountIn === 0n) return undefined;
+
+  const maximumQuote = await quoteExactIn(maximumAmountIn);
+  requireUint256(maximumQuote, "quoteExactIn result");
+  if (maximumQuote > 0n && (await allows(maximumQuote)))
+    return { amountIn: maximumAmountIn, quotedOutput: maximumQuote };
+  if (maximumAllowedOutput === 0n) return undefined;
+
+  const exactOutputAmountIn = await quoteExactOut(maximumAllowedOutput);
+  requireUint256(exactOutputAmountIn, "quoteExactOut result");
+  if (exactOutputAmountIn === 0n || exactOutputAmountIn > maximumAmountIn) return undefined;
+
+  let amountIn = exactOutputAmountIn > 1n ? exactOutputAmountIn - 1n : exactOutputAmountIn;
+  for (let attempt = 0; attempt < EXACT_OUT_VERIFICATION_ATTEMPTS && amountIn > 0n; attempt += 1) {
+    const quotedOutput = await quoteExactIn(amountIn);
+    requireUint256(quotedOutput, "quoteExactIn result");
     if (quotedOutput > 0n && (await allows(quotedOutput))) return { amountIn, quotedOutput };
     amountIn >>= 1n;
   }

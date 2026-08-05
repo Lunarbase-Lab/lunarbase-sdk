@@ -9,6 +9,8 @@ pub mod core {
     use alloy_sol_types::sol;
 
     sol! {
+        #![sol(all_derives)]
+
         function cash() external view returns (address cashAddress);
         function lane(address asset)
             external
@@ -59,6 +61,87 @@ pub mod core {
             address indexed asset,
             uint128 principalAmount
         );
+        event DepositRequestCancelled(
+            uint256 indexed id,
+            address indexed lpAuthority,
+            address indexed asset,
+            uint128 principalAmount,
+            address caller
+        );
+        event DepositRequested(
+            uint256 indexed id,
+            address indexed lpAuthority,
+            address indexed asset,
+            uint128 principalAmount,
+            uint40 depositDeadline
+        );
+        event LpAuthorityAssetPositionsUpdated(
+            address indexed asset,
+            address indexed previousLpAuthority,
+            address indexed lpAuthority,
+            uint256 positionCount
+        );
+        event OwnershipHandoverCanceled(address indexed pendingOwner);
+        event OwnershipHandoverRequested(address indexed pendingOwner);
+        event OwnershipTransferred(address indexed oldOwner, address indexed newOwner);
+        event PartnerFeeTaken(address indexed router, address indexed asset, uint256 amount);
+        event PartnerFeesWithdrawn(
+            address indexed router,
+            address indexed asset,
+            address indexed operator,
+            address recipient,
+            uint128 amount
+        );
+        event PartnerOperatorSet(
+            address indexed router,
+            address indexed asset,
+            address indexed operator
+        );
+        event PausedSet(bool previousPaused, bool newPaused);
+        event PositionConfigCreated(
+            uint256 indexed id,
+            address indexed lpAuthority,
+            address feeReceiver,
+            address feeClaimer,
+            uint48 yieldRateBps,
+            uint48 penaltyRateBps,
+            uint40 lockDuration
+        );
+        event PositionConfigUpdated(
+            uint256 indexed id,
+            address indexed lpAuthority,
+            address feeReceiver,
+            address feeClaimer,
+            uint48 yieldRateBps,
+            uint48 penaltyRateBps,
+            uint40 lockDuration
+        );
+        event PositionFeeAddressesUpdated(
+            uint256 indexed id,
+            address indexed lpAuthority,
+            address previousFeeReceiver,
+            address feeReceiver,
+            address previousFeeClaimer,
+            address feeClaimer
+        );
+        event PositionLpAuthorityUpdated(
+            uint256 indexed id,
+            address indexed previousLpAuthority,
+            address indexed lpAuthority
+        );
+        event SwapExecuted(
+            address indexed router,
+            address indexed assetIn,
+            address indexed assetOut,
+            bool exactIn,
+            uint256 amountIn,
+            uint256 amountOut,
+            address feeAsset,
+            uint256 feeAmount,
+            uint256 partnerFee,
+            uint256 treasuryFee
+        );
+        event WithdrawCooldownSet(uint32 cooldown);
         event WithdrawalExecuted(
             uint256 indexed id,
             address indexed lpAuthority,
@@ -68,9 +151,36 @@ pub mod core {
             uint256 penaltyAmount,
             address principalReceiver
         );
+        event WithdrawalRequestCancelled(
+            uint256 indexed id,
+            address indexed lpAuthority,
+            address caller
+        );
+        event WithdrawalRequested(
+            uint256 indexed id,
+            address indexed lpAuthority,
+            address indexed principalReceiver,
+            uint40 withdrawalDeadline
+        );
+        event YieldClaimCooldownSet(uint40 previousCooldown, uint40 newCooldown);
+        event YieldClaimed(
+            uint256 indexed id,
+            address indexed feeReceiver,
+            address indexed asset,
+            uint256 claimAmount
+        );
         event Sync(address indexed lane, uint128 assetReserve, uint128 cashReserve);
         event Upgraded(address indexed implementation);
     }
+}
+
+/// Human-readable rendering of one event from the pinned CoreUUPS ABI.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoreEventDescription {
+    /// Solidity event name.
+    pub name: &'static str,
+    /// Strictly decoded generated-ABI representation of all event arguments.
+    pub arguments: String,
 }
 
 /// Event signature used to discover newly configured lanes.
@@ -117,6 +227,98 @@ pub fn quote_critical_topics() -> [B256; 15] {
     ]
 }
 
+/// Decodes Core events for structured observability.
+///
+/// Unknown topics return `Ok(None)`; malformed known events return an error.
+pub fn describe_core_event(
+    log: &ContractLog,
+) -> Result<Option<CoreEventDescription>, LogDecodeError> {
+    let topic0 = *log.topics.first().ok_or(LogDecodeError::MissingTopic0)?;
+    macro_rules! describe {
+        ($event:ident, $topics:expr, $data_words:expr) => {{
+            expect_shape(log, $topics, $data_words)?;
+            let event = decode::<core::$event>(log, LogDecodeError::InvalidDataLength)?;
+            return Ok(Some(CoreEventDescription {
+                name: stringify!($event),
+                arguments: format!("{event:?}"),
+            }));
+        }};
+    }
+
+    if topic0 == core::BlacklistFeeMultiplierSet::SIGNATURE_HASH {
+        describe!(BlacklistFeeMultiplierSet, 1, 1);
+    } else if topic0 == core::BlockDelaySet::SIGNATURE_HASH {
+        describe!(BlockDelaySet, 2, 2);
+    } else if topic0 == core::DepositExecuted::SIGNATURE_HASH {
+        describe!(DepositExecuted, 4, 1);
+    } else if topic0 == core::DepositRequestCancelled::SIGNATURE_HASH {
+        describe!(DepositRequestCancelled, 4, 2);
+    } else if topic0 == core::DepositRequested::SIGNATURE_HASH {
+        describe!(DepositRequested, 4, 2);
+    } else if topic0 == core::LaneAdded::SIGNATURE_HASH {
+        describe!(LaneAdded, 2, 0);
+    } else if topic0 == core::LanePausedSet::SIGNATURE_HASH {
+        describe!(LanePausedSet, 2, 2);
+    } else if topic0 == core::LaneRemoved::SIGNATURE_HASH {
+        describe!(LaneRemoved, 2, 0);
+    } else if topic0 == core::LaneUpdated::SIGNATURE_HASH {
+        describe!(LaneUpdated, 2, 1);
+    } else if topic0 == core::LpAuthorityAssetPositionsUpdated::SIGNATURE_HASH {
+        describe!(LpAuthorityAssetPositionsUpdated, 4, 1);
+    } else if topic0 == core::OwnershipHandoverCanceled::SIGNATURE_HASH {
+        describe!(OwnershipHandoverCanceled, 2, 0);
+    } else if topic0 == core::OwnershipHandoverRequested::SIGNATURE_HASH {
+        describe!(OwnershipHandoverRequested, 2, 0);
+    } else if topic0 == core::OwnershipTransferred::SIGNATURE_HASH {
+        describe!(OwnershipTransferred, 3, 0);
+    } else if topic0 == core::PartnerFeeSet::SIGNATURE_HASH {
+        describe!(PartnerFeeSet, 3, 1);
+    } else if topic0 == core::PartnerFeeTaken::SIGNATURE_HASH {
+        describe!(PartnerFeeTaken, 3, 1);
+    } else if topic0 == core::PartnerFeesWithdrawn::SIGNATURE_HASH {
+        describe!(PartnerFeesWithdrawn, 4, 2);
+    } else if topic0 == core::PartnerInfoSet::SIGNATURE_HASH {
+        describe!(PartnerInfoSet, 4, 1);
+    } else if topic0 == core::PartnerOperatorSet::SIGNATURE_HASH {
+        describe!(PartnerOperatorSet, 4, 0);
+    } else if topic0 == core::PausedSet::SIGNATURE_HASH {
+        describe!(PausedSet, 1, 2);
+    } else if topic0 == core::PositionConfigCreated::SIGNATURE_HASH {
+        describe!(PositionConfigCreated, 3, 5);
+    } else if topic0 == core::PositionConfigUpdated::SIGNATURE_HASH {
+        describe!(PositionConfigUpdated, 3, 5);
+    } else if topic0 == core::PositionFeeAddressesUpdated::SIGNATURE_HASH {
+        describe!(PositionFeeAddressesUpdated, 3, 4);
+    } else if topic0 == core::PositionLpAuthorityUpdated::SIGNATURE_HASH {
+        describe!(PositionLpAuthorityUpdated, 4, 0);
+    } else if topic0 == core::PricePushThresholdSet::SIGNATURE_HASH {
+        describe!(PricePushThresholdSet, 2, 4);
+    } else if topic0 == core::SlippageKSet::SIGNATURE_HASH {
+        describe!(SlippageKSet, 2, 2);
+    } else if topic0 == core::SwapExecuted::SIGNATURE_HASH {
+        describe!(SwapExecuted, 4, 7);
+    } else if topic0 == core::Sync::SIGNATURE_HASH {
+        describe!(Sync, 2, 2);
+    } else if topic0 == core::Upgraded::SIGNATURE_HASH {
+        describe!(Upgraded, 2, 0);
+    } else if topic0 == core::WhitelistSet::SIGNATURE_HASH {
+        describe!(WhitelistSet, 2, 1);
+    } else if topic0 == core::WithdrawCooldownSet::SIGNATURE_HASH {
+        describe!(WithdrawCooldownSet, 1, 1);
+    } else if topic0 == core::WithdrawalExecuted::SIGNATURE_HASH {
+        describe!(WithdrawalExecuted, 4, 4);
+    } else if topic0 == core::WithdrawalRequestCancelled::SIGNATURE_HASH {
+        describe!(WithdrawalRequestCancelled, 3, 1);
+    } else if topic0 == core::WithdrawalRequested::SIGNATURE_HASH {
+        describe!(WithdrawalRequested, 4, 1);
+    } else if topic0 == core::YieldClaimCooldownSet::SIGNATURE_HASH {
+        describe!(YieldClaimCooldownSet, 1, 2);
+    } else if topic0 == core::YieldClaimed::SIGNATURE_HASH {
+        describe!(YieldClaimed, 4, 1);
+    }
+    Ok(None)
+}
+
 fn expect_shape(log: &ContractLog, topics: usize, data_words: usize) -> Result<(), LogDecodeError> {
     if log.topics.len() != topics {
         return Err(LogDecodeError::InvalidTopicCount);
@@ -136,7 +338,9 @@ fn decode<E: SolEvent>(log: &ContractLog, error: LogDecodeError) -> Result<E, Lo
 /// Unknown events return `Ok(None)`. Known events require exact topic and data
 /// arity before Alloy validates indexed addresses, booleans, and integer widths.
 pub fn decode_core_event(log: &ContractLog) -> Result<Option<QuoteEvent>, LogDecodeError> {
-    let topic0 = *log.topics.first().ok_or(LogDecodeError::MissingTopic0)?;
+    let Some(&topic0) = log.topics.first() else {
+        return Err(LogDecodeError::MissingTopic0);
+    };
     let event = if topic0 == TOPIC_LANE_ADDED {
         expect_shape(log, 2, 0)?;
         let event = decode::<core::LaneAdded>(log, LogDecodeError::InvalidAddress)?;
@@ -247,11 +451,13 @@ pub fn decode_core_event(log: &ContractLog) -> Result<Option<QuoteEvent>, LogDec
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{ChainCursor, Commitment, ContractLog, QuoteEvent};
+    use crate::model::{ChainCursor, Commitment, ContractLog, LogDecodeError, QuoteEvent};
     use crate::protocol::abi::{
         TOPIC_DEPOSIT_EXECUTED, TOPIC_LANE_ADDED, TOPIC_LANE_PAUSED_SET,
-        TOPIC_PRICE_PUSH_THRESHOLD_SET, TOPIC_WITHDRAWAL_EXECUTED, decode_core_event,
+        TOPIC_PRICE_PUSH_THRESHOLD_SET, TOPIC_WITHDRAWAL_EXECUTED, core, decode_core_event,
+        describe_core_event,
     };
+    use alloy_sol_types::SolEvent;
     use lunarbase_math::types::{Address, B256, U256};
 
     #[test]
@@ -320,6 +526,7 @@ mod tests {
         data[31] = 7;
         let log = ContractLog {
             address: Address::new([0x22; 20]),
+            transaction_hash: None,
             topics: vec![
                 TOPIC_WITHDRAWAL_EXECUTED,
                 B256::from(U256::ONE.to_be_bytes::<32>()),
@@ -350,6 +557,78 @@ mod tests {
         );
     }
 
+    #[test]
+    fn swap_executed_is_described_without_becoming_a_quote_event() {
+        let router = Address::new([0x10; 20]);
+        let asset_in = Address::new([0x11; 20]);
+        let asset_out = Address::new([0x12; 20]);
+        let fee_asset = Address::new([0x13; 20]);
+        let event = core::SwapExecuted {
+            router,
+            assetIn: asset_in,
+            assetOut: asset_out,
+            exactIn: true,
+            amountIn: U256::from(17),
+            amountOut: U256::from(13),
+            feeAsset: fee_asset,
+            feeAmount: U256::from(3),
+            partnerFee: U256::from(2),
+            treasuryFee: U256::ONE,
+        };
+        let encoded = event.encode_log_data();
+        let log = ContractLog {
+            address: Address::new([0x22; 20]),
+            transaction_hash: Some(B256::new([0x44; 32])),
+            topics: encoded.topics().to_vec(),
+            data: encoded.data.clone(),
+            removed: false,
+            cursor: ChainCursor {
+                chain_id: 97,
+                block_number: 42,
+                execution_block_number: 42,
+                block_hash: Some(B256::new([0x33; 32])),
+                transaction_index: Some(2),
+                log_index: Some(3),
+                source_sequence: Some(4),
+                source_sub_index: None,
+                commitment: Commitment::Realtime,
+            },
+        };
+
+        let description = describe_core_event(&log).unwrap().unwrap();
+        assert_eq!(description.name, "SwapExecuted");
+        assert!(description.arguments.contains("amountIn: 17"));
+        assert_eq!(decode_core_event(&log).unwrap(), None);
+
+        let mut trailing_data = log.clone();
+        let mut data = trailing_data.data.to_vec();
+        data.extend_from_slice(&[0_u8; 32]);
+        trailing_data.data = data.into();
+        assert_eq!(
+            describe_core_event(&trailing_data),
+            Err(LogDecodeError::InvalidDataLength)
+        );
+
+        let mut extra_topic = log;
+        extra_topic.topics.push(B256::ZERO);
+        assert_eq!(
+            describe_core_event(&extra_topic),
+            Err(LogDecodeError::InvalidTopicCount)
+        );
+    }
+
+    #[test]
+    fn topicless_log_is_rejected_by_the_quote_decoder() {
+        let mut log = lane_log(TOPIC_LANE_ADDED, Address::new([0x11; 20]), &[]);
+        log.topics.clear();
+
+        assert_eq!(decode_core_event(&log), Err(LogDecodeError::MissingTopic0));
+        assert_eq!(
+            describe_core_event(&log),
+            Err(LogDecodeError::MissingTopic0)
+        );
+    }
+
     fn lane_log(topic0: B256, asset: Address, words: &[U256]) -> ContractLog {
         let mut data = Vec::with_capacity(words.len() * 32);
         for word in words {
@@ -357,6 +636,7 @@ mod tests {
         }
         ContractLog {
             address: Address::new([0x22; 20]),
+            transaction_hash: None,
             topics: vec![topic0, B256::left_padding_from(asset.as_slice())],
             data: data.into(),
             removed: false,

@@ -1,4 +1,4 @@
-import type { Address, QuoteRequest } from "@lunarbase/math";
+import type { Address, QuoteRequest } from "@lunarbase-lab/pmm-v2-math";
 
 /**
  * Builds an exact-input request in each direction for every active lane.

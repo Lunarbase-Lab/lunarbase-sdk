@@ -1,12 +1,13 @@
-# `lunarbase-indexer`
+# lunarbase-indexer
 
-Runnable Rust HTTP service built from the embeddable LunarBase clients.
+Runnable Rust quote service built from the LunarBase realtime client.
 
-## Run Base
+## Run
 
-Set deployment identity and source endpoints through `LUNARBASE_*`:
+Provide deployment identity and endpoints through LUNARBASE_* variables, CLI
+flags, or an operator-owned TOML file:
 
-```bash
+```sh
 LUNARBASE_NETWORK=base \
 LUNARBASE_CHAIN_ID=8453 \
 LUNARBASE_CORE=0x... \
@@ -18,44 +19,34 @@ LUNARBASE_REALTIME_URL=wss://... \
 make run
 ```
 
-Every value also has a kebab-case CLI flag. An optional TOML is a lower
-precedence base layer:
+CLI values override environment values, which override TOML and operational
+defaults. Deployment identity and source endpoints are always explicit.
 
-```bash
-cargo run -p lunarbase-indexer \
-  --no-default-features --features base \
-  -- --config /absolute/path/to/deployment.toml \
-     --http-rpc-url https://override.example
-```
-
-Precedence is CLI, then environment, then TOML, then safe operational defaults.
-Repository profiles under `examples/indexer/config` are examples only.
-
-Base is the default feature. Experimental builds use `monad`, `monad-native`,
-or `arbitrum`.
+Base is the default feature. Select evm, monad, monad-native, or arbitrum with
+--no-default-features and --features.
 
 ## API
 
-- `POST /v1/quote` calculates one quote.
-- `POST /v1/quotes` calculates at most 256 quotes on one state snapshot.
-- `GET /healthz` reports process liveness.
-- `GET /readyz` reports quote readiness and the current cursor.
-- `GET /metrics` exposes Prometheus metrics.
+- POST /v1/quote calculates one quote.
+- POST /v1/quotes calculates up to 256 quotes at one state position.
+- GET /healthz reports process liveness.
+- GET /readyz reports quote readiness and the current cursor.
+- GET /metrics exposes Prometheus metrics.
 
-The configured router, execution block, commitment, and freshness policy are
-runtime-owned and cannot be overridden by an HTTP caller. Gap, reorg, removed
-log, queue overflow, incompatible implementation, or reducer failure revokes
-readiness until canonical recovery completes.
+Deployment identity, router policy, execution context, and freshness policy
+cannot be overridden by HTTP requests. When source continuity or deployment
+identity is uncertain, readiness is revoked until canonical recovery succeeds.
 
-## Redis
+## Checkpoints
 
-Redis is optional restart acceleration. One versioned checkpoint is stored per
-chain, Core, router, and schema, without TTL. Redis is never used on the quote
-path, and an unavailable Redis instance does not revoke readiness after the
-service has started.
+Redis is optional restart acceleration and is not used during quote
+calculation. Protect Redis with network controls and authentication. Missing,
+malformed, incompatible, or non-canonical checkpoint data is ignored in favor
+of a canonical snapshot.
 
 ## Operations
 
-Every replica independently indexes and serves quotes; no writer lease or
-leader election is used. See the repository `PRODUCTION_RUNBOOK.md` for
-Docker, graceful shutdown, alerts, recovery, and deployment checks.
+Each replica indexes independently. Run multiple replicas behind a load
+balancer and route traffic only to ready instances. See the
+[production runbook](../../docs/PRODUCTION_RUNBOOK.md) for deployment,
+monitoring, recovery, capacity validation, and graceful shutdown.

@@ -19,14 +19,30 @@ pub struct QuoteIndexer {
     pub reducer: QuoteReducer,
     /// Immutable deployment identity used for compatibility and router checks.
     deployment: DeploymentConfig,
+    /// Last canonical snapshot/backfill cursor whose state already includes
+    /// every quote-critical log through that block.
+    canonical_floor: Option<ChainCursor>,
 }
 
 impl QuoteIndexer {
+    pub(crate) fn canonical_floor_covers_core_log(
+        &self,
+        log: &ContractLog,
+    ) -> Result<bool, IndexerError> {
+        if log.removed {
+            return Ok(false);
+        }
+        self.canonical_floor.as_ref().map_or(Ok(false), |floor| {
+            canonical_floor_covers_log(&log.cursor, floor)
+        })
+    }
+
     /// Creates a not-ready indexer around an empty or preloaded state.
     pub fn new(state: QuoteState, deployment: DeploymentConfig) -> Self {
         Self {
             reducer: QuoteReducer::new(state, deployment.router),
             deployment,
+            canonical_floor: None,
         }
     }
 
@@ -38,9 +54,11 @@ impl QuoteIndexer {
         if !checkpoint.is_compatible(&deployment) {
             return Err(IndexerError::CodeHashMismatch);
         }
+        let canonical_floor = checkpoint.cursor.clone();
         Ok(Self {
             reducer: QuoteReducer::from_checkpoint(checkpoint),
             deployment,
+            canonical_floor: Some(canonical_floor),
         })
     }
 
@@ -50,6 +68,9 @@ impl QuoteIndexer {
         snapshot: BootstrapSnapshot,
         mut buffered: Vec<ChainUpdate>,
     ) -> Result<(), IndexerError> {
+        if snapshot.cursor.chain_id != self.deployment.chain_id {
+            return Err(ReducerError::ChainIdMismatch.into());
+        }
         if snapshot.implementation != self.deployment.expected_implementation
             || snapshot.implementation_code_hash
                 != self.deployment.expected_implementation_code_hash
@@ -61,6 +82,7 @@ impl QuoteIndexer {
         buffered.sort_by_key(update_order);
         self.reducer = QuoteReducer::new(snapshot.state, self.deployment.router);
         self.reducer.bootstrap(snapshot.cursor);
+        self.canonical_floor = Some(snapshot_cursor.clone());
         for update in buffered {
             let cursor = update_cursor(&update);
             if let Some(cursor) = cursor {
@@ -152,11 +174,26 @@ impl QuoteIndexer {
 
     /// Applies one update through the pinned Core ABI decoder.
     pub fn apply_core_update(&mut self, update: ChainUpdate) -> Result<(), IndexerError> {
+        if matches!(&update, ChainUpdate::Log(log) if log.removed) {
+            return self.apply_update(update, &|_| None);
+        }
         if let ChainUpdate::Log(log) = &update {
+            if let Some(floor) = self.canonical_floor.as_ref()
+                && canonical_floor_covers_log(&log.cursor, floor)?
+            {
+                return Ok(());
+            }
             let event = decode_core_event(log)?;
             return self.apply_update(update, &|_| event.clone());
         }
         self.apply_update(update, &|_| None)
+    }
+
+    /// Records a completed canonical recovery range. Realtime logs at or
+    /// below this cursor may still be released by a source-local reorder
+    /// buffer and are already represented by the installed state.
+    pub(crate) fn set_canonical_floor(&mut self, cursor: ChainCursor) {
+        self.canonical_floor = Some(cursor);
     }
 
     /// Returns the ready state by reference without cloning it.
@@ -244,6 +281,9 @@ impl QuoteIndexer {
 }
 
 fn snapshot_covers(update: &ChainCursor, snapshot: &ChainCursor) -> Result<bool, IndexerError> {
+    if update.chain_id != snapshot.chain_id {
+        return Err(ReducerError::ChainIdMismatch.into());
+    }
     if update.block_number < snapshot.block_number {
         return Ok(true);
     }
@@ -255,6 +295,32 @@ fn snapshot_covers(update: &ChainCursor, snapshot: &ChainCursor) -> Result<bool,
         (Some(_), Some(_)) => Ok(false),
         _ => Err(IndexerError::Gap(
             "same-block handoff has no hash identity; canonical recovery required".into(),
+        )),
+    }
+}
+
+fn canonical_floor_covers_log(
+    update: &ChainCursor,
+    floor: &ChainCursor,
+) -> Result<bool, IndexerError> {
+    if update.chain_id != floor.chain_id {
+        return Err(ReducerError::ChainIdMismatch.into());
+    }
+    if update.block_number < floor.block_number {
+        return Ok(true);
+    }
+    if update.block_number > floor.block_number {
+        return Ok(false);
+    }
+    match (update.block_hash, floor.block_hash) {
+        (Some(update_hash), Some(floor_hash)) if update_hash == floor_hash => {
+            let floor_is_block_complete =
+                floor.transaction_index.is_none() && floor.log_index.is_none();
+            Ok(floor_is_block_complete || update.event_order() <= floor.event_order())
+        }
+        (Some(_), Some(_)) => Err(ReducerError::BlockHashMismatch.into()),
+        _ => Err(IndexerError::Gap(
+            "same-block realtime log has no canonical hash identity".into(),
         )),
     }
 }
@@ -278,4 +344,63 @@ fn update_order(update: &ChainUpdate) -> (u64, u32, u32, u64, u32, u8) {
         ChainUpdate::Gap { .. } => 3,
     };
     (order.0, order.1, order.2, order.3, order.4, rank)
+}
+
+pub(crate) fn sort_chain_updates(updates: &mut [ChainUpdate]) {
+    updates.sort_by_key(update_order);
+}
+
+#[cfg(test)]
+mod canonical_floor_tests {
+    use super::{canonical_floor_covers_log, snapshot_covers};
+    use crate::model::{ChainCursor, Commitment};
+    use lunarbase_math::types::B256;
+
+    #[test]
+    fn handoff_never_covers_an_update_from_another_chain() {
+        let snapshot = cursor_at(B256::new([1; 32]), 2, 3);
+        let mut foreign = cursor_at(B256::new([1; 32]), 2, 2);
+        foreign.chain_id = 1;
+        foreign.block_number -= 1;
+
+        assert!(matches!(
+            snapshot_covers(&foreign, &snapshot),
+            Err(crate::indexer::errors::IndexerError::Reducer(
+                crate::state::reducer::ReducerError::ChainIdMismatch
+            ))
+        ));
+    }
+
+    #[test]
+    fn event_level_checkpoint_covers_only_events_through_its_cursor() {
+        let floor = cursor_at(B256::new([1; 32]), 2, 3);
+        let covered = cursor_at(B256::new([1; 32]), 2, 2);
+        let later = cursor_at(B256::new([1; 32]), 2, 4);
+
+        assert!(canonical_floor_covers_log(&covered, &floor).unwrap());
+        assert!(!canonical_floor_covers_log(&later, &floor).unwrap());
+    }
+
+    fn cursor(block_hash: B256, source_sequence: Option<u64>) -> ChainCursor {
+        ChainCursor {
+            chain_id: 8453,
+            block_number: 100,
+            execution_block_number: 100,
+            block_hash: Some(block_hash),
+            transaction_index: Some(2),
+            log_index: Some(3),
+            source_sequence,
+            source_sub_index: None,
+            commitment: Commitment::Realtime,
+        }
+    }
+
+    fn cursor_at(block_hash: B256, transaction_index: u32, log_index: u32) -> ChainCursor {
+        ChainCursor {
+            transaction_index: Some(transaction_index),
+            log_index: Some(log_index),
+            commitment: Commitment::Canonical,
+            ..cursor(block_hash, None)
+        }
+    }
 }

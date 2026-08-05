@@ -36,6 +36,7 @@ endpoints are always explicit.
 The adjacent [`prometheus-alerts.yml`](prometheus-alerts.yml) is an example for
 external monitoring and is not loaded by the indexer.
 
-[`docker-compose.yml`](docker-compose.yml) is likewise an example topology.
-Its build context points at the SDK root, while its mounted TOML remains inside
-this example directory.
+For the Compose topology, copy [`.env.example`](.env.example) to `.env`,
+fill its required deployment values, and pass it with `--env-file`. The mounted
+TOML supplies Base runtime defaults; the environment supplies deployment
+identity and source endpoints.

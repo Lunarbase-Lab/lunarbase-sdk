@@ -26,7 +26,7 @@ use tokio::task::JoinHandle;
 #[derive(Clone, Debug, Parser)]
 #[command(name = "lunarbase-e2e")]
 pub struct E2eArguments {
-    /// Previously built lunarbase-indexer executable.
+    /// Path to the built `lunarbase-indexer` executable.
     #[arg(long, default_value = "target/debug/lunarbase-indexer")]
     pub indexer_bin: PathBuf,
     /// Existing Redis URL. When omitted, a temporary redis-server is started.

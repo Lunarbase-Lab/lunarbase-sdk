@@ -1,5 +1,5 @@
-/** Experimental portable Monad execution-events source. */
-import { JsonRpcHttpClient, type WebSocketFactory } from "@lunarbase/source-evm";
+/** Portable Monad execution-events source. */
+import { JsonRpcHttpClient, type WebSocketFactory } from "@lunarbase-lab/pmm-v2-source-evm";
 import { MonadParserSource, type MonadParserConfig } from "./transport.js";
 
 export * from "./execution.js";

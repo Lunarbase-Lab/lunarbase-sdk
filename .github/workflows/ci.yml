@@ -5,20 +5,21 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   rust:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all -- --check
-      - run: cargo check --workspace --all-targets
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
-      - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+      - run: make ci-rust
 
   network-features:
     runs-on: ubuntu-24.04
@@ -28,25 +29,30 @@ jobs:
         network: [base, monad, arbitrum]
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check -p lunarbase-indexer --no-default-features --features "${{ matrix.network }}" --all-targets
+      - run: make check-network-feature NETWORK="${{ matrix.network }}"
 
   monad-native:
     runs-on: ubuntu-24.04
     container: rust:1.97.1-trixie
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - run: apt-get update && apt-get install -y clang cmake libhugetlbfs-dev
       - run: rustup component add clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check -p lunarbase-indexer --no-default-features --features monad-native --all-targets
-      - run: cargo clippy -p lunarbase-indexer --no-default-features --features monad-native --all-targets -- -D warnings
+      - run: make check-monad-native
 
   typescript:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@v6
         with:
           version: 9.15.0
@@ -55,26 +61,36 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm build
-      - run: pnpm lint
-      - run: pnpm format:check
-      - run: pnpm test
+      - run: make ci-ts
 
-  process-e2e:
-    runs-on: ubuntu-latest
+  docker-base:
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - run: make docker-image-check
+
+  process-e2e:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y redis-server
-      - run: cargo build -p lunarbase-indexer -p lunarbase-tools
-      - run: cargo run -p lunarbase-tools --bin lunarbase-e2e -- --indexer-bin target/debug/lunarbase-indexer
+      - run: make test-process-e2e
 
   supply-chain:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
-      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          rust-version: "1.97.1"
       - uses: pnpm/action-setup@v6
         with:
           version: 9.15.0
@@ -83,4 +99,38 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm audit --prod --audit-level high
+      - run: make audit-ts
+
+  release-packages:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: make release-check
+
+  automation-policy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+      - run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      - run: make check-scripts release-version-check source-size-check repository-check

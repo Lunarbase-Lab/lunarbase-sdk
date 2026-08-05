@@ -1,5 +1,5 @@
 /** ERC-1967 proxy constants and strict storage decoding. */
-import type { Address } from "@lunarbase/math";
+import type { Address } from "@lunarbase-lab/pmm-v2-math";
 import * as Hex from "ox/Hex";
 
 /** `bytes32(uint256(keccak256("eip1967.proxy.implementation")) - 1)`. */

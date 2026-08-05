@@ -1,201 +1,81 @@
 # LunarBase SDK architecture
 
-## System boundary
+## Components
 
-The repository has three layers:
+The SDK is divided into four public capabilities:
 
-```text
-pure math
-  └─ no async, RPC, persistence, or network semantics
+1. Quote math evaluates exact-input and exact-output requests without network
+   access.
+2. Realtime clients maintain a coherent quote state and expose synchronous
+   quote operations.
+3. Network sources provide snapshots, ordered updates, recovery data, and
+   canonicality checks.
+4. lunarbase-indexer packages the client as an HTTP service with health,
+   readiness, and metrics endpoints.
 
-embeddable clients
-  ├─ one common ordered reducer/runtime
-  ├─ generic EVM HTTP/WS source
-  └─ network-specific sources only where stream semantics differ
+Rust and TypeScript implement the same compatibility profile and share the
+same deterministic quote vectors.
 
-lunarbase-indexer
-  └─ HTTP + metrics + optional Redis restart checkpoint
-```
-
-The Rust and TypeScript math libraries mirror the pinned Solidity behavior.
-The common client libraries own state transitions but not persistence. The
-indexer is the only ready-to-run service.
-
-## Repository layout
+## Data flow
 
 ```text
-crates/
-  lunarbase-math/
-  lunarbase-client/
-  lunarbase-source-evm/
-  lunarbase-source-monad/
-  lunarbase-source-arbitrum/
-  lunarbase-indexer/
-  lunarbase-tools/
-
-packages/
-  math/
-  client/
-  source-evm/
-  source-monad/
-  source-arbitrum/
-
-fixtures/
-  quote-vectors.json
-
-examples/
-  indexer/
-    config/
-      base.toml
-      monad.toml
-      arbitrum.toml
-    docker-compose.yml
-    prometheus-alerts.yml
+canonical snapshot ----+
+                       v
+realtime updates -> ordered state -> quote / quoteMany
+                         |
+                         +-> checkpoint
 ```
 
-There are no per-network client wrappers or all-network facade packages.
-Applications always use the one common client and inject a concrete source.
-This prevents a Base-only integration from pulling Monad or Arbitrum
-dependencies while keeping lifecycle and reducer behavior identical.
-Indexer deployment values are supplied externally through CLI flags,
-environment variables, or an operator-owned file. Checked-in profiles exist
-only as examples and test fixtures.
+A realtime subscription is established before snapshot publication. Updates
+observed during bootstrap are buffered and applied in order before readiness
+is enabled. Every quote includes the cursor, execution block, implementation
+code hash, and math compatibility profile used for evaluation.
 
-## Data path
+quoteMany accepts at most 256 requests and evaluates the batch against one
+state position.
 
-```text
-RPC snapshot ─────────────┐
-                         v
-realtime source → normalize → bounded queue → ordered reducer → hot state
-                                                                  │
-                                                       quote / quoteMany
-                                                                  │
-                                                      cursor-bound result
-```
+## Consistency and recovery
 
-Subscription begins before the initial snapshot. Updates received while RPC is
-building the snapshot remain in the bounded handoff queue and are replayed in
-cursor order. This closes the snapshot/subscription race.
+The client rejects cross-chain updates, cursor regressions, conflicting block
+hashes, removed logs, gaps, incompatible implementations, malformed events,
+and invalid state transitions.
 
-The source exposes one contract:
-
-- `snapshot(deployment)`
-- `backfill(range)`
-- `subscribe(filter)`
-- `canonical_head()`
-- `validate_checkpoint(checkpoint)`
-
-Deployment identity passed to the common client contains no RPC or WebSocket
-URLs. Endpoints and transport resource limits belong to the selected source;
-the runnable indexer owns their service-level configuration.
-
-Normalized updates are only `Head`, `Log`, `Reorg`, and `Gap`.
-`sourceSequence` orders source messages; `executionBlockNumber` independently
-records the EVM-visible block used by quote validity.
-
-## State and quote path
-
-Each lane is one compact object:
-
-```text
-slot0: U256
-assetReserve: u128
-totalPrincipalAmount: u128
-```
-
-Reserve and principal are colocated with packed `slot0`, avoiding secondary map lookups. The runtime
-contains exactly one configured router and one `FeeProfile`. Whitelisted
-routers use multiplier `1`; non-whitelisted deployments track the global
-blacklist multiplier. Partner fee events are retained only for the configured
-router.
-
-Rust stores the reducer behind `std::sync::RwLock`. A quote takes a short shared
-guard and performs no RPC, Redis access, serialization, or state clone. The
-single reducer takes a short write guard. TypeScript relies on single-threaded
-event-loop ordering and does not expose mutable maps.
-
-`quoteMany` is synchronous and limited to 256 requests. It reads the cursor
-once, computes every result from the same state, and returns that one cursor.
+Readiness is disabled whenever state continuity is uncertain. Recovery builds
+a canonical snapshot and replays buffered updates before quotes resume.
+Checkpoints are accepted only when their schema, deployment identity,
+configuration, state invariants, and canonical block still match. Redis is
+optional restart acceleration and must be protected as service data.
 
 ## Network sources
 
-`lunarbase-source-evm` owns reusable HTTP snapshot/backfill and WebSocket
-`logs + newHeads` behavior. Base is its `pendingLogs + progressive newHeads`
-profile, not another client package. Base emits `newHeads` at Flashblock
-cadence, so the source avoids decoding the larger `newFlashblocks` payload.
+- EVM covers standard JSON-RPC and WebSocket providers. The Base profile
+  supports progressive block delivery.
+- Monad supports parser WebSocket delivery; Rust deployments may also select
+  the colocated Linux adapter.
+- Arbitrum resolves Nitro execution context while retaining the L2 ordering
+  position.
 
-Monad has two Rust source implementations in the same network package:
+Applications combine the common client with exactly one source implementation.
 
-- portable parser WebSocket for development and remote deployments;
-- Linux native event-ring reader using official `monad-exec-events` and
-  `monad-event-ring`.
+## Deployment
 
-TypeScript consumes the parser/RPC WebSocket and does not bind hugetlbfs.
+Each indexer replica maintains its own state and serves only while ready.
+Multiple replicas can run behind a normal load balancer. Deployment identity,
+RPC endpoints, implementation address, code hash, and source-specific settings
+are supplied by the operator.
 
-Arbitrum extends the generic EVM source with Nitro execution-context
-resolution and records parent-chain execution context separately from the L2
-stream height.
+Graceful shutdown stops quote traffic, joins background work, and writes a
+final checkpoint when checkpointing is configured.
 
-Monad and Arbitrum are experimental until their node-based soak gates pass.
+## Verification
 
-## Failure and recovery
+The release gate covers:
 
-The runtime fails closed on:
-
-- stream gap, disconnect, or queue overflow;
-- cursor regression or block-hash discontinuity;
-- reorg or removed log;
-- incompatible ERC-1967 implementation address or implementation code hash;
-- malformed quote-critical event;
-- arithmetic/state invariant failure.
-
-Readiness is revoked before recovery starts. The source keeps buffering into a
-bounded queue while a canonical RPC snapshot is built. State is published
-again only after the snapshot and handoff replay both succeed.
-
-Shutdown cancels source/reducer tasks, stores a final checkpoint when Redis is
-configured, closes HTTP gracefully, and waits within the configured deadline.
-Bootstrap is cancellation-safe: SIGTERM cannot leave a detached subscription.
-
-## Horizontal scaling
-
-Every replica independently consumes the source, maintains hot state, and
-serves quotes. There is no leader, lease, fencing token, or standby role.
-Throughput scales behind a normal load balancer.
-
-Replicas may best-effort overwrite the same Redis checkpoint because the value
-is a complete deployment-bound snapshot and startup always validates its
-canonical block hash. Redis is restart acceleration, not inter-replica
-coordination.
-
-## Persistence
-
-The indexer stores one no-TTL key per chain/Core/router/schema:
-
-```text
-lunarbase:v4:{chainId}:{core}:{router}
-```
-
-Only `GET` and atomic `SET` are used. A missing, malformed, incompatible,
-forked, or unusable checkpoint is ignored in favor of a full RPC snapshot.
-Redis outage does not affect a running indexer's readiness.
-
-Embeddable clients expose `checkpoint()` but contain no Redis dependency.
-
-## Verification gates
-
-- Shared deterministic math corpus in Rust and TypeScript.
-- Canonical Solidity/Rust/TypeScript FFI in `lunarbase-contracts`.
-- Quote-path source-call counters.
-- Same-cursor `quoteMany` parity.
-- Reducer replay without `SwapExecuted`.
-- Checkpoint identity/canonicality and Redis-unavailable bootstrap.
-- Two simultaneously ready process replicas.
-- Gap/reorg recovery and SIGTERM bootstrap shutdown.
-- 10–15 lane, 50–100 pair load profile.
-- Base payload fixtures.
-- Separate Monad and Arbitrum live-validation gates.
-
-All Rust and TypeScript source files are limited to 500 non-comment code lines
-so documentation can remain detailed without encouraging oversized modules.
-Modules retain a reviewable context boundary.
+- Rust and TypeScript formatting, linting, compilation, documentation, and
+  unit tests
+- deterministic cross-language quote vectors
+- source ordering, bootstrap, recovery, checkpoint, and process-level tests
+- Base, Monad, Arbitrum, and Linux adapter feature builds
+- dependency policy and production npm advisory checks
+- exact crate and npm package contents
+- workflow syntax, repository hygiene, and Docker image construction

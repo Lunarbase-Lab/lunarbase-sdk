@@ -1,8 +1,6 @@
 //! JSON-lines oracle used by the canonical Solidity differential FFI suite.
 
-use lunarbase_math::quote::{
-    quote, solidity_exact_in_amount, solidity_exact_out_amount_for_request,
-};
+use lunarbase_math::quote::{quote, solidity_exact_out_amount_for_request};
 use lunarbase_math::slot0::{LaneSlot0, encode_lane_slot0};
 use lunarbase_math::state::{LaneState, QuoteMode, QuoteOutcome, QuoteRequest, QuoteState};
 use lunarbase_math::types::{Address, U256};
@@ -132,6 +130,21 @@ fn build_state(vector: &Vector) -> (QuoteState, QuoteRequest, u64) {
     )
 }
 
+fn unavailable_words(request: &QuoteRequest, outcome: &QuoteOutcome) -> [U256; 7] {
+    [
+        U256::ZERO,
+        if request.mode == QuoteMode::ExactOut {
+            solidity_exact_out_amount_for_request(request, outcome)
+        } else {
+            U256::ZERO
+        },
+        U256::ZERO,
+        U256::ZERO,
+        U256::ZERO,
+        U256::ZERO,
+        U256::ZERO,
+    ]
+}
 fn output_words(vector: &Vector) -> [U256; 7] {
     let (state, request, execution_block_number) = build_state(vector);
     let outcome = match quote(&request, execution_block_number, &state) {
@@ -158,15 +171,7 @@ fn output_words(vector: &Vector) -> [U256; 7] {
             result.partner_fee,
             result.treasury_fee,
         ],
-        unavailable => [
-            U256::ZERO,
-            solidity_exact_in_amount(&unavailable),
-            solidity_exact_out_amount_for_request(&request, &unavailable),
-            U256::ZERO,
-            U256::ZERO,
-            U256::ZERO,
-            U256::ZERO,
-        ],
+        unavailable => unavailable_words(&request, &unavailable),
     }
 }
 
@@ -201,4 +206,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("vector index out of range")?;
     write_words(output_words(vector))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unavailable_words;
+    use lunarbase_math::state::{QuoteMode, QuoteOutcome, QuoteRequest, UnavailableReason};
+    use lunarbase_math::types::{Address, U256};
+
+    fn request(mode: QuoteMode, amount: U256) -> QuoteRequest {
+        QuoteRequest {
+            asset_in: Address::ZERO,
+            asset_out: Address::ZERO,
+            amount,
+            mode,
+        }
+    }
+
+    #[test]
+    fn unavailable_result_uses_the_solidity_amount_in_sentinel() {
+        let unavailable = QuoteOutcome::Unavailable(UnavailableReason::ZeroAmount);
+        let exact_out = unavailable_words(&request(QuoteMode::ExactOut, U256::ONE), &unavailable);
+        assert_eq!(exact_out[1], U256::MAX);
+        assert_eq!(exact_out[2], U256::ZERO);
+
+        let zero_exact_out =
+            unavailable_words(&request(QuoteMode::ExactOut, U256::ZERO), &unavailable);
+        assert_eq!(zero_exact_out[1], U256::ZERO);
+
+        let exact_in = unavailable_words(&request(QuoteMode::ExactIn, U256::ONE), &unavailable);
+        assert_eq!(exact_in[1], U256::ZERO);
+        assert_eq!(exact_in[2], U256::ZERO);
+    }
 }

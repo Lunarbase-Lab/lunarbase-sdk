@@ -1,4 +1,4 @@
-import { createBaseFlashblocksSource, EvmRpcSource, JsonRpcHttpClient } from "@lunarbase/source-evm";
+import { createBaseFlashblocksSource, EvmRpcSource, JsonRpcHttpClient } from "@lunarbase-lab/pmm-v2-source-evm";
 import {
   MATH_COMPATIBILITY_VERSION,
   Commitment,
@@ -9,8 +9,8 @@ import {
   quoteCriticalTopics,
   type ClientConnectConfig,
   type ConnectedQuoteClient,
-} from "@lunarbase/client";
-import { laneExists } from "@lunarbase/math";
+} from "@lunarbase-lab/pmm-v2-client";
+import { laneExists } from "@lunarbase-lab/pmm-v2-math";
 import { readEnvironment } from "./config.js";
 import { logQuoteBatch, writeLog } from "./logging.js";
 import { buildQuoteRequests } from "./quotes.js";

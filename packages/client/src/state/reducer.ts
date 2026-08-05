@@ -12,7 +12,7 @@ import {
   type QuoteOutcome,
   type QuoteRequest,
   type QuoteState,
-} from "@lunarbase/math";
+} from "@lunarbase-lab/pmm-v2-math";
 import {
   Commitment,
   commitmentRank,
@@ -159,7 +159,7 @@ export class QuoteReducer {
     return requests.map((request) => computeQuote(request, cursor.executionBlockNumber, this.state));
   }
 
-  /** Creates a deep-cloned v4 restart checkpoint outside the quote path. */
+  /** Creates a deep-cloned restart checkpoint outside the quote path. */
   checkpoint(config: DeploymentConfig): Checkpoint | undefined {
     if (!this.cursorValue) return undefined;
     return {
@@ -168,8 +168,12 @@ export class QuoteReducer {
       expectedImplementation: config.expectedImplementation,
       expectedImplementationCodeHash: config.expectedImplementationCodeHash,
       chainId: config.chainId,
+      network: config.network,
       core: config.core,
       router: config.router,
+      deploymentBlock: config.deploymentBlock,
+      expectWhitelisted: config.expectWhitelisted,
+      explicitLaneAssets: [...config.explicitLaneAssets],
       cursor: { ...this.cursorValue },
       state: cloneState(this.state),
     };

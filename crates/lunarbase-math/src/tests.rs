@@ -365,6 +365,8 @@ fn route_preserves_contract_evaluation_order_before_zero_price_sentinel() {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GoldenFile {
+    schema_version: String,
+    math_compatibility_version: String,
     vectors: Vec<GoldenVector>,
 }
 
@@ -422,6 +424,8 @@ fn shared_quote_vectors_match_rust_math() {
     let fixture: GoldenFile =
         serde_json::from_str(include_str!("../../../fixtures/quote-vectors.json"))
             .expect("valid quote vector fixture");
+    assert_eq!(fixture.schema_version, "1");
+    assert_eq!(fixture.math_compatibility_version, "lunarbase-pmm-v2");
     for vector in fixture.vectors {
         let cash = Address::from_str(&vector.cash).unwrap();
         let asset_in = Address::from_str(&vector.asset_in).unwrap();

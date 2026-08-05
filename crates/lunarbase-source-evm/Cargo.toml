@@ -1,11 +1,16 @@
 [package]
-name = "lunarbase-source-evm"
+name = "lunarbase-pmm-v2-source-evm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 description = "Generic EVM RPC and WebSocket data source for LunarBase"
+keywords = ["lunarbase", "evm", "base", "rpc", "websocket"]
+categories = ["api-bindings", "asynchronous", "network-programming"]
+
+[lib]
+name = "lunarbase_source_evm"
 
 [lints]
 workspace = true

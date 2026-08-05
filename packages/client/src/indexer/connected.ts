@@ -1,5 +1,5 @@
 /** Connected source/reducer lifecycle for embeddable TypeScript clients. */
-import type { QuoteRequest } from "@lunarbase/math";
+import type { QuoteRequest } from "@lunarbase-lab/pmm-v2-math";
 import { checkpointMatchesDeployment, validateDeploymentConfig } from "../bootstrap.js";
 import { IndexerError } from "../model.js";
 import type {
@@ -13,6 +13,7 @@ import type {
 } from "../model.js";
 import { compareCursor } from "../source.js";
 import { QuoteIndexer } from "./engine.js";
+import { validateFilterTopics } from "./filter.js";
 import { delay, pumpSource, SourceActivity } from "./source_task.js";
 import { BoundedUpdateQueue } from "./update_queue.js";
 
@@ -20,7 +21,7 @@ import { BoundedUpdateQueue } from "./update_queue.js";
 export interface ClientConnectConfig {
   /** Immutable network, Core contract, router, and endpoint identity. */
   readonly deployment: DeploymentConfig;
-  /** Core address and quote-critical topics accepted by the source. */
+  /** Core address; topics are empty or the complete quote-critical set. */
   readonly filter: ContractFilter;
   /** Maximum normalized updates waiting for the ordered reducer. */
   readonly queueBound: number;
@@ -140,6 +141,7 @@ function validateConnectConfig(config: ClientConnectConfig, source: ChainDataSou
   if (source.network !== config.deployment.network) throw new IndexerError("SOURCE", "source network mismatch");
   if (config.filter.address.toLowerCase() !== config.deployment.core.toLowerCase())
     throw new IndexerError("SOURCE", "filter must target deployment Core");
+  validateFilterTopics(config.filter.topics);
   for (const [name, value] of Object.entries({
     queueBound: config.queueBound,
     reconnectDelayMilliseconds: config.reconnectDelayMilliseconds,
@@ -221,6 +223,7 @@ async function restoreCheckpoint(
     for (const log of logs) indexer.applyCoreUpdate({ kind: "Log", log });
   }
   indexer.applyCoreUpdate({ kind: "Head", cursor: head });
+  indexer.setCanonicalFloor(head);
   return indexer;
 }
 

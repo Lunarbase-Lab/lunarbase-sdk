@@ -5,11 +5,7 @@ use crate::types::{Address, MathError, U256};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-/// Fees for the single router configured by a client or indexer instance.
-///
-/// The router address belongs to deployment identity rather than pure quote
-/// math. Keeping only its effective fee state removes a router lookup from
-/// every quote while retaining the exact Solidity fee split per asset.
+/// Effective fee state for the router configured by a client or indexer.
 pub struct FeeProfile {
     /// Whether the configured router bypasses the global blacklist multiplier.
     pub whitelisted: bool,

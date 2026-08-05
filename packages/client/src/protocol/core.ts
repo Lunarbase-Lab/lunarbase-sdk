@@ -1,12 +1,7 @@
 import * as Abi from "ox/Abi";
 import * as AbiEvent from "ox/AbiEvent";
 
-/**
- * Minimal pinned Core ABI used by bootstrap and quote-critical event replay.
- *
- * Keeping one parsed ABI removes handwritten selectors and makes both RPC
- * calls and event decoding derive their widths from the Solidity interface.
- */
+/** Core ABI used by bootstrap and quote-critical event replay. */
 export const CORE_ABI = Abi.from([
   "function cash() view returns (address)",
   "function lane(address asset) view returns (bytes32 laneWord)",

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseAddress } from "@lunarbase/math";
+import { parseAddress } from "@lunarbase-lab/pmm-v2-math";
 import { buildQuoteRequests } from "./quotes.js";
 
 test("builds two directions for every lane", () => {

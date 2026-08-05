@@ -1,8 +1,15 @@
-import { BPS, createLaneState, laneExists, parseAddress, type Address, type QuoteState } from "@lunarbase/math";
+import {
+  BPS,
+  createLaneState,
+  laneExists,
+  parseAddress,
+  type Address,
+  type QuoteState,
+} from "@lunarbase-lab/pmm-v2-math";
 import type { AbiEvent as AbiEventType } from "ox/AbiEvent";
 import * as Hash from "ox/Hash";
 import * as Hex from "ox/Hex";
-import { createPublicClient, formatLog, http, type BlockTag, type PublicClient, type RpcLog } from "viem";
+import { createPublicClient, http, type BlockTag, type PublicClient } from "viem";
 import {
   Commitment as CommitmentValue,
   compareCursor,
@@ -20,23 +27,18 @@ import {
   type ContractLog,
   type DeploymentConfig,
   type Network,
-} from "@lunarbase/client";
+} from "@lunarbase-lab/pmm-v2-client";
+import { RpcError } from "./rpc/error.js";
+import { normalizeViemLog, parseHash, parseHexU64 } from "./rpc/log.js";
+
+export { RpcError };
+export { parseHexU64 };
+export { parseHash, parseRpcLog } from "./rpc/log.js";
 
 const BLOCK_TAGS = new Set<BlockTag>(["earliest", "finalized", "latest", "pending", "safe"]);
 const LOG_RANGE_CHUNK_BLOCKS = 10_000n;
 const SNAPSHOT_CONCURRENCY = 16;
 const addressKey = parseAddress;
-
-/** Typed failure from HTTP, JSON-RPC, or ABI response validation. */
-export class RpcError extends Error {
-  constructor(
-    readonly code: "TRANSPORT" | "INVALID",
-    message: string,
-  ) {
-    super(message);
-    this.name = "RpcError";
-  }
-}
 
 /**
  * Read-only viem HTTP client with every implicit network behavior disabled.
@@ -47,6 +49,8 @@ export class RpcError extends Error {
 export class JsonRpcHttpClient {
   /** viem public client configured without batching, retries, or CCIP reads. */
   readonly client: PublicClient;
+  /** Injected fetch implementation retained for strict response-envelope validation. */
+  private readonly strictFetcher: typeof fetch;
 
   /** Creates a strict read-only JSON-RPC client with an injectable fetcher. */
   constructor(
@@ -57,6 +61,7 @@ export class JsonRpcHttpClient {
     const url = new URL(endpoint);
     if (url.protocol !== "http:" && url.protocol !== "https:")
       throw new RpcError("INVALID", "HTTP RPC URL must use http: or https:");
+    this.strictFetcher = fetcher;
     this.client = createPublicClient({
       batch: { multicall: false },
       ccipRead: false,
@@ -122,7 +127,13 @@ export class JsonRpcHttpClient {
   }
 
   /** Converts one explicit `eth_getBlockByNumber` into a source cursor. */
-  async blockCursor(blockTag: string, chainId: bigint, commitment: ChainCursor["commitment"]): Promise<ChainCursor> {
+  async blockCursor(
+    blockTag: string,
+    chainId: bigint,
+    commitment: ChainCursor["commitment"],
+    requireExecutionBlockNumber = false,
+  ): Promise<ChainCursor> {
+    if (requireExecutionBlockNumber) return this.strictExecutionBlockCursor(blockTag, chainId, commitment);
     const block = await this.remote(() =>
       this.client.getBlock({
         includeTransactions: false,
@@ -130,15 +141,60 @@ export class JsonRpcHttpClient {
       }),
     );
     if (block.number === null) throw new RpcError("INVALID", "eth_getBlockByNumber returned a pending block");
-    const l1BlockNumber = (block as typeof block & { l1BlockNumber?: Hex.Hex }).l1BlockNumber;
+    const l1BlockNumber = (block as typeof block & { l1BlockNumber?: unknown }).l1BlockNumber;
     return {
       chainId,
       blockNumber: block.number,
       executionBlockNumber:
-        l1BlockNumber === undefined ? block.number : parseHexU64(l1BlockNumber, "block.l1BlockNumber"),
+        l1BlockNumber === undefined || l1BlockNumber === null
+          ? block.number
+          : parseHexU64(l1BlockNumber, "block.l1BlockNumber"),
       blockHash: block.hash ?? undefined,
       commitment,
     };
+  }
+
+  private async strictExecutionBlockCursor(
+    blockTag: string,
+    chainId: bigint,
+    commitment: ChainCursor["commitment"],
+  ): Promise<ChainCursor> {
+    return this.remote(async () => {
+      blockParameters(blockTag);
+      const requestId = `execution-context:${blockTag}`;
+      const response = await this.strictFetcher(this.endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: requestId,
+          method: "eth_getBlockByNumber",
+          params: [blockTag, false],
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!response.ok) throw new RpcError("TRANSPORT", `HTTP RPC returned ${response.status}`);
+      const envelope = (await response.json()) as unknown;
+      if (envelope === null || typeof envelope !== "object" || Array.isArray(envelope))
+        throw new RpcError("INVALID", "JSON-RPC response is not an object");
+      const object = envelope as Record<string, unknown>;
+      if (object.jsonrpc !== "2.0") throw new RpcError("INVALID", "JSON-RPC response version is not 2.0");
+      if (object.id !== requestId) throw new RpcError("INVALID", "JSON-RPC response id mismatch");
+      if (object.error !== undefined && object.error !== null)
+        throw new RpcError("TRANSPORT", `JSON-RPC returned an error: ${JSON.stringify(object.error)}`);
+      if (object.result === null || typeof object.result !== "object" || Array.isArray(object.result))
+        throw new RpcError("INVALID", "JSON-RPC response has no block result");
+      const block = object.result as Record<string, unknown>;
+      const blockNumber = parseHexU64(block.number, "block.number");
+      const executionBlockNumber = parseHexU64(block.l1BlockNumber, "block.l1BlockNumber");
+      return {
+        chainId,
+        blockNumber,
+        executionBlockNumber,
+        blockHash: block.hash === null || block.hash === undefined ? undefined : parseHash(block.hash, "block.hash"),
+        commitment,
+      };
+    });
   }
 
   /**
@@ -160,7 +216,7 @@ export class JsonRpcHttpClient {
         const chunk = await this.remote(() =>
           this.client.getLogs({
             address: request.filter.address,
-            events,
+            events: events.length === 0 ? undefined : events,
             fromBlock,
             toBlock,
             strict: false,
@@ -292,7 +348,7 @@ export class RpcSnapshotProvider {
 
     const assets = await this.resolveLaneAssets(config, cursor.blockNumber);
     const at = { blockHash: cursor.blockHash } as const;
-    const [cash, whitelisted] = await Promise.all([
+    const [cash, whitelisted, blacklistFeeMultiplier] = await Promise.all([
       this.rpc.client.readContract({
         abi: CORE_ABI,
         address: config.core,
@@ -306,20 +362,18 @@ export class RpcSnapshotProvider {
         args: [config.router],
         ...at,
       }),
+      this.rpc.client.readContract({
+        abi: CORE_ABI,
+        address: config.core,
+        functionName: "blacklistFeeMultiplier",
+        ...at,
+      }),
     ]);
     if (whitelisted !== config.expectWhitelisted)
       throw new RpcError(
         "INVALID",
         `configured router whitelist mismatch: expected ${config.expectWhitelisted}, got ${whitelisted}`,
       );
-    const blacklistFeeMultiplier = whitelisted
-      ? 1n
-      : await this.rpc.client.readContract({
-          abi: CORE_ABI,
-          address: config.core,
-          functionName: "blacklistFeeMultiplier",
-          ...at,
-        });
     const lanes = new Map<Address, ReturnType<typeof createLaneState>>();
     const partnerFeeBps = new Map<Address, number>();
     const state: QuoteState = {
@@ -413,40 +467,6 @@ export class RpcSnapshotProvider {
   }
 }
 
-/** Parses one raw JSON-RPC log through viem's audited formatter. */
-export function parseRpcLog(value: unknown, chainId: bigint, commitment: ChainCursor["commitment"]): ContractLog {
-  try {
-    return normalizeViemLog(formatLog(value as RpcLog), chainId, commitment);
-  } catch (error) {
-    if (error instanceof RpcError) throw error;
-    throw new RpcError("INVALID", error instanceof Error ? error.message : "invalid RPC log");
-  }
-}
-
-function normalizeViemLog(
-  log: ReturnType<typeof formatLog>,
-  chainId: bigint,
-  commitment: ChainCursor["commitment"],
-): ContractLog {
-  if (log.blockNumber === null || log.transactionIndex === null || log.logIndex === null)
-    throw new RpcError("INVALID", "pending RPC log has no canonical position");
-  return {
-    address: log.address,
-    topics: log.topics,
-    data: log.data,
-    removed: log.removed,
-    cursor: {
-      chainId,
-      blockNumber: log.blockNumber,
-      executionBlockNumber: log.blockNumber,
-      blockHash: log.blockHash ?? undefined,
-      transactionIndex: BigInt(log.transactionIndex),
-      logIndex: BigInt(log.logIndex),
-      commitment,
-    },
-  };
-}
-
 function eventsForTopics(topics: readonly Hex.Hex[]): readonly AbiEventType[] {
   const entries = Object.entries(CORE_EVENT_TOPICS) as Array<
     [keyof typeof CORE_EVENT_TOPICS, (typeof CORE_EVENT_TOPICS)[keyof typeof CORE_EVENT_TOPICS]]
@@ -464,21 +484,7 @@ function blockParameters(blockTag: string): { blockNumber: bigint } | { blockTag
   return { blockNumber: parseHexU64(blockTag, "block tag") };
 }
 
-/** Parses an unsigned hexadecimal uint64 RPC field through Ox. */
-export function parseHexU64(value: unknown, field: string): bigint {
-  if (typeof value !== "string" || !Hex.validate(value)) throw new RpcError("INVALID", `${field} is not valid hex`);
-  const result = Hex.toBigInt(value);
-  if (result > (1n << 64n) - 1n) throw new RpcError("INVALID", `${field} exceeds uint64`);
-  return result;
-}
-
-/** Parses a canonical 32-byte hash through Ox. */
-export function parseHash(value: unknown, field: string): Hex.Hex {
-  if (typeof value !== "string" || !Hash.validate(value)) throw new RpcError("INVALID", `${field} is not bytes32`);
-  return value.toLowerCase() as Hex.Hex;
-}
-
-/** Computes legacy Keccak-256 with Ox's audited noble implementation. */
+/** Computes Ethereum Keccak-256 with Ox's audited noble implementation. */
 export function keccak256Hex(input: Uint8Array | Hex.Hex): Hex.Hex {
   return Hash.keccak256(input, { as: "Hex" });
 }

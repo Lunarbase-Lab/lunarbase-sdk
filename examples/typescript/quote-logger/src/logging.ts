@@ -1,5 +1,5 @@
-import type { ClientBatchQuote } from "@lunarbase/client";
-import type { QuoteRequest } from "@lunarbase/math";
+import type { ClientBatchQuote } from "@lunarbase-lab/pmm-v2-client";
+import type { QuoteRequest } from "@lunarbase-lab/pmm-v2-math";
 
 /**
  * Emits every outcome from one atomic `quoteMany` result as structured JSON.

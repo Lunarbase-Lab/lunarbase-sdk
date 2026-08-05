@@ -1,5 +1,5 @@
 /** Browser-compatible socket lifecycle and bounded frame queue. */
-import type { ContractFilter } from "@lunarbase/client";
+import type { ContractFilter } from "@lunarbase-lab/pmm-v2-client";
 import { parseHexU64, RpcError } from "../rpc.js";
 import { subscriptionRequest } from "./protocol.js";
 
@@ -66,14 +66,16 @@ export async function establishSocket(
   };
 
   try {
+    const deadline = performance.now() + HANDSHAKE_TIMEOUT_MILLISECONDS;
     if (socket.readyState === 1) queue.open();
-    await withTimeout(queue.waitUntilOpen(signal), signal);
+    await beforeHandshakeDeadline(queue.waitUntilOpen(signal), deadline, signal);
     socket.send(subscriptionRequest(1, filter, logsKind));
     socket.send(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "eth_subscribe", params: ["newHeads"] }));
     socket.send(JSON.stringify({ jsonrpc: "2.0", id: 3, method: "eth_chainId", params: [] }));
-    const result = await readAcknowledgements(queue, expectedChainId, signal);
+    const result = await readAcknowledgements(queue, expectedChainId, queueCapacity, deadline, signal);
     return { socket, queue, close, ...result };
   } catch (error) {
+    queue.close();
     close();
     throw error;
   }
@@ -82,6 +84,8 @@ export async function establishSocket(
 async function readAcknowledgements(
   queue: BoundedFrameQueue,
   expectedChainId: bigint,
+  prefetchCapacity: number,
+  deadline: number,
   signal?: AbortSignal,
 ): Promise<Pick<EstablishedSocket, "logsSubscription" | "headsSubscription" | "prefetched">> {
   let logsSubscription: string | undefined;
@@ -89,28 +93,52 @@ async function readAcknowledgements(
   let chainVerified = false;
   const prefetched: string[] = [];
   while (!logsSubscription || !headsSubscription || !chainVerified) {
-    const frame = await withTimeout(queue.next(signal), signal);
+    const frame = await beforeHandshakeDeadline(queue.next(signal), deadline, signal);
     if (frame === undefined) throw new RpcError("TRANSPORT", "RPC WebSocket closed during subscription handshake");
     const value = JSON.parse(frame) as Record<string, unknown>;
     if (value.error) throw new RpcError("TRANSPORT", `RPC subscription error: ${JSON.stringify(value.error)}`);
-    if (Number(value.id) === 1 && typeof value.result === "string") logsSubscription = value.result;
-    else if (Number(value.id) === 2 && typeof value.result === "string") headsSubscription = value.result;
-    else if (Number(value.id) === 3 && typeof value.result === "string") {
+    const id = handshakeResponseId(value);
+    if (id === 1) logsSubscription = subscriptionAcknowledgement(logsSubscription, value.result, "logs");
+    else if (id === 2) headsSubscription = subscriptionAcknowledgement(headsSubscription, value.result, "heads");
+    else if (id === 3) {
+      if (typeof value.result !== "string") throw new RpcError("TRANSPORT", "RPC chain-id acknowledgement is invalid");
       const actual = parseHexU64(value.result, "eth_chainId");
       if (actual !== expectedChainId)
         throw new RpcError("INVALID", `WebSocket RPC chain id mismatch: expected ${expectedChainId}, got ${actual}`);
       chainVerified = true;
-    } else prefetched.push(frame);
+    } else {
+      if (prefetched.length >= prefetchCapacity)
+        throw new RpcError("TRANSPORT", "RPC subscription handshake prefetch overflow");
+      prefetched.push(frame);
+    }
   }
+  if (performance.now() >= deadline) throw new RpcError("TRANSPORT", "RPC subscription handshake timed out");
   return { logsSubscription, headsSubscription, prefetched };
 }
 
-function withTimeout<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
+function handshakeResponseId(value: Record<string, unknown>): number | undefined {
+  if (value.id === undefined) return undefined;
+  if (typeof value.id !== "number" || !Number.isSafeInteger(value.id))
+    throw new RpcError("TRANSPORT", "RPC handshake response id must be an integer");
+  return value.id;
+}
+
+function subscriptionAcknowledgement(current: string | undefined, result: unknown, kind: "logs" | "heads"): string {
+  if (typeof result !== "string" || result.length === 0)
+    throw new RpcError("TRANSPORT", `RPC ${kind} subscription acknowledgement is invalid`);
+  if (current !== undefined && current !== result)
+    throw new RpcError("TRANSPORT", `RPC ${kind} subscription acknowledgement changed`);
+  return result;
+}
+
+function beforeHandshakeDeadline<T>(operation: Promise<T>, deadline: number, signal?: AbortSignal): Promise<T> {
   if (signal?.aborted) return Promise.reject(new RpcError("TRANSPORT", "RPC WebSocket operation aborted"));
+  const remaining = deadline - performance.now();
+  if (remaining <= 0) return Promise.reject(new RpcError("TRANSPORT", "RPC subscription handshake timed out"));
   return new Promise((resolve, reject) => {
     const timer = setTimeout(
       () => reject(new RpcError("TRANSPORT", "RPC subscription handshake timed out")),
-      HANDSHAKE_TIMEOUT_MILLISECONDS,
+      remaining,
     );
     operation.then(
       (value) => {

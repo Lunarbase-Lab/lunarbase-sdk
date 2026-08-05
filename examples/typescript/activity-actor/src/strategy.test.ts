@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   directedPairs,
   findSafeReturnAmount,
+  findSafeReturnAmountWithExactOut,
   isWithinReserveCap,
   minimumOutput,
   PairedSwapPlan,
@@ -89,6 +90,118 @@ test("returns undefined when every halved return quote is zero", async () => {
       () => true,
     ),
     undefined,
+  );
+});
+
+test("fast return sizing accepts the maximum input with one quote", async () => {
+  let exactInCalls = 0;
+  let exactOutCalls = 0;
+  const result = await findSafeReturnAmountWithExactOut(
+    64n,
+    100n,
+    (amountIn) => {
+      exactInCalls += 1;
+      return amountIn;
+    },
+    () => {
+      exactOutCalls += 1;
+      return 0n;
+    },
+    (quotedOutput) => quotedOutput <= 100n,
+  );
+
+  assert.deepEqual(result, { amountIn: 64n, quotedOutput: 64n });
+  assert.equal(exactInCalls, 1);
+  assert.equal(exactOutCalls, 0);
+});
+
+test("fast return sizing uses at most three quotes when the maximum is unsafe", async () => {
+  const calls: string[] = [];
+  const result = await findSafeReturnAmountWithExactOut(
+    64n,
+    100n,
+    (amountIn) => {
+      calls.push(`in:${amountIn}`);
+      return amountIn * 10n;
+    },
+    (amountOut) => {
+      calls.push(`out:${amountOut}`);
+      return 11n;
+    },
+    (quotedOutput) => quotedOutput <= 100n,
+  );
+
+  assert.deepEqual(calls, ["in:64", "out:100", "in:10"]);
+  assert.deepEqual(result, { amountIn: 10n, quotedOutput: 100n });
+});
+
+test("fast return sizing finds a smaller safe input with a bounded search", async () => {
+  const calls: string[] = [];
+  const result = await findSafeReturnAmountWithExactOut(
+    64n,
+    100n,
+    (amountIn) => {
+      calls.push(`in:${amountIn}`);
+      return amountIn * 11n;
+    },
+    (amountOut) => {
+      calls.push(`out:${amountOut}`);
+      return 11n;
+    },
+    (quotedOutput) => quotedOutput <= 100n,
+  );
+
+  assert.deepEqual(calls, ["in:64", "out:100", "in:10", "in:5"]);
+  assert.deepEqual(result, { amountIn: 5n, quotedOutput: 55n });
+});
+
+test("fast return sizing stops after its bounded verification probes", async () => {
+  const calls: string[] = [];
+  const result = await findSafeReturnAmountWithExactOut(
+    64n,
+    100n,
+    (amountIn) => {
+      calls.push(`in:${amountIn}`);
+      return 1_000n;
+    },
+    (amountOut) => {
+      calls.push(`out:${amountOut}`);
+      return 33n;
+    },
+    () => false,
+  );
+
+  assert.equal(result, undefined);
+  assert.deepEqual(calls, ["in:64", "out:100", "in:32", "in:16", "in:8", "in:4"]);
+});
+
+test("fast return sizing strictly validates uint256 inputs and quote results", async () => {
+  const overUint256 = 1n << 256n;
+  const quoteExactIn = async (amountIn: bigint) => amountIn;
+  const quoteExactOut = async (amountOut: bigint) => amountOut;
+  const allows = async () => false;
+
+  await assert.rejects(
+    findSafeReturnAmountWithExactOut(-1n, 1n, quoteExactIn, quoteExactOut, allows),
+    /maximumAmountIn must be a uint256/,
+  );
+  await assert.rejects(
+    findSafeReturnAmountWithExactOut(1n, overUint256, quoteExactIn, quoteExactOut, allows),
+    /maximumAllowedOutput must be a uint256/,
+  );
+  await assert.rejects(
+    findSafeReturnAmountWithExactOut(1n, 1n, async () => -1n, quoteExactOut, allows),
+    /quoteExactIn result must be a uint256/,
+  );
+  await assert.rejects(
+    findSafeReturnAmountWithExactOut(
+      2n,
+      1n,
+      async () => 2n,
+      async () => overUint256,
+      allows,
+    ),
+    /quoteExactOut result must be a uint256/,
   );
 });
 

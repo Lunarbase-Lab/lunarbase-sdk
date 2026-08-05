@@ -5,11 +5,9 @@ use alloy_primitives::U64;
 use futures_util::{SinkExt, StreamExt};
 use lunarbase_client::model::{ContractFilter, SourceError};
 use serde_json::{Value, json};
-use std::collections::VecDeque;
-use std::str::FromStr;
-use std::time::Duration;
+use std::{collections::VecDeque, future::Future, str::FromStr, time::Duration};
 use tokio::net::TcpStream;
-use tokio::time::timeout;
+use tokio::time::{Instant, timeout_at};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async_with_config,
     tungstenite::{Message, protocol::WebSocketConfig},
@@ -32,6 +30,30 @@ pub(super) async fn establish(
     logs_kind: &str,
     expected_chain_id: u64,
     max_frame_bytes: usize,
+    prefetch_capacity: usize,
+) -> Result<EstablishedSocket, SourceError> {
+    let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+    before_handshake_deadline(
+        deadline,
+        establish_before_deadline(
+            endpoint,
+            filter,
+            logs_kind,
+            expected_chain_id,
+            max_frame_bytes,
+            prefetch_capacity,
+        ),
+    )
+    .await
+}
+
+async fn establish_before_deadline(
+    endpoint: &str,
+    filter: &ContractFilter,
+    logs_kind: &str,
+    expected_chain_id: u64,
+    max_frame_bytes: usize,
+    prefetch_capacity: usize,
 ) -> Result<EstablishedSocket, SourceError> {
     let bounds = WebSocketConfig {
         max_message_size: Some(max_frame_bytes),
@@ -67,17 +89,22 @@ pub(super) async fn establish(
             SourceError::Unavailable(format!("RPC chain-id request failed: {error}"))
         })?;
 
-    timeout(
-        HANDSHAKE_TIMEOUT,
-        read_acknowledgements(socket, expected_chain_id),
-    )
-    .await
-    .map_err(|_| SourceError::Unavailable("RPC subscription handshake timed out".into()))?
+    read_acknowledgements(socket, expected_chain_id, prefetch_capacity).await
+}
+
+async fn before_handshake_deadline<T>(
+    deadline: Instant,
+    operation: impl Future<Output = Result<T, SourceError>>,
+) -> Result<T, SourceError> {
+    timeout_at(deadline, operation)
+        .await
+        .map_err(|_| SourceError::Unavailable("RPC subscription handshake timed out".into()))?
 }
 
 async fn read_acknowledgements(
     mut socket: RpcSocket,
     expected_chain_id: u64,
+    prefetch_capacity: usize,
 ) -> Result<EstablishedSocket, SourceError> {
     let mut logs_subscription = None;
     let mut heads_subscription = None;
@@ -104,9 +131,13 @@ async fn read_acknowledgements(
                 "RPC subscription handshake error: {error}"
             )));
         }
-        match value.get("id").and_then(Value::as_u64) {
-            Some(1) => logs_subscription = subscription_id(&value),
-            Some(2) => heads_subscription = subscription_id(&value),
+        match handshake_response_id(&value)? {
+            Some(1) => {
+                record_subscription_ack(&mut logs_subscription, &value, "logs")?;
+            }
+            Some(2) => {
+                record_subscription_ack(&mut heads_subscription, &value, "heads")?;
+            }
             Some(3) => {
                 let raw = value.get("result").and_then(Value::as_str).ok_or_else(|| {
                     SourceError::Unavailable("RPC chain-id response is invalid".into())
@@ -121,7 +152,7 @@ async fn read_acknowledgements(
                 }
                 chain_verified = true;
             }
-            _ => buffered.push_back(payload),
+            _ => push_prefetched(&mut buffered, payload, prefetch_capacity)?,
         }
     }
     Ok(EstablishedSocket {
@@ -132,11 +163,53 @@ async fn read_acknowledgements(
     })
 }
 
-fn subscription_id(value: &Value) -> Option<String> {
-    value
+fn push_prefetched(
+    buffered: &mut VecDeque<Vec<u8>>,
+    payload: Vec<u8>,
+    capacity: usize,
+) -> Result<(), SourceError> {
+    if buffered.len() >= capacity {
+        return Err(SourceError::Unavailable(
+            "RPC subscription handshake prefetch overflow".into(),
+        ));
+    }
+    buffered.push_back(payload);
+    Ok(())
+}
+
+fn handshake_response_id(value: &Value) -> Result<Option<u64>, SourceError> {
+    let Some(id) = value.get("id") else {
+        return Ok(None);
+    };
+    id.as_u64().map(Some).ok_or_else(|| {
+        SourceError::Unavailable("RPC handshake response id must be an integer".into())
+    })
+}
+
+fn record_subscription_ack(
+    current: &mut Option<String>,
+    value: &Value,
+    kind: &str,
+) -> Result<(), SourceError> {
+    let incoming = value
         .get("result")
         .and_then(Value::as_str)
-        .map(str::to_owned)
+        .filter(|subscription| !subscription.is_empty())
+        .ok_or_else(|| {
+            SourceError::Unavailable(format!(
+                "RPC {kind} subscription acknowledgement is invalid"
+            ))
+        })?;
+    if current
+        .as_deref()
+        .is_some_and(|existing| existing != incoming)
+    {
+        return Err(SourceError::Unavailable(format!(
+            "RPC {kind} subscription acknowledgement changed"
+        )));
+    }
+    *current = Some(incoming.to_owned());
+    Ok(())
 }
 
 pub(super) async fn websocket_payload<S>(
@@ -165,5 +238,54 @@ where
             None => "RPC WebSocket closed; canonical recovery required".into(),
         })),
         _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        before_handshake_deadline, handshake_response_id, push_prefetched, record_subscription_ack,
+    };
+    use lunarbase_client::model::SourceError;
+    use serde_json::json;
+    use std::{collections::VecDeque, future::pending};
+    use tokio::time::Instant;
+
+    #[test]
+    fn handshake_requires_numeric_request_ids_and_stable_subscription_acks() {
+        assert!(handshake_response_id(&json!({"id": "1"})).is_err());
+        assert!(handshake_response_id(&json!({"id": true})).is_err());
+        assert_eq!(handshake_response_id(&json!({"id": 1})).unwrap(), Some(1));
+
+        let mut subscription = None;
+        record_subscription_ack(&mut subscription, &json!({"result": "logs-a"}), "logs").unwrap();
+        record_subscription_ack(&mut subscription, &json!({"result": "logs-a"}), "logs").unwrap();
+        assert!(
+            record_subscription_ack(&mut subscription, &json!({"result": "logs-b"}), "logs",)
+                .unwrap_err()
+                .to_string()
+                .contains("acknowledgement changed")
+        );
+    }
+
+    #[test]
+    fn handshake_prefetch_fails_closed_at_its_bound() {
+        let mut buffered = VecDeque::new();
+        push_prefetched(&mut buffered, vec![1], 2).unwrap();
+        push_prefetched(&mut buffered, vec![2], 2).unwrap();
+
+        let error = push_prefetched(&mut buffered, vec![3], 2).unwrap_err();
+
+        assert!(error.to_string().contains("prefetch overflow"));
+        assert_eq!(buffered.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn expired_absolute_handshake_deadline_fails_closed() {
+        let error = before_handshake_deadline(Instant::now(), pending::<Result<(), SourceError>>())
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("handshake timed out"));
     }
 }

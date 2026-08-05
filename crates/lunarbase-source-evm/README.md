@@ -1,26 +1,27 @@
-# `lunarbase-source-evm`
+# `lunarbase-pmm-v2-source-evm`
 
-Generic EVM HTTP/WS implementation of `lunarbase_client::source::ChainDataSource`.
-Base Flashblocks is a configured profile of this source, not a separate client.
+EVM HTTP and WebSocket data source for `lunarbase-pmm-v2-client`.
+
+Status: **fully supported** for standard EVM networks and Base Flashblocks.
 
 ## Install
 
 ```toml
 [dependencies]
-lunarbase-client = { git = "https://github.com/Lunarbase-Lab/lunarbase-sdk.git", rev = "<approved-revision>" }
-lunarbase-source-evm = { git = "https://github.com/Lunarbase-Lab/lunarbase-sdk.git", rev = "<approved-revision>" }
+lunarbase-client = { package = "lunarbase-pmm-v2-client", version = "0.3.0" }
+lunarbase-source-evm = { package = "lunarbase-pmm-v2-source-evm", version = "0.3.0" }
 ```
 
-## Base Flashblocks
+## Use
 
 ```rust
 use std::sync::Arc;
+
 use lunarbase_client::prelude::ConnectedQuoteClient;
 use lunarbase_source_evm::prelude::{EvmRpcSource, RpcHttpClient};
 
-let rpc = RpcHttpClient::new(http_rpc_url)?;
 let source = Arc::new(EvmRpcSource::base_flashblocks(
-    rpc,
+    RpcHttpClient::new(http_rpc_url)?,
     realtime_url,
     config.deployment.chain_id,
 ));
@@ -29,26 +30,15 @@ let quote = client.quote(&request)?;
 client.shutdown().await;
 ```
 
-The source uses HTTP RPC for bootstrap and recovery and the configured
-Flashblocks WebSocket endpoint for realtime `pendingLogs` and progressive
-`newHeads`. Use `EvmRpcSource::new` or `EvmRpcSource::with_config` for standard
-EVM `logs + newHeads` streams. Base is the default network of
-`lunarbase-indexer`.
+For Base, use `wss://mainnet-preconf.base.org` or
+`wss://sepolia-preconf.base.org` as the application-facing WebSocket
+endpoint. These endpoints provide `pendingLogs` and progressive `newHeads`;
+see the [Base Flashblocks API](https://docs.base.org/base-chain/api-reference/flashblocks-api/flashblocks-api-overview).
 
-## Standard EVM
+Use `EvmRpcSource::new` for standard EVM `logs` and `newHeads` streams.
 
-```rust
-use lunarbase_client::model::Network;
-use lunarbase_source_evm::prelude::{EvmRpcSource, RpcHttpClient};
+## Guarantees
 
-let source = EvmRpcSource::new(
-    RpcHttpClient::new(http_rpc_url)?,
-    websocket_url,
-    Network::Evm,
-    chain_id,
-    "latest",
-);
-```
-
-The standard profile is chain-agnostic. `chain_id` remains explicit and binds
-all cursors and checkpoints to the selected EVM deployment.
+- HTTP RPC provides bootstrap, backfill, and canonical recovery.
+- WebSocket updates are normalized into ordered client events.
+- The configured chain ID binds cursors and checkpoints to one deployment.

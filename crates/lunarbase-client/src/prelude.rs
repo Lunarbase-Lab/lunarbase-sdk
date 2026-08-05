@@ -1,6 +1,6 @@
 //! Convenient imports for applications embedding the network-independent client.
 //!
-//! Internal SDK crates use canonical module paths instead of this façade.
+//! The prelude keeps common client types and constructors in one import.
 
 pub use crate::bootstrap::BootstrapSnapshot;
 pub use crate::indexer::client::ConnectedQuoteClient;

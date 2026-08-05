@@ -1,11 +1,11 @@
-/** Monad parser execution-event model and normalization. */
-import type { Address } from "@lunarbase/math";
-import type { ChainCursor, ChainUpdate, Commitment, ContractFilter } from "@lunarbase/client";
+/** Monad execution-event model and normalization. */
+import type { Address } from "@lunarbase-lab/pmm-v2-math";
+import type { ChainCursor, ChainUpdate, Commitment, ContractFilter } from "@lunarbase-lab/pmm-v2-client";
 import type { Hex } from "ox/Hex";
 
-/** Block lifecycle record emitted by the parser. */
+/** Block lifecycle record emitted by an execution-event source. */
 export interface ExecutionHead {
-  /** Monotonic parser or native execution-event sequence. */
+  /** Monotonic source sequence. */
   readonly sequence: bigint;
   /** EVM-visible Monad block height. */
   readonly blockNumber: bigint;
@@ -17,7 +17,7 @@ export interface ExecutionHead {
 
 /** EVM log emitted before normalization into the common model. */
 export interface ExecutionLog {
-  /** Monotonic parser or native execution-event sequence. */
+  /** Monotonic source sequence. */
   readonly sequence: bigint;
   /** Deterministic position within one source sequence. */
   readonly sourceSubIndex: bigint;
@@ -39,20 +39,20 @@ export interface ExecutionLog {
   readonly commitment: Commitment;
 }
 
-/** Raw parser lifecycle event. */
+/** Raw execution lifecycle event. */
 export type ExecutionEvent =
   | { readonly kind: "Head"; readonly head: ExecutionHead }
   | { readonly kind: "Log"; readonly log: ExecutionLog }
   | { readonly kind: "Gap"; readonly cursor?: ChainCursor; readonly reason: string };
 
-/** Suppresses duplicate sparse parser positions and rejects regression. */
+/** Suppresses duplicate source positions and rejects regression. */
 export class MonadSequenceTracker {
-  /** Latest source sequence accepted from the filtered parser stream. */
+  /** Latest source sequence accepted from the filtered event stream. */
   private lastSequence?: bigint;
   /** Latest event position accepted within `lastSequence`. */
   private lastSubIndex = -1n;
 
-  /** Records one parser sequence/sub-index pair. */
+  /** Records one source sequence and sub-index pair. */
   observe(sequence: bigint, subIndex: bigint): boolean {
     if (this.lastSequence === undefined) {
       this.lastSequence = sequence;
@@ -66,16 +66,16 @@ export class MonadSequenceTracker {
     return true;
   }
 
-  /** Clears ordering after an explicit parser gap. */
+  /** Clears ordering after an explicit source gap. */
   rewind(): void {
     this.lastSequence = undefined;
     this.lastSubIndex = -1n;
   }
 }
 
-/** Converts parser events to provider-neutral runtime updates. */
+/** Converts execution events to common runtime updates. */
 export class MonadExecutionNormalizer {
-  /** Duplicate and regression guard for sparse parser messages. */
+  /** Duplicate and regression guard for source messages. */
   private readonly tracker = new MonadSequenceTracker();
 
   constructor(
@@ -126,7 +126,7 @@ export class MonadExecutionNormalizer {
   }
 }
 
-/** Parser transport boundary useful to alternative portable implementations. */
+/** Transport boundary for execution-event readers. */
 export interface ExecutionEventReader {
   /** Opens and acknowledges a raw stream filtered to one Core deployment. */
   subscribeExecution(filter: ContractFilter, signal?: AbortSignal): Promise<AsyncIterable<ExecutionEvent>>;

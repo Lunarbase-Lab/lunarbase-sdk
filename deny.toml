@@ -1,7 +1,5 @@
 [advisories]
-# `paste` is a transitive Alloy macro dependency with no vulnerable code and
-# no safe replacement in the pinned Alloy release. Unmaintained advisories are
-# therefore fatal only when the crate is a direct workspace dependency.
+# Unmaintained advisories are denied for direct workspace dependencies.
 unmaintained = "workspace"
 
 [licenses]
@@ -18,6 +16,22 @@ allow = [
     "Unlicense",
     "Zlib",
 ]
+exceptions = [
+    { allow = ["GPL-3.0-or-later"], crate = "monad-event-ring@0.1.0" },
+    { allow = ["GPL-3.0-or-later"], crate = "monad-exec-events@0.1.0" },
+]
+
+[[licenses.clarify]]
+name = "monad-event-ring"
+version = "=0.1.0"
+expression = "GPL-3.0-or-later"
+license-files = [{ path = "../LICENSE", hash = 0xc5a651aa }]
+
+[[licenses.clarify]]
+name = "monad-exec-events"
+version = "=0.1.0"
+expression = "GPL-3.0-or-later"
+license-files = [{ path = "../LICENSE", hash = 0xc5a651aa }]
 
 [bans]
 multiple-versions = "warn"

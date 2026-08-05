@@ -3,6 +3,7 @@
 use crate::indexer::engine::QuoteIndexer;
 use crate::indexer::errors::IndexerError;
 use crate::model::{ContractFilter, DeploymentConfig, SourceError};
+use crate::protocol::abi::quote_critical_topics;
 use std::sync::{
     RwLock,
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -16,7 +17,7 @@ use tokio::sync::Notify;
 pub struct ClientConnectConfig {
     /// Immutable chain, Core contract, router, and endpoint identity.
     pub deployment: DeploymentConfig,
-    /// Core address and topic set accepted by the realtime source.
+    /// Core address; topics are empty or the complete quote-critical set.
     pub filter: ContractFilter,
     /// Maximum number of normalized updates waiting for the reducer.
     pub buffer_capacity: usize,
@@ -33,6 +34,23 @@ impl ClientConnectConfig {
         if self.filter.address != self.deployment.core {
             return Err(SourceError::NetworkMismatch.into());
         }
+        let expected_topics = quote_critical_topics();
+        let topics = &self.filter.topics;
+        let has_duplicate = topics
+            .iter()
+            .enumerate()
+            .any(|(index, topic)| topics[..index].contains(topic));
+        if !topics.is_empty()
+            && (topics.len() != expected_topics.len()
+                || has_duplicate
+                || topics.iter().any(|topic| !expected_topics.contains(topic)))
+        {
+            return Err(SourceError::Unavailable(
+                "filter topics must be empty or exactly match all quote-critical Core topics"
+                    .into(),
+            )
+            .into());
+        }
         if self.buffer_capacity == 0
             || self.reconnect_delay.is_zero()
             || self.source_stall_timeout.is_zero()
@@ -43,6 +61,67 @@ impl ClientConnectConfig {
             .into());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{MATH_COMPATIBILITY_VERSION, Network};
+    use lunarbase_math::types::{Address, B256};
+
+    #[test]
+    fn filter_accepts_only_empty_or_complete_quote_critical_topics() {
+        let required = quote_critical_topics();
+
+        let mut empty = config();
+        empty.filter.topics.clear();
+        assert!(empty.validate().is_ok());
+
+        let mut reordered = config();
+        reordered.filter.topics.reverse();
+        assert!(reordered.validate().is_ok());
+
+        let subset = required[..required.len() - 1].to_vec();
+        let mut unknown = required.to_vec();
+        *unknown.last_mut().unwrap() = B256::new([0x99; 32]);
+        let mut duplicate = required.to_vec();
+        *duplicate.last_mut().unwrap() = required[0];
+
+        for topics in [subset, unknown, duplicate] {
+            let mut invalid = config();
+            invalid.filter.topics = topics;
+            assert!(matches!(
+                invalid.validate(),
+                Err(IndexerError::Source(SourceError::Unavailable(ref detail)))
+                    if detail == "filter topics must be empty or exactly match all quote-critical Core topics"
+            ));
+        }
+    }
+
+    fn config() -> ClientConnectConfig {
+        let core = Address::new([1; 20]);
+        ClientConnectConfig {
+            deployment: DeploymentConfig {
+                network: Network::Base,
+                chain_id: 8453,
+                core,
+                router: Address::new([2; 20]),
+                expect_whitelisted: true,
+                deployment_block: 1,
+                expected_implementation: Address::new([3; 20]),
+                expected_implementation_code_hash: B256::new([4; 32]),
+                contract_compatibility_version: MATH_COMPATIBILITY_VERSION.into(),
+                explicit_lane_assets: vec![Address::new([5; 20])],
+            },
+            filter: ContractFilter {
+                address: core,
+                topics: quote_critical_topics().to_vec(),
+            },
+            buffer_capacity: 16,
+            reconnect_delay: Duration::from_millis(10),
+            source_stall_timeout: Duration::from_secs(1),
+        }
     }
 }
 

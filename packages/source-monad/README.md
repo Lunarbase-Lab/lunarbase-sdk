@@ -1,18 +1,20 @@
-# `@lunarbase/source-monad`
+# `@lunarbase-lab/pmm-v2-source-monad`
 
-Experimental portable Monad execution-events source.
+Monad execution-event data source for the LunarBase client.
+
+Status: **maintenance**. Updates focus on compatibility, reliability, and security fixes.
 
 ## Install
 
 ```bash
-pnpm add @lunarbase/math @lunarbase/client @lunarbase/source-monad
+npm install @lunarbase-lab/pmm-v2-math @lunarbase-lab/pmm-v2-client @lunarbase-lab/pmm-v2-source-monad
 ```
 
-## Connect
+## Use
 
 ```ts
-import { connect } from "@lunarbase/client";
-import { createMonadParserSource } from "@lunarbase/source-monad";
+import { connect } from "@lunarbase-lab/pmm-v2-client";
+import { createMonadParserSource } from "@lunarbase-lab/pmm-v2-source-monad";
 
 const source = createMonadParserSource({
   httpRpcUrl,
@@ -24,9 +26,10 @@ const quote = client.quote(request);
 await client.shutdown();
 ```
 
-TypeScript consumes the parser WebSocket and uses HTTP RPC for bootstrap and
-canonical recovery. Native event-ring access is intentionally Rust-only.
+`realtimeUrl` must point to a compatible Monad parser WebSocket endpoint.
 
-Keep this package behind an experimental gate until sequencing, commitment,
-gap recovery, reconnect, and soak behavior have been validated against a live
-Monad node.
+## Behavior
+
+- HTTP RPC provides bootstrap, backfill, and canonical recovery.
+- Parser sequence positions are retained in client updates.
+- Gaps and reconnects require canonical recovery before readiness.

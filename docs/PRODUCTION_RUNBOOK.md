@@ -1,115 +1,98 @@
 # LunarBase indexer production runbook
 
-## Deployment model
+## Deployment
 
-Run one independently indexing service per `(chain_id, Core, router)` profile.
-Every replica subscribes to realtime data, maintains its own in-memory state,
-and serves quotes. Put two or more ready replicas behind a load balancer; there
-is no leader, writer lease, fencing token, or standby role.
+Run at least two independently indexing replicas for each chain, Core, and
+router profile. Route traffic only to replicas whose /readyz endpoint returns 200.
 
-Redis is optional restart acceleration. One schema-v4 key stores the complete
-checkpoint without TTL. Redis outages and concurrent best-effort writes do not
-affect a running replica or its readiness.
+Supply deployment identity, implementation address and code hash, RPC
+endpoints, and source settings through command-line arguments, LUNARBASE_*
+environment variables, or an operator-owned TOML file. Checked-in files under
+examples/indexer are templates only.
+
+Redis is optional restart acceleration. When enabled, keep it on an
+access-controlled network, require authentication, encrypt transport where
+available, and include it in backup and credential-rotation policy.
 
 ## Start
 
-1. Store deployment, implementation, RPC, and realtime values in the
-   deployment system as CLI arguments, `LUNARBASE_*` variables, or an
-   operator-owned TOML. The repository profile under
-   `examples/indexer/config/production.base.toml` is only a topology example.
-2. Verify that the configured ERC-1967 implementation and its code hash belong to the pinned contract
-   compatibility revision.
-3. Configure Redis only if faster restarts are useful.
-4. Start at least two replicas and route traffic only to ready instances.
+Before rollout:
 
-For the local production-shaped stack:
+1. Verify chain ID, Core, router, deployment block, whitelist expectation,
+   implementation address, and runtime-code hash.
+2. Verify RPC archive range and realtime subscription limits.
+3. Size queues and timeouts for the provider and expected event rate.
+4. Start replicas independently and wait for readiness.
+
+Local production-shaped topology:
 
 ```sh
-docker compose -f examples/indexer/docker-compose.yml up --build -d
+cp examples/indexer/.env.example examples/indexer/.env
+```
+
+Fill the required deployment values in `examples/indexer/.env`, then run:
+
+```sh
+docker compose --env-file examples/indexer/.env -f examples/indexer/docker-compose.yml config
+docker compose --env-file examples/indexer/.env -f examples/indexer/docker-compose.yml up --build -d
 curl -fsS http://127.0.0.1:8080/healthz
 curl -fsS http://127.0.0.1:8080/readyz
 curl -fsS http://127.0.0.1:8080/metrics
 ```
 
-The Compose file is a topology example, not a source of real deployment
-addresses or RPC credentials.
+## Monitoring
 
-## Probes and external alerts
+- /healthz is a process liveness signal.
+- /readyz is the traffic-routing signal.
+- /metrics exposes Prometheus metrics.
 
-- Liveness: `GET /healthz`; use only for process restart decisions.
-- Readiness: `GET /readyz`; route quote traffic only on `200`.
-- Metrics: `GET /metrics`; Prometheus text format.
+Alert on sustained non-readiness, repeated recovery, queue saturation, source
+disconnects, quote errors, and checkpoint failures. A checkpoint failure
+affects restart speed; it does not invalidate a running ready replica.
 
-Adapt `examples/indexer/prometheus-alerts.yml` in deployment-owned monitoring
-configuration and route those alerts through Alertmanager. At minimum monitor sustained
-not-readiness, gaps/recovery loops, queue saturation, quote errors and
-checkpoint failures. A checkpoint failure means slower restart only.
+## Recovery
 
-## Gap, reorg, or reconnect
+A gap, reorganization, disconnect, queue overflow, or identity mismatch
+revokes readiness. If a replica does not recover:
 
-Each affected replica deliberately returns `503` while canonical recovery
-runs. Other healthy replicas continue serving. If one replica cannot recover:
+1. Remove it from traffic.
+2. Verify RPC availability and canonical block/log access.
+3. Recheck deployment identity and runtime-code hash.
+4. Inspect source, queue, recovery, and checkpoint metrics.
+5. Restart the replica after the dependency is healthy.
 
-1. Remove that replica from traffic.
-2. Verify RPC block/log availability and the Core implementation identity.
-3. Inspect gap, reconnect, queue, and recovery metrics.
-4. Restart the replica. An invalid or forked Redis checkpoint is ignored
-   automatically, so deleting Redis data is normally unnecessary.
+An invalid checkpoint is ignored automatically in favor of a canonical
+snapshot. Delete checkpoint data only after preserving it for diagnosis.
 
 ## Graceful shutdown
 
-Use `SIGTERM` and make the orchestrator grace period longer than
-`shutdown_timeout_seconds`. The process stops accepting quote traffic, joins
-its source/reducer tasks, and best-effort writes one final checkpoint. A forced
-kill only loses the latest restart checkpoint; another active replica is not
-affected.
+Send SIGTERM and set the orchestrator grace period above
+shutdown_timeout_seconds. The service revokes readiness, stops background
+work, closes HTTP gracefully, and writes a final checkpoint when configured.
 
 ## Capacity validation
 
-Run the checked-in harness against staging. Without `--vectors`, it generates
-the requested 15-lane/100-pair request topology; for a real deployment, pass a
-deployment-specific JSON vector file:
+Run the load tool against staging with deployment-specific vectors:
 
 ```sh
 cargo run -p lunarbase-tools --bin lunarbase-load -- \
   --indexer-url http://127.0.0.1:8080 \
-  --lanes 15 --pairs 100 --requests 20000 --concurrency 128 \
-  --pid "$(pgrep -n lunarbase-indexer)"
+  --vectors /absolute/path/to/vectors.json \
+  --requests 20000 --concurrency 128
 ```
 
-The report contains throughput, p50/p95/p99 latency, RSS estimates, indexed
-block progress, and checkpoint activity.
+Record throughput, p95 and p99 latency, memory, indexed block progress, and
+recovery behavior. Repeat with the same provider limits and replica resources
+used in production.
 
-For a real Monad node/parser soak:
+## Release verification
+
+Before publishing or deploying:
 
 ```sh
-cargo run -p lunarbase-tools --bin lunarbase-monad-validate -- \
-  --indexer-url http://127.0.0.1:8081 \
-  --parser-ws-url ws://127.0.0.1:8080/ws/subscriptions \
-  --parser-ready-url http://127.0.0.1:8080/readyz \
-  --rpc-url http://127.0.0.1:8545 \
-  --duration-seconds 86400 \
-  --report monad-soak-report.json
+make pre-push
+docker build --build-arg NETWORK_FEATURES=base .
 ```
 
-Add `--vectors /absolute/path/to/live-validation.json` when Solidity
-`eth_call` comparisons are available for the deployed private contracts.
-
-The official native event-ring SDK currently targets Linux x86_64. Build the
-colocated image with `make docker-build-monad-native`; the portable `monad`
-feature remains available for parser WebSocket development on other hosts.
-
-Monad and Arbitrum remain experimental until their node-based soak gates pass.
-Base artifacts are the only production release artifacts for now.
-
-## Release
-
-`make verify` validates source size, formatting, builds, lint, tests, and docs.
-`make release-check` inspects publishable crate and npm contents. The canonical
-Solidity/Rust/TypeScript differential suite is run from
-from a separately checked-out private contracts repository. From this SDK
-workspace, pass its absolute location explicitly:
-
-```sh
-make ffi CONTRACTS_DIR=/absolute/path/to/lunarbase-contracts
-```
+Publishing a vX.Y.Z GitHub Release reruns the release gate before registry
+publication.

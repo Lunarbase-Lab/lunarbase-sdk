@@ -5,6 +5,14 @@ const ROOTS = ["crates", "packages", "examples", "scripts"];
 const SOURCE_EXTENSIONS = new Set([".rs", ".ts", ".mjs"]);
 const IGNORED_DIRECTORIES = new Set(["dist", "node_modules", "target"]);
 const MAX_LINES = 500;
+const BASELINE_PATH = join(process.cwd(), "scripts/source-size-baseline.json");
+const BASELINE = JSON.parse(readFileSync(BASELINE_PATH, "utf8"));
+
+for (const [path, lines] of Object.entries(BASELINE)) {
+  if (!Number.isInteger(lines) || lines <= MAX_LINES) {
+    throw new Error(`invalid source-size baseline for ${path}: ${lines}`);
+  }
+}
 
 function codeLineCount(source) {
   let inBlockComment = false;
@@ -74,14 +82,23 @@ const oversized = ROOTS.flatMap(sourceFiles)
   }))
   .filter(({ lines }) => lines > MAX_LINES)
   .sort((left, right) => right.lines - left.lines);
+const oversizedByPath = new Map(oversized.map((entry) => [entry.path, entry.lines]));
 
-if (oversized.length > 0) {
-  for (const { path, lines } of oversized) {
-    console.error(`${path}: ${lines} code lines (maximum ${MAX_LINES})`);
-  }
+const regressions = oversized.filter(({ path, lines }) => lines > (BASELINE[path] ?? MAX_LINES));
+const staleBaseline = Object.keys(BASELINE).filter((path) => !oversizedByPath.has(path));
+
+for (const path of staleBaseline) {
+  console.error(`${path}: no longer exceeds ${MAX_LINES}; remove its baseline entry`);
+}
+for (const { path, lines } of regressions) {
+  const allowed = BASELINE[path] ?? MAX_LINES;
+  console.error(`${path}: ${lines} code lines (allowed ${allowed})`);
+}
+
+if (staleBaseline.length > 0 || regressions.length > 0) {
   process.exitCode = 1;
 } else {
   console.log(
-    `All Rust/TypeScript source files are within ${MAX_LINES} non-comment code lines.`,
+    `Source-size policy passed: maximum ${MAX_LINES}, ${Object.keys(BASELINE).length} approved baseline exceptions.`,
   );
 }

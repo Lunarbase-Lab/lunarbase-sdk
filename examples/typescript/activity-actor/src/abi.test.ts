@@ -31,7 +31,7 @@ test("decodes Core and token errors with arguments", () => {
   assert.equal(laneError.errorName, "LaneDoesNotExist");
   assert.deepEqual(laneError.args, [assetIn, assetOut]);
 
-  const spender = "0x11116c60551889C6c01DDAD3A1fB3Cc95CbeBBbB";
+  const spender = "0x0000000000000000000000000000000000000001";
   const allowanceData = encodeErrorResult({
     abi: MOCK_TOKEN_ABI,
     errorName: "ERC20InsufficientAllowance",

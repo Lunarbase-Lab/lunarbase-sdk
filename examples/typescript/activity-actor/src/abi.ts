@@ -7,6 +7,7 @@ export const CORE_ACTOR_ABI = parseAbi([
   "function lane(address asset) view returns (bytes32)",
   "function reserves(address asset) view returns (uint128 assetReserve, uint128 treasuryFees, uint128 partnerFees, uint128 escrowedAssets, uint128 totalPrincipalAmount)",
   "function quoteExactIn(uint256 amountIn, address assetIn, address assetOut) view returns (uint256 amountOut)",
+  "function quoteExactOut(address assetIn, uint256 amountOut, address assetOut) view returns (uint256 amountIn)",
   "function swapExactIn((address assetIn, address assetOut, address recipient, uint256 amountIn, uint256 amountOutMinimum, uint256 deadline) params) payable returns (uint256 amountOut)",
   "event SwapExecuted(address indexed router, address indexed assetIn, address indexed assetOut, bool exactIn, uint256 amountIn, uint256 amountOut, address feeAsset, uint256 feeAmount, uint256 partnerFee, uint256 treasuryFee)",
   "error AlreadyInitialized()",

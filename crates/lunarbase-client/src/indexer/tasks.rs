@@ -6,7 +6,7 @@ use crate::indexer::client_types::{
 };
 use crate::indexer::engine::QuoteIndexer;
 use crate::indexer::errors::{ClientRuntimeEvent, IndexerError};
-use crate::model::{BackfillRequest, ChainUpdate, ContractFilter};
+use crate::model::{BackfillRequest, ChainUpdate, ContractFilter, ContractLog};
 use crate::source::{ChainDataSource, SourceStream};
 use crate::state::reducer::ReducerError;
 use futures_util::StreamExt;
@@ -22,6 +22,8 @@ pub(super) struct ReducerRuntime {
     pub events: broadcast::Sender<ClientRuntimeEvent>,
     /// Lock-free runtime counters updated by the single reducer task.
     pub stats: Arc<ClientRuntimeStats>,
+    /// Optional required sink used by explicit canonical recovery backfills.
+    pub core_event_sink: Option<mpsc::Sender<ContractLog>>,
 }
 
 /// Source-specific timing, lifecycle, and observability handles.
@@ -249,12 +251,17 @@ pub(super) async fn reducer_loop<S>(
             return;
         };
         runtime.stats.queue_depth.fetch_sub(1, Ordering::Relaxed);
-        let result = shared
-            .indexer
-            .write()
-            .map_err(|_| IndexerError::LockPoisoned)
-            .and_then(|mut indexer| indexer.apply_core_update(update));
+        let result = apply_live_update(shared.as_ref(), update, &runtime).await;
         if let Err(error) = result {
+            if matches!(error, IndexerError::EventSinkClosed) {
+                shared.available.store(false, Ordering::Release);
+                shared.ready.notify_waiters();
+                publish(
+                    &runtime.events,
+                    ClientRuntimeEvent::BackgroundTaskStopped { task: "reducer" },
+                );
+                return;
+            }
             shared.available.store(false, Ordering::Release);
             runtime.stats.gaps.fetch_add(1, Ordering::Relaxed);
             publish(
@@ -280,6 +287,28 @@ pub(super) async fn reducer_loop<S>(
     }
 }
 
+async fn apply_live_update(
+    shared: &SharedQuoteState,
+    update: ChainUpdate,
+    runtime: &ReducerRuntime,
+) -> Result<(), IndexerError> {
+    if let ChainUpdate::Log(log) = &update {
+        let covered = shared
+            .indexer
+            .read()
+            .map_err(|_| IndexerError::LockPoisoned)?
+            .canonical_floor_covers_core_log(log)?;
+        if !covered {
+            send_required_core_event(runtime.core_event_sink.as_ref(), log.clone()).await?;
+        }
+    }
+    shared
+        .indexer
+        .write()
+        .map_err(|_| IndexerError::LockPoisoned)?
+        .apply_core_update(update)
+}
+
 async fn recover_until_ready<S: ChainDataSource>(
     shared: &SharedQuoteState,
     source: &S,
@@ -289,6 +318,13 @@ async fn recover_until_ready<S: ChainDataSource>(
     source_active: &mut watch::Receiver<bool>,
     runtime: &ReducerRuntime,
 ) -> bool {
+    let recovery_from = match shared.indexer.read() {
+        Ok(indexer) => indexer.reducer.cursor().cloned(),
+        Err(_) => {
+            record_recovery_failure(IndexerError::LockPoisoned, &runtime.events, &runtime.stats);
+            return false;
+        }
+    };
     loop {
         publish(&runtime.events, ClientRuntimeEvent::RecoveryStarted);
         if !wait_for_source_active(source_active, cancel).await {
@@ -301,16 +337,41 @@ async fn recover_until_ready<S: ChainDataSource>(
         };
         match snapshot {
             Ok(snapshot) => {
+                let backfill_logs = if let Some(recovery_from) = recovery_from.as_ref() {
+                    match load_recovery_events(
+                        source,
+                        &config.filter,
+                        recovery_from,
+                        &snapshot.cursor,
+                        runtime.core_event_sink.as_ref(),
+                    )
+                    .await
+                    {
+                        Ok(logs) => logs,
+                        Err(error) => {
+                            record_recovery_failure(error, &runtime.events, &runtime.stats);
+                            if sleep_or_cancel(config.reconnect_delay, cancel).await {
+                                return false;
+                            }
+                            continue;
+                        }
+                    }
+                } else {
+                    Vec::new()
+                };
                 let mut buffered = Vec::new();
                 while let Ok(update) = updates.try_recv() {
                     runtime.stats.queue_depth.fetch_sub(1, Ordering::Relaxed);
                     buffered.push(update);
                 }
-                let result = shared
-                    .indexer
-                    .write()
-                    .map_err(|_| IndexerError::LockPoisoned)
-                    .and_then(|mut indexer| indexer.bootstrap_normalized(snapshot, buffered));
+                let result = install_recovered_state(
+                    shared,
+                    snapshot,
+                    buffered,
+                    backfill_logs,
+                    runtime.core_event_sink.as_ref(),
+                )
+                .await;
                 match result {
                     Ok(()) => {
                         runtime.stats.recoveries.fetch_add(1, Ordering::Relaxed);
@@ -319,7 +380,13 @@ async fn recover_until_ready<S: ChainDataSource>(
                         publish(&runtime.events, ClientRuntimeEvent::RecoveryCompleted);
                         return true;
                     }
-                    Err(error) => record_recovery_failure(error, &runtime.events, &runtime.stats),
+                    Err(error) => {
+                        let terminal = matches!(error, IndexerError::EventSinkClosed);
+                        record_recovery_failure(error, &runtime.events, &runtime.stats);
+                        if terminal {
+                            return false;
+                        }
+                    }
                 }
             }
             Err(error) => record_recovery_failure(error.into(), &runtime.events, &runtime.stats),
@@ -328,6 +395,131 @@ async fn recover_until_ready<S: ChainDataSource>(
             return false;
         }
     }
+}
+
+async fn load_recovery_events<S: ChainDataSource>(
+    source: &S,
+    filter: &ContractFilter,
+    from: &crate::model::ChainCursor,
+    to: &crate::model::ChainCursor,
+    core_event_sink: Option<&mpsc::Sender<ContractLog>>,
+) -> Result<Vec<ContractLog>, IndexerError> {
+    if core_event_sink.is_none() {
+        return Ok(Vec::new());
+    };
+    if from.chain_id != to.chain_id {
+        return Err(ReducerError::ChainIdMismatch.into());
+    }
+    if from.block_number > to.block_number {
+        return Err(IndexerError::Gap(
+            "canonical recovery head regressed below the pre-gap cursor".into(),
+        ));
+    }
+    let mut logs = source
+        .backfill(BackfillRequest {
+            from_block: from.block_number,
+            to_block: to.block_number,
+            filter: filter.clone(),
+        })
+        .await?;
+    logs.sort_by_key(|log| log.cursor.event_order());
+    for log in &logs {
+        if log.cursor.chain_id != to.chain_id {
+            return Err(ReducerError::ChainIdMismatch.into());
+        }
+        if log.cursor.block_number < from.block_number
+            || log.cursor.block_number > to.block_number
+            || log.cursor.block_hash.is_none()
+        {
+            return Err(IndexerError::Gap(
+                "canonical recovery backfill returned an out-of-range or hashless log".into(),
+            ));
+        }
+    }
+    Ok(logs)
+}
+
+async fn install_recovered_state(
+    shared: &SharedQuoteState,
+    snapshot: crate::bootstrap::BootstrapSnapshot,
+    mut buffered: Vec<ChainUpdate>,
+    backfill_logs: Vec<ContractLog>,
+    core_event_sink: Option<&mpsc::Sender<ContractLog>>,
+) -> Result<(), IndexerError> {
+    crate::indexer::engine::sort_chain_updates(&mut buffered);
+
+    // Validate the complete transition privately. Shared quote state remains
+    // unavailable until every event crosses the required bounded sink.
+    let mut candidate = shared
+        .indexer
+        .read()
+        .map_err(|_| IndexerError::LockPoisoned)?
+        .clone();
+    candidate.bootstrap_normalized(snapshot, buffered.clone())?;
+
+    let mut ordered_logs = backfill_logs;
+    ordered_logs.extend(buffered.iter().filter_map(|update| match update {
+        ChainUpdate::Log(log) => Some(log.clone()),
+        _ => None,
+    }));
+    ordered_logs.sort_by_key(|log| log.cursor.event_order());
+    ordered_logs.dedup_by(|right, left| same_core_event_identity(left, right));
+    for log in ordered_logs {
+        send_required_core_event(core_event_sink, log).await?;
+    }
+
+    *shared
+        .indexer
+        .write()
+        .map_err(|_| IndexerError::LockPoisoned)? = candidate;
+    Ok(())
+}
+
+pub(super) async fn emit_handoff_events(
+    indexer: &QuoteIndexer,
+    buffered: &[ChainUpdate],
+    core_event_sink: Option<&mpsc::Sender<ContractLog>>,
+    skip_canonical_covered: bool,
+) -> Result<(), IndexerError> {
+    let mut logs = buffered
+        .iter()
+        .filter_map(|update| match update {
+            ChainUpdate::Log(log) => Some(log.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    logs.sort_by_key(|log| log.cursor.event_order());
+    logs.dedup_by(|right, left| same_core_event_identity(left, right));
+    for log in logs {
+        if skip_canonical_covered && indexer.canonical_floor_covers_core_log(&log)? {
+            continue;
+        }
+        send_required_core_event(core_event_sink, log).await?;
+    }
+    Ok(())
+}
+
+fn same_core_event_identity(left: &ContractLog, right: &ContractLog) -> bool {
+    left.address == right.address
+        && left.transaction_hash == right.transaction_hash
+        && left.topics == right.topics
+        && left.data == right.data
+        && left.removed == right.removed
+        && left.cursor.chain_id == right.cursor.chain_id
+        && left.cursor.block_hash == right.cursor.block_hash
+        && left.cursor.event_order() == right.cursor.event_order()
+}
+
+async fn send_required_core_event(
+    sink: Option<&mpsc::Sender<ContractLog>>,
+    log: ContractLog,
+) -> Result<(), IndexerError> {
+    if let Some(sink) = sink {
+        sink.send(log)
+            .await
+            .map_err(|_| IndexerError::EventSinkClosed)?;
+    }
+    Ok(())
 }
 
 fn record_recovery_failure(
@@ -348,6 +540,7 @@ pub(super) async fn recover_checkpoint<S: ChainDataSource>(
     indexer: &mut QuoteIndexer,
     source: &S,
     filter: &ContractFilter,
+    core_event_sink: Option<&mpsc::Sender<ContractLog>>,
 ) -> Result<(), IndexerError> {
     let checkpoint_cursor = indexer
         .reducer
@@ -383,10 +576,16 @@ pub(super) async fn recover_checkpoint<S: ChainDataSource>(
             if log.cursor.event_order() <= checkpoint_cursor.event_order() {
                 continue;
             }
+            if let Some(sink) = core_event_sink {
+                sink.send(log.clone())
+                    .await
+                    .map_err(|_| IndexerError::EventSinkClosed)?;
+            }
             indexer.apply_core_update(ChainUpdate::Log(log))?;
         }
     }
-    indexer.apply_core_update(ChainUpdate::Head(head))?;
+    indexer.apply_core_update(ChainUpdate::Head(head.clone()))?;
+    indexer.set_canonical_floor(head);
     indexer.reducer.publish_ready();
     Ok(())
 }

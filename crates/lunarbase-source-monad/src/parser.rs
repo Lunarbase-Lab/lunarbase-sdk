@@ -17,7 +17,10 @@ use std::{
     collections::{BTreeMap, VecDeque},
     time::Duration,
 };
-use tokio::{net::TcpStream, time::timeout};
+use tokio::{
+    net::TcpStream,
+    time::{Instant, timeout_at},
+};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async_with_config,
     tungstenite::{Message, protocol::WebSocketConfig},
@@ -30,6 +33,41 @@ use crate::protocol::{ParserMessage, decode_parser_message};
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 type ParserSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+struct ParserHandshake {
+    logs_subscription: String,
+    all_subscription: String,
+    buffered: VecDeque<Vec<u8>>,
+}
+
+#[derive(Default)]
+struct ParserHandshakeState {
+    logs_subscription: Option<String>,
+    all_subscription: Option<String>,
+    buffered: VecDeque<Vec<u8>>,
+}
+
+impl ParserHandshakeState {
+    fn is_complete(&self) -> bool {
+        self.logs_subscription.is_some() && self.all_subscription.is_some()
+    }
+
+    fn finish(self) -> Result<ParserHandshake, SourceError> {
+        Ok(ParserHandshake {
+            logs_subscription: self.logs_subscription.ok_or_else(|| {
+                SourceError::Unavailable(
+                    "Monad parser logs subscription was not acknowledged".into(),
+                )
+            })?,
+            all_subscription: self.all_subscription.ok_or_else(|| {
+                SourceError::Unavailable(
+                    "Monad parser all subscription was not acknowledged".into(),
+                )
+            })?,
+            buffered: self.buffered,
+        })
+    }
+}
+
 /// Resource and identity settings for the local Monad parser connection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MonadParserConfig {
@@ -41,6 +79,8 @@ pub struct MonadParserConfig {
     pub chain_id: u64,
     /// Maximum accepted WebSocket frame size before fail-closed recovery.
     pub max_frame_bytes: usize,
+    /// Maximum notifications retained while subscription acknowledgements arrive.
+    pub max_prefetched_frames: usize,
 }
 
 impl Default for MonadParserConfig {
@@ -50,6 +90,7 @@ impl Default for MonadParserConfig {
             core: Address::ZERO,
             chain_id: 143,
             max_frame_bytes: 64 * 1024,
+            max_prefetched_frames: 4096,
         }
     }
 }
@@ -65,9 +106,13 @@ impl MonadParserConfig {
                 "Monad parser URL must use ws or wss".into(),
             ));
         }
-        if self.chain_id == 0 || self.core == Address::ZERO || self.max_frame_bytes == 0 {
+        if self.chain_id == 0
+            || self.core == Address::ZERO
+            || self.max_frame_bytes == 0
+            || self.max_prefetched_frames == 0
+        {
             return Err(SourceError::Unavailable(
-                "Monad parser chain id, Core, and frame bound must be non-zero".into(),
+                "Monad parser chain id, Core, and resource bounds must be non-zero".into(),
             ));
         }
         Ok(())
@@ -158,35 +203,45 @@ pub async fn connect_parser_stream(
         max_frame_size: Some(config.max_frame_bytes),
         ..Default::default()
     };
-    let (mut socket, _) = connect_async_with_config(&config.ws_url, Some(bounds), false)
-        .await
-        .map_err(|error| {
-            SourceError::Unavailable(format!("Monad parser connect failed: {error}"))
-        })?;
-    socket
-        .send(Message::Text(subscription_request(
+    let handshake_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
+    let (mut socket, _) = timeout_at(
+        handshake_deadline,
+        connect_async_with_config(&config.ws_url, Some(bounds), false),
+    )
+    .await
+    .map_err(|_| handshake_timed_out())?
+    .map_err(|error| SourceError::Unavailable(format!("Monad parser connect failed: {error}")))?;
+    timeout_at(
+        handshake_deadline,
+        socket.send(Message::Text(subscription_request(
             1,
             "logs",
             Some((&config.core, &filter)),
-        )))
-        .await
-        .map_err(|error| {
-            SourceError::Unavailable(format!("Monad parser subscribe failed: {error}"))
-        })?;
-    socket
-        .send(Message::Text(subscription_request(2, "all", None)))
-        .await
-        .map_err(|error| {
-            SourceError::Unavailable(format!("Monad parser subscribe failed: {error}"))
-        })?;
-    let mut buffered = timeout(
-        HANDSHAKE_TIMEOUT,
-        read_acknowledgements(&mut socket, config.max_frame_bytes),
+        ))),
     )
     .await
-    .map_err(|_| {
-        SourceError::Unavailable("Monad parser subscription handshake timed out".into())
-    })??;
+    .map_err(|_| handshake_timed_out())?
+    .map_err(|error| SourceError::Unavailable(format!("Monad parser subscribe failed: {error}")))?;
+    timeout_at(
+        handshake_deadline,
+        socket.send(Message::Text(subscription_request(2, "all", None))),
+    )
+    .await
+    .map_err(|_| handshake_timed_out())?
+    .map_err(|error| SourceError::Unavailable(format!("Monad parser subscribe failed: {error}")))?;
+    let handshake = timeout_at(
+        handshake_deadline,
+        read_acknowledgements(
+            &mut socket,
+            config.max_frame_bytes,
+            config.max_prefetched_frames,
+        ),
+    )
+    .await
+    .map_err(|_| handshake_timed_out())??;
+    let mut buffered = handshake.buffered;
+    let logs_subscription = handshake.logs_subscription;
+    let all_subscription = handshake.all_subscription;
     let (mut writer, mut reader) = socket.split();
 
     let output = stream! {
@@ -223,6 +278,15 @@ pub async fn connect_parser_stream(
             }
             match decode_parser_message(&payload) {
                 Ok(ParserMessage::Head(head)) => {
+                    if let Err(error) =
+                        validate_notification_subscription(&payload, &all_subscription, "head")
+                    {
+                        yield Ok(ExecutionEvent::Gap {
+                            cursor: None,
+                            reason: error.to_string(),
+                        });
+                        break;
+                    }
                     commitments.insert(head.block_number, head.commitment);
                     while commitments.len() > 64 {
                         commitments.pop_first();
@@ -230,6 +294,15 @@ pub async fn connect_parser_stream(
                     yield Ok(ExecutionEvent::Head(head));
                 }
                 Ok(ParserMessage::Log(mut log)) => {
+                    if let Err(error) =
+                        validate_notification_subscription(&payload, &logs_subscription, "log")
+                    {
+                        yield Ok(ExecutionEvent::Gap {
+                            cursor: None,
+                            reason: error.to_string(),
+                        });
+                        break;
+                    }
                     if log.address != config.core {
                         continue;
                     }
@@ -260,11 +333,10 @@ pub async fn connect_parser_stream(
 async fn read_acknowledgements(
     socket: &mut ParserSocket,
     max_frame_bytes: usize,
-) -> Result<VecDeque<Vec<u8>>, SourceError> {
-    let mut logs_acknowledged = false;
-    let mut all_acknowledged = false;
-    let mut buffered = VecDeque::new();
-    while !logs_acknowledged || !all_acknowledged {
+    max_prefetched_frames: usize,
+) -> Result<ParserHandshake, SourceError> {
+    let mut state = ParserHandshakeState::default();
+    while !state.is_complete() {
         let message = socket
             .next()
             .await
@@ -280,25 +352,92 @@ async fn read_acknowledgements(
                 "Monad parser handshake frame exceeded configured bound".into(),
             ));
         }
-        let value: Value = serde_json::from_slice(&payload).map_err(|error| {
-            SourceError::Unavailable(format!("invalid Monad parser handshake JSON: {error}"))
+        observe_handshake_payload(&mut state, payload, max_prefetched_frames)?;
+    }
+    state.finish()
+}
+
+fn observe_handshake_payload(
+    state: &mut ParserHandshakeState,
+    payload: Vec<u8>,
+    max_prefetched_frames: usize,
+) -> Result<(), SourceError> {
+    let value: Value = serde_json::from_slice(&payload).map_err(|error| {
+        SourceError::Unavailable(format!("invalid Monad parser handshake JSON: {error}"))
+    })?;
+    if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
+        return Err(SourceError::Unavailable(format!(
+            "Monad parser subscription rejected: {error}"
+        )));
+    }
+
+    let Some(id_value) = value.get("id") else {
+        if state.buffered.len() >= max_prefetched_frames {
+            return Err(SourceError::Unavailable(
+                "Monad parser handshake prefetch exceeded configured bound".into(),
+            ));
+        }
+        state.buffered.push_back(payload);
+        return Ok(());
+    };
+    let id = id_value
+        .as_u64()
+        .filter(|id| matches!(id, 1 | 2))
+        .ok_or_else(|| {
+            SourceError::Unavailable(
+                "Monad parser acknowledgement has an unexpected numeric id".into(),
+            )
         })?;
-        if let Some(error) = value.get("error") {
+    let subscription = value
+        .get("result")
+        .and_then(Value::as_str)
+        .filter(|subscription| !subscription.is_empty())
+        .ok_or_else(|| {
+            SourceError::Unavailable("Monad parser acknowledgement has no subscription id".into())
+        })?;
+    let current = if id == 1 {
+        &mut state.logs_subscription
+    } else {
+        &mut state.all_subscription
+    };
+    if let Some(previous) = current {
+        if previous != subscription {
             return Err(SourceError::Unavailable(format!(
-                "Monad parser subscription rejected: {error}"
+                "Monad parser acknowledgement {id} changed subscription id"
             )));
         }
-        match value.get("id").and_then(Value::as_u64) {
-            Some(1) if value.get("result").and_then(Value::as_str).is_some() => {
-                logs_acknowledged = true;
-            }
-            Some(2) if value.get("result").and_then(Value::as_str).is_some() => {
-                all_acknowledged = true;
-            }
-            _ => buffered.push_back(payload),
-        }
+    } else {
+        *current = Some(subscription.to_owned());
     }
-    Ok(buffered)
+    Ok(())
+}
+
+fn handshake_timed_out() -> SourceError {
+    SourceError::Unavailable("Monad parser subscription handshake timed out".into())
+}
+
+fn validate_notification_subscription(
+    payload: &[u8],
+    expected: &str,
+    kind: &str,
+) -> Result<(), SourceError> {
+    let value: Value = serde_json::from_slice(payload)
+        .map_err(|error| SourceError::Unavailable(format!("invalid Monad parser JSON: {error}")))?;
+    let subscription = value
+        .get("result")
+        .and_then(|result| result.get("subscription"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            SourceError::Gap(format!(
+                "Monad parser {kind} notification has no subscription id"
+            ))
+        })?;
+    if subscription != expected {
+        return Err(SourceError::Gap(format!(
+            "Monad parser {kind} notification used an unexpected subscription id"
+        )));
+    }
+    Ok(())
 }
 
 async fn parser_payload<S>(
@@ -360,43 +499,4 @@ fn word_hex(value: B256) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::parser::subscription_request;
-    use crate::protocol::{ParserMessage, decode_parser_message};
-    use lunarbase_client::model::ContractFilter;
-    use lunarbase_math::types::{Address, B256, U256};
-    use serde_json::Value;
-
-    #[test]
-    fn subscription_request_matches_parser_shape() {
-        let address = "0x0000000000000000000000000000000000000001"
-            .parse::<Address>()
-            .unwrap();
-        let message = subscription_request(
-            1,
-            "logs",
-            Some((
-                &address,
-                &ContractFilter {
-                    address,
-                    topics: vec![B256::new(U256::ONE.to_be_bytes::<32>())],
-                },
-            )),
-        );
-        let value: Value = serde_json::from_str(&message).unwrap();
-        assert_eq!(value["params"][0], "logs");
-        assert_eq!(
-            value["params"][1]["address"],
-            "0x0000000000000000000000000000000000000001"
-        );
-        assert_eq!(value["params"][1]["topics"][0][0], format!("0x{:064x}", 1));
-    }
-
-    #[test]
-    fn parser_gap_control_message_is_not_downgraded_to_health() {
-        let message = br#"{"jsonrpc":"2.0","method":"subscriptionGap","params":{"skipped":42,"resubscribeRequired":true}}"#;
-        assert!(
-            matches!(decode_parser_message(message).unwrap(), ParserMessage::Gap(reason) if reason.contains("42"))
-        );
-    }
-}
+mod tests;

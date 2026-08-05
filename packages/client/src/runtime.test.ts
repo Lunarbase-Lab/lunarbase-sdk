@@ -8,16 +8,20 @@ import {
   type Address,
   type QuoteRequest,
   type QuoteState,
-} from "@lunarbase/math";
+} from "@lunarbase-lab/pmm-v2-math";
+import * as HexValue from "ox/Hex";
 import type { Hex } from "ox/Hex";
 import {
   Commitment,
   ConnectedQuoteClient,
+  CORE_EVENT_TOPICS,
   MATH_COMPATIBILITY_VERSION,
   Network,
   QuoteIndexer,
   QuoteReducer,
   SCHEMA_VERSION,
+  checkpointMatchesDeployment,
+  validateDeploymentConfig,
   type BackfillRequest,
   type BootstrapSnapshot,
   type ChainCursor,
@@ -29,6 +33,7 @@ import {
   type ContractLog,
   type DeploymentConfig,
 } from "./index.js";
+import { CursorReorderBuffer } from "./state/ordering.js";
 
 const CASH = "0x0000000000000000000000000000000000000001" as Address;
 const ASSET = "0x0000000000000000000000000000000000000002" as Address;
@@ -115,11 +120,15 @@ test("quote and quoteMany use one in-memory snapshot without source I/O", async 
   await client.shutdown();
 });
 
-test("v4 checkpoint is deployment-bound and reusable", async () => {
+test("checkpoint is deployment-bound and reusable", async () => {
   const source = new MockSource();
   const first = await ConnectedQuoteClient.connect(connectConfig(), source);
   const checkpoint = first.checkpoint();
   assert.equal(checkpoint?.schemaVersion, SCHEMA_VERSION);
+  assert.equal(checkpoint?.network, Network.Base);
+  assert.equal(checkpoint?.deploymentBlock, 1n);
+  assert.equal(checkpoint?.expectWhitelisted, true);
+  assert.deepEqual(checkpoint?.explicitLaneAssets, [ASSET]);
   assert.equal(checkpoint?.router, ROUTER);
   await first.shutdown();
 
@@ -153,6 +162,81 @@ test("forked or incompatible checkpoints fall back to a full snapshot", async ()
   await rejected.shutdown();
 });
 
+test("checkpoint policy and structural state mismatches fail closed", () => {
+  const checkpoint = QuoteIndexer.fromSnapshot(snapshot(), deployment()).checkpoint();
+  assert.ok(checkpoint);
+  if (!checkpoint) throw new Error("checkpoint was not produced");
+
+  assert.equal(checkpointMatchesDeployment({ ...checkpoint, network: Network.Monad }, deployment()), false);
+  assert.equal(
+    checkpointMatchesDeployment({ ...checkpoint, deploymentBlock: checkpoint.deploymentBlock + 1n }, deployment()),
+    false,
+  );
+  assert.equal(
+    checkpointMatchesDeployment({ ...checkpoint, expectWhitelisted: !checkpoint.expectWhitelisted }, deployment()),
+    false,
+  );
+  assert.equal(checkpointMatchesDeployment({ ...checkpoint, explicitLaneAssets: [CASH] }, deployment()), false);
+
+  const invalidCash: Checkpoint = {
+    ...checkpoint,
+    state: { ...checkpoint.state, cash: "0x0000000000000000000000000000000000000000" },
+  };
+  assert.equal(checkpointMatchesDeployment(invalidCash, deployment()), false);
+
+  const invalidFee: Checkpoint = {
+    ...checkpoint,
+    state: {
+      ...checkpoint.state,
+      feeProfile: {
+        ...checkpoint.state.feeProfile,
+        partnerFeeBps: new Map([[ASSET, 1_000_001]]),
+      },
+    },
+  };
+  assert.equal(checkpointMatchesDeployment(invalidFee, deployment()), false);
+
+  const invalidWhitelist: Checkpoint = {
+    ...checkpoint,
+    state: {
+      ...checkpoint.state,
+      feeProfile: {
+        ...checkpoint.state.feeProfile,
+        whitelisted: !checkpoint.expectWhitelisted,
+      },
+    },
+  };
+  assert.equal(checkpointMatchesDeployment(invalidWhitelist, deployment()), false);
+});
+
+test("deployment and checkpoint integers match Rust widths", () => {
+  const overU64 = 1n << 64n;
+  const overU32 = 1n << 32n;
+  const invalidDeployments: DeploymentConfig[] = [
+    { ...deployment(), chainId: overU64 },
+    { ...deployment(), deploymentBlock: -1n },
+    { ...deployment(), deploymentBlock: overU64 },
+    { ...deployment(), network: "Unsupported" as Network },
+    { ...deployment(), expectWhitelisted: 1 as unknown as boolean },
+    { ...deployment(), explicitLaneAssets: undefined as unknown as readonly Address[] },
+  ];
+  for (const invalid of invalidDeployments) assert.throws(() => validateDeploymentConfig(invalid), { code: "SOURCE" });
+
+  const checkpoint = QuoteIndexer.fromSnapshot(snapshot(), deployment()).checkpoint();
+  assert.ok(checkpoint);
+  if (!checkpoint) throw new Error("checkpoint was not produced");
+  const invalidCursors: ChainCursor[] = [
+    { ...checkpoint.cursor, blockNumber: overU64 },
+    { ...checkpoint.cursor, executionBlockNumber: overU64 },
+    { ...checkpoint.cursor, sourceSequence: overU64 },
+    { ...checkpoint.cursor, transactionIndex: overU32, logIndex: 0n },
+    { ...checkpoint.cursor, transactionIndex: 0n, logIndex: overU32 },
+    { ...checkpoint.cursor, sourceSequence: 0n, sourceSubIndex: overU32 },
+  ];
+  for (const invalidCursor of invalidCursors)
+    assert.equal(checkpointMatchesDeployment({ ...checkpoint, cursor: invalidCursor }, deployment()), false);
+});
+
 test("gap stays fail-closed until retrying snapshot recovery succeeds", async () => {
   const source = new MockSource();
   const client = await ConnectedQuoteClient.connect(connectConfig(), source);
@@ -163,6 +247,104 @@ test("gap stays fail-closed until retrying snapshot recovery succeeds", async ()
   await waitUntil(() => source.snapshotCalls >= 3 && client.health().ready);
   assert.doesNotThrow(() => client.quote(request()));
   await client.shutdown();
+});
+
+test("canonical block floor ignores a late covered log", () => {
+  const indexer = QuoteIndexer.fromSnapshot(snapshot(), deployment());
+  indexer.applyCoreUpdate({ kind: "Log", log: depositLog(eventCursor(1n), 7n) });
+
+  assert.equal(indexer.checkpoint()?.state.lanes.get(ASSET)?.totalPrincipalAmount, 0n);
+  assert.equal(indexer.health().ready, true);
+});
+
+test("installSnapshot replaces the canonical floor atomically", () => {
+  const previous = snapshot();
+  const indexer = QuoteIndexer.fromSnapshot(
+    {
+      ...previous,
+      cursor: {
+        ...previous.cursor,
+        blockNumber: previous.cursor.blockNumber - 1n,
+        executionBlockNumber: previous.cursor.executionBlockNumber - 1n,
+      },
+    },
+    deployment(),
+  );
+  indexer.installSnapshot(snapshot(), []);
+  indexer.applyCoreUpdate({ kind: "Log", log: depositLog(eventCursor(1n), 7n) });
+
+  assert.equal(indexer.checkpoint()?.state.lanes.get(ASSET)?.totalPrincipalAmount, 0n);
+});
+
+test("canonical floor never hides a removed log", () => {
+  const indexer = QuoteIndexer.fromSnapshot(snapshot(), deployment());
+  const removed = { ...depositLog(eventCursor(1n), 7n), removed: true };
+
+  assert.throws(() => indexer.applyCoreUpdate({ kind: "Log", log: removed }), { code: "GAP" });
+  assert.equal(indexer.health().ready, false);
+});
+
+test("same-block canonical floor rejects a conflicting hash", () => {
+  const indexer = QuoteIndexer.fromSnapshot(snapshot(), deployment());
+  const conflicting = eventCursor(1n);
+  conflicting.blockHash = `0x${"22".repeat(32)}` as Hex;
+
+  assert.throws(() => indexer.applyCoreUpdate({ kind: "Log", log: depositLog(conflicting, 7n) }), {
+    code: "REDUCER",
+  });
+  assert.equal(indexer.health().ready, false);
+});
+
+test("canonical log identity ignores transport sequence for duplicate detection", () => {
+  const firstCursor = { ...eventCursor(3n), sourceSequence: 1n };
+  const duplicateCursor = { ...firstCursor, sourceSequence: 2n };
+  const duplicateBuffer = new CursorReorderBuffer(2);
+  duplicateBuffer.push({ kind: "Log", log: depositLog(firstCursor, 7n) });
+  assert.throws(() => duplicateBuffer.push({ kind: "Log", log: depositLog(duplicateCursor, 7n) }), {
+    message: "multiple updates share one cursor",
+  });
+  assert.equal(duplicateBuffer.isPoisoned(), true);
+
+  const conflictBuffer = new CursorReorderBuffer(2);
+  conflictBuffer.push({ kind: "Log", log: depositLog(firstCursor, 7n) });
+  assert.throws(() => conflictBuffer.push({ kind: "Log", log: depositLog(duplicateCursor, 8n) }), {
+    message: "multiple updates share one cursor",
+  });
+  assert.equal(conflictBuffer.isPoisoned(), true);
+});
+
+test("event-level checkpoint floor covers only events through its cursor", () => {
+  const checkpoint = QuoteIndexer.fromSnapshot(snapshot(), deployment()).checkpoint();
+  assert.ok(checkpoint);
+  if (!checkpoint) throw new Error("checkpoint was not produced");
+  checkpoint.cursor = {
+    ...checkpoint.cursor,
+    transactionIndex: 2n,
+    logIndex: 3n,
+    commitment: Commitment.Canonical,
+  };
+  const indexer = QuoteIndexer.fromCheckpoint(checkpoint, deployment());
+
+  indexer.applyCoreUpdate({ kind: "Log", log: depositLog(eventCursor(2n), 5n) });
+  assert.equal(indexer.checkpoint()?.state.lanes.get(ASSET)?.totalPrincipalAmount, 0n);
+
+  indexer.applyCoreUpdate({ kind: "Log", log: depositLog(eventCursor(4n), 5n) });
+  assert.equal(indexer.checkpoint()?.state.lanes.get(ASSET)?.totalPrincipalAmount, 5n);
+});
+
+test("handoff never covers an older update from another chain", () => {
+  const indexer = QuoteIndexer.fromSnapshot(snapshot(), deployment());
+  const foreign: ChainCursor = {
+    ...cursor(),
+    chainId: 1n,
+    blockNumber: cursor().blockNumber - 1n,
+    executionBlockNumber: cursor().executionBlockNumber - 1n,
+  };
+
+  assert.throws(() => indexer.replayHandoff([{ kind: "Head", cursor: foreign }], cursor()), {
+    code: "REDUCER",
+  });
+  assert.equal(indexer.health().ready, false);
 });
 
 test("same-height handoff with another block hash fails closed", () => {
@@ -307,6 +489,30 @@ function cursor(): ChainCursor {
     executionBlockNumber: 100n,
     blockHash: HASH,
     commitment: Commitment.Finalized,
+  };
+}
+
+function eventCursor(logIndex: bigint): ChainCursor {
+  return {
+    ...cursor(),
+    transactionIndex: 2n,
+    logIndex,
+    commitment: Commitment.Realtime,
+  };
+}
+
+function depositLog(eventCursor: ChainCursor, principal: bigint): ContractLog {
+  return {
+    address: CORE,
+    topics: [
+      CORE_EVENT_TOPICS.DepositExecuted,
+      HexValue.fromNumber(1, { size: 32 }),
+      HexValue.padLeft(ROUTER, 32),
+      HexValue.padLeft(ASSET, 32),
+    ],
+    data: HexValue.fromNumber(principal, { size: 32 }),
+    removed: false,
+    cursor: eventCursor,
   };
 }
 

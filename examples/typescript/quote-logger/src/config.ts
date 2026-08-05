@@ -1,4 +1,4 @@
-import { parseAddress, type Address } from "@lunarbase/math";
+import { parseAddress, type Address } from "@lunarbase-lab/pmm-v2-math";
 import { z } from "zod";
 
 const DEMO_ROUTER = "0x000000000000000000000000000000000000dead";

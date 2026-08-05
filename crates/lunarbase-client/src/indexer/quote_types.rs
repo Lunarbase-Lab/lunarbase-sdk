@@ -15,7 +15,7 @@ pub struct ClientQuote {
     pub execution_block_number: u64,
     /// Core implementation bytecode hash associated with the state snapshot.
     pub implementation_code_hash: B256,
-    /// Pinned Solidity math revision implemented by this client.
+    /// Quote-math compatibility profile used by this result.
     pub math_compatibility_version: String,
 }
 
@@ -30,7 +30,7 @@ pub struct ClientBatchQuote {
     pub execution_block_number: u64,
     /// Core implementation bytecode hash associated with the shared snapshot.
     pub implementation_code_hash: B256,
-    /// Pinned Solidity math revision implemented by this client.
+    /// Quote-math compatibility profile used by this batch.
     pub math_compatibility_version: String,
 }
 
@@ -47,6 +47,6 @@ pub struct IndexerHealth {
     pub execution_block_number: Option<u64>,
     /// Expected Core implementation bytecode hash for this deployment.
     pub implementation_code_hash: B256,
-    /// Pinned Solidity math revision implemented by this runtime.
+    /// Quote-math compatibility profile used by this runtime.
     pub math_compatibility_version: String,
 }

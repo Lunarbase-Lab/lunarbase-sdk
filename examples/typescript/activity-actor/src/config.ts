@@ -22,47 +22,49 @@ const decimalSchema = z.string().regex(DECIMAL, "must be a non-negative decimal"
 
 const environmentSchema = z.object({
   RPC_URL: z.url().optional().default("https://bsc-testnet-rpc.publicnode.com"),
+  RECEIPT_POLLING_MILLISECONDS: z.coerce.number().int().min(100).max(10_000).optional().default(250),
   CHAIN_ID: z.coerce.number().int().optional().default(97),
-  POOL_ADDRESS: addressSchema.optional().default("0x11116c60551889C6c01DDAD3A1fB3Cc95CbeBBbB"),
-  CASH_ADDRESS: addressSchema.optional().default("0x2c10647a0D96cab7fE26044CA6d3F854280dC906"),
-  ASSET1_ADDRESS: addressSchema.optional().default("0x21f52a1d45DAb30b518b31CA8e44f91B588A8DEC"),
-  ASSET2_ADDRESS: addressSchema.optional().default("0xcCE41dEACC72cd4C7b92358bf824eCA1f33Ec269"),
-  PAIRING_START_BLOCK: z.coerce.bigint().min(0n).optional().default(123_101_134n),
-  EXPECTED_IMPLEMENTATION: addressSchema.optional().default("0xCFa7de4418707d4FDC06e4634A4B2aE95Af528c7"),
-  EXPECTED_IMPLEMENTATION_CODE_HASH: hashSchema
-    .optional()
-    .default("0xdd4f26f3b1ff31ea9aef19ddffd549ca8669c91fc4d0355e9677c6f5b2b96897"),
-  EXPECTED_PROXY_CODE_HASH: hashSchema
-    .optional()
-    .default("0xf15a07c54ab3420101c38795fc919a27ffb05f1a0049070ba3b8f10bae32af97"),
+  CORE_ADDRESS: addressSchema,
+  CASH_ADDRESS: addressSchema,
+  ASSET1_ADDRESS: addressSchema,
+  ASSET2_ADDRESS: addressSchema,
+  PAIRING_START_BLOCK: z.coerce.bigint().min(0n),
+  PAIRING_MAX_REPLAY_BLOCKS: z.coerce.number().int().min(1_000).max(1_000_000).optional().default(50_000),
+  EXPECTED_IMPLEMENTATION: addressSchema,
+  EXPECTED_IMPLEMENTATION_CODE_HASH: hashSchema,
+  EXPECTED_PROXY_CODE_HASH: hashSchema,
   ACTOR_ADDRESS: addressSchema.optional(),
   BROADCAST: z.stringbool().optional().default(false),
   AUTO_MINT: z.stringbool().optional().default(true),
+  ALLOWANCE_BATCH_SWAPS: z.coerce.number().int().min(2).max(100_000).optional().default(1_000),
   MIN_SWAP_AMOUNT: decimalSchema.optional().default("0.001"),
   MAX_SWAP_AMOUNT: decimalSchema.optional().default("0.01"),
   SLIPPAGE_PPM: z.coerce.number().int().min(0).max(100_000).optional().default(5_000),
   MAX_OUTPUT_RESERVE_PPM: z.coerce.number().int().min(1).max(100_000).optional().default(1_000),
   MAX_SESSION_OUTPUT_RESERVE_PPM: z.coerce.number().int().min(1).max(100_000).optional().default(10_000),
   MIN_LANE_HEADROOM_BLOCKS: z.coerce.number().int().min(1).max(100).optional().default(2),
-  MIN_DELAY_SECONDS: z.coerce.number().int().min(0).max(86_400).optional().default(20),
-  MAX_DELAY_SECONDS: z.coerce.number().int().min(0).max(86_400).optional().default(90),
-  RETRY_DELAY_SECONDS: z.coerce.number().int().min(1).max(86_400).optional().default(30),
+  MIN_DELAY_SECONDS: z.coerce.number().int().min(0).max(86_400).optional().default(0),
+  MAX_DELAY_SECONDS: z.coerce.number().int().min(0).max(86_400).optional().default(0),
+  RETRY_DELAY_SECONDS: z.coerce.number().int().min(1).max(86_400).optional().default(2),
   DEADLINE_SECONDS: z.coerce.number().int().min(30).max(3_600).optional().default(180),
   MIN_GAS_BALANCE_TBNB: decimalSchema.optional().default("0.01"),
   MAX_GAS_PRICE_GWEI: decimalSchema.optional().default("1"),
   MAX_SWAPS: z.coerce.number().int().min(2).max(100_000).optional().default(50),
-  CONFIRMATIONS: z.coerce.number().int().min(1).max(12).optional().default(2),
+  CONFIRMATIONS: z.coerce.number().int().min(1).max(12).optional().default(1),
+  PAIRING_FINALITY_CONFIRMATIONS: z.coerce.number().int().min(2).max(64).optional().default(3),
   MAX_CONSECUTIVE_FAILURES: z.coerce.number().int().min(1).max(100).optional().default(5),
 });
 
 export interface ActorConfig {
   readonly rpcUrl: string;
+  readonly receiptPollingMilliseconds: number;
   readonly chainId: number;
-  readonly pool: Address;
+  readonly core: Address;
   readonly cash: Address;
   readonly asset1: Address;
   readonly asset2: Address;
   readonly pairingStartBlock: bigint;
+  readonly pairingMaximumReplayBlocks: number;
   readonly expectedImplementation: Address;
   readonly expectedImplementationCodeHash: Hex;
   readonly expectedProxyCodeHash: Hex;
@@ -70,6 +72,7 @@ export interface ActorConfig {
   readonly expectedActorAddress?: Address;
   readonly broadcast: boolean;
   readonly autoMint: boolean;
+  readonly allowanceBatchSwaps: number;
   readonly minimumSwapAmount: string;
   readonly maximumSwapAmount: string;
   readonly slippagePpm: number;
@@ -84,6 +87,7 @@ export interface ActorConfig {
   readonly maximumGasPriceGwei: string;
   readonly maximumSwaps: number;
   readonly confirmations: number;
+  readonly pairingFinalityConfirmations: number;
   readonly maximumConsecutiveFailures: number;
 }
 
@@ -102,12 +106,14 @@ export function readConfig(environment: Environment = process.env): ActorConfig 
 
   return {
     rpcUrl: parsed.RPC_URL,
+    receiptPollingMilliseconds: parsed.RECEIPT_POLLING_MILLISECONDS,
     chainId: parsed.CHAIN_ID,
-    pool: parsed.POOL_ADDRESS,
+    core: parsed.CORE_ADDRESS,
     cash: parsed.CASH_ADDRESS,
     asset1: parsed.ASSET1_ADDRESS,
     asset2: parsed.ASSET2_ADDRESS,
     pairingStartBlock: parsed.PAIRING_START_BLOCK,
+    pairingMaximumReplayBlocks: parsed.PAIRING_MAX_REPLAY_BLOCKS,
     expectedImplementation: parsed.EXPECTED_IMPLEMENTATION,
     expectedImplementationCodeHash: parsed.EXPECTED_IMPLEMENTATION_CODE_HASH,
     expectedProxyCodeHash: parsed.EXPECTED_PROXY_CODE_HASH,
@@ -115,6 +121,7 @@ export function readConfig(environment: Environment = process.env): ActorConfig 
     expectedActorAddress: parsed.ACTOR_ADDRESS,
     broadcast: parsed.BROADCAST,
     autoMint: parsed.AUTO_MINT,
+    allowanceBatchSwaps: parsed.ALLOWANCE_BATCH_SWAPS,
     minimumSwapAmount: parsed.MIN_SWAP_AMOUNT,
     maximumSwapAmount: parsed.MAX_SWAP_AMOUNT,
     slippagePpm: parsed.SLIPPAGE_PPM,
@@ -129,6 +136,7 @@ export function readConfig(environment: Environment = process.env): ActorConfig 
     maximumGasPriceGwei: parsed.MAX_GAS_PRICE_GWEI,
     maximumSwaps: parsed.MAX_SWAPS,
     confirmations: parsed.CONFIRMATIONS,
+    pairingFinalityConfirmations: parsed.PAIRING_FINALITY_CONFIRMATIONS,
     maximumConsecutiveFailures: parsed.MAX_CONSECUTIVE_FAILURES,
   };
 }

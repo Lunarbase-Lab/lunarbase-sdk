@@ -59,7 +59,7 @@ struct Args {
     expect_whitelisted: bool,
     #[arg(long, env = "DEPLOYMENT_BLOCK", default_value_t = 0)]
     deployment_block: u64,
-    /// Explicit active lanes, comma-separated; avoids historical log discovery.
+    /// Explicit active lanes, comma-separated; avoids deployment log discovery.
     #[arg(long, env = "LANE_ASSETS", value_delimiter = ',')]
     lane_assets: Vec<Address>,
     #[arg(long, env = "QUOTE_AMOUNT", default_value = "1000000000000000000")]

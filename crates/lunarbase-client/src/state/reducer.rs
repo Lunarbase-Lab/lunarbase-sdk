@@ -48,8 +48,7 @@ pub enum ReducerError {
 #[derive(Clone, Debug)]
 /// Single-writer reducer over quote-critical state.
 ///
-/// Every fallible value is validated before mutation, avoiding the previous
-/// full-state clone used for rollback on each event.
+/// Every fallible value is validated before state mutation.
 pub struct QuoteReducer {
     /// Complete quote-critical state mutated only by the ordered reducer task.
     state: QuoteState,
@@ -279,7 +278,7 @@ impl QuoteReducer {
             .ok_or(ReducerError::UnknownLane)
     }
 
-    /// Builds a durable v4 checkpoint. This clone is outside the quote path.
+    /// Builds a durable checkpoint. This clone is outside the quote path.
     pub fn checkpoint(&self, deployment: &DeploymentConfig) -> Option<Checkpoint> {
         Some(Checkpoint {
             schema_version: SCHEMA_VERSION,
@@ -287,8 +286,12 @@ impl QuoteReducer {
             expected_implementation: deployment.expected_implementation,
             expected_implementation_code_hash: deployment.expected_implementation_code_hash,
             chain_id: deployment.chain_id,
+            network: deployment.network,
             core: deployment.core,
             router: deployment.router,
+            deployment_block: deployment.deployment_block,
+            expect_whitelisted: deployment.expect_whitelisted,
+            explicit_lane_assets: deployment.explicit_lane_assets.clone(),
             cursor: self.cursor.clone()?,
             state: self.state.clone(),
         })

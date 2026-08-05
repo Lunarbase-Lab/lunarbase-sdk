@@ -80,10 +80,9 @@ export function laneFeeBpsFromConventionalBps(spreadBps: number, rounding: Decim
 /**
  * Decodes the quote-critical decimal fields produced by the pricing model.
  *
- * Pass model `S` as `anchorPrice` and `spreadAskBps`/`spreadBidBps` as the
- * directional spreads. The legacy `feeAskX24` and `feeBidX24` values use a
- * different Q24 representation and must not be packed into the new slot0 fee
- * fields.
+ * Pass model `S` as `anchorPrice` and the directional spreads as
+ * `spreadAskBps` and `spreadBidBps`. Inputs must use conventional basis
+ * points; Q24-encoded fee values are not accepted.
  */
 export function modelQuoteToLaneSlot0Fields(
   quote: LaneModelQuoteNumbers,

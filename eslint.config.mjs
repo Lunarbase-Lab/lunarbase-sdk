@@ -10,7 +10,7 @@ export default tseslint.config(
   {
     files: ["packages/**/*.ts", "examples/typescript/**/*.ts"],
     rules: {
-      "eqeqeq": ["error", "always"],
+      eqeqeq: ["error", "always"],
       "no-debugger": "error",
       "no-var": "error",
       "prefer-const": "error",
@@ -23,6 +23,22 @@ export default tseslint.config(
           varsIgnorePattern: "^_",
         },
       ],
+    },
+  },
+  {
+    files: ["scripts/**/*.mjs"],
+    languageOptions: {
+      globals: {
+        console: "readonly",
+        fetch: "readonly",
+        process: "readonly",
+      },
+    },
+    rules: {
+      eqeqeq: ["error", "always"],
+      "no-debugger": "error",
+      "no-var": "error",
+      "prefer-const": "error",
     },
   },
 );

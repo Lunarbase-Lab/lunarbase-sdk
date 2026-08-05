@@ -4,6 +4,7 @@ members = [
     "crates/lunarbase-client",
     "crates/lunarbase-source-evm",
     "crates/lunarbase-source-monad",
+    "crates/lunarbase-source-monad-native",
     "crates/lunarbase-source-arbitrum",
     "crates/lunarbase-indexer",
     "crates/lunarbase-tools",
@@ -30,11 +31,12 @@ unimplemented = "deny"
 wildcard_imports = "deny"
 
 [workspace.dependencies]
-lunarbase-math = { version = "0.3.0", path = "crates/lunarbase-math" }
-lunarbase-client = { version = "0.3.0", path = "crates/lunarbase-client" }
-lunarbase-source-evm = { version = "0.3.0", path = "crates/lunarbase-source-evm" }
-lunarbase-source-monad = { version = "0.3.0", path = "crates/lunarbase-source-monad" }
-lunarbase-source-arbitrum = { version = "0.3.0", path = "crates/lunarbase-source-arbitrum" }
+lunarbase-math = { package = "lunarbase-pmm-v2-math", version = "0.3.0", path = "crates/lunarbase-math" }
+lunarbase-client = { package = "lunarbase-pmm-v2-client", version = "0.3.0", path = "crates/lunarbase-client" }
+lunarbase-source-evm = { package = "lunarbase-pmm-v2-source-evm", version = "0.3.0", path = "crates/lunarbase-source-evm" }
+lunarbase-source-monad = { package = "lunarbase-pmm-v2-source-monad", version = "0.3.0", path = "crates/lunarbase-source-monad" }
+lunarbase-source-monad-native = { version = "0.3.0", path = "crates/lunarbase-source-monad-native", default-features = false }
+lunarbase-source-arbitrum = { package = "lunarbase-pmm-v2-source-arbitrum", version = "0.3.0", path = "crates/lunarbase-source-arbitrum" }
 alloy-primitives = { version = "=1.6.1", default-features = false, features = ["std", "serde"] }
 alloy-rpc-client = { version = "=2.2.0", default-features = false, features = ["reqwest"] }
 alloy-serde = { version = "=2.2.0", default-features = false }

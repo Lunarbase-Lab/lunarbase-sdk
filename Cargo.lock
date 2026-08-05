@@ -2088,31 +2088,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
-name = "lunarbase-client"
-version = "0.3.0"
-dependencies = [
- "alloy-sol-types",
- "async-stream",
- "futures-core",
- "futures-util",
- "lunarbase-math",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
 name = "lunarbase-indexer"
 version = "0.3.0"
 dependencies = [
+ "alloy-primitives",
  "axum",
  "clap",
- "lunarbase-client",
- "lunarbase-math",
- "lunarbase-source-arbitrum",
- "lunarbase-source-evm",
- "lunarbase-source-monad",
+ "lunarbase-pmm-v2-client",
+ "lunarbase-pmm-v2-math",
+ "lunarbase-pmm-v2-source-arbitrum",
+ "lunarbase-pmm-v2-source-evm",
+ "lunarbase-pmm-v2-source-monad",
+ "lunarbase-source-monad-native",
  "redis",
  "serde",
  "serde_json",
@@ -2124,7 +2111,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "lunarbase-math"
+name = "lunarbase-pmm-v2-client"
+version = "0.3.0"
+dependencies = [
+ "alloy-sol-types",
+ "async-stream",
+ "futures-core",
+ "futures-util",
+ "lunarbase-pmm-v2-math",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "lunarbase-pmm-v2-math"
 version = "0.3.0"
 dependencies = [
  "alloy-primitives",
@@ -2134,31 +2136,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "lunarbase-quote-logger"
+name = "lunarbase-pmm-v2-source-arbitrum"
 version = "0.3.0"
 dependencies = [
- "clap",
- "dotenvy",
- "lunarbase-client",
- "lunarbase-math",
- "lunarbase-source-evm",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "url",
-]
-
-[[package]]
-name = "lunarbase-source-arbitrum"
-version = "0.3.0"
-dependencies = [
+ "axum",
  "futures-util",
- "lunarbase-client",
- "lunarbase-source-evm",
+ "lunarbase-pmm-v2-client",
+ "lunarbase-pmm-v2-source-evm",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
-name = "lunarbase-source-evm"
+name = "lunarbase-pmm-v2-source-evm"
 version = "0.3.0"
 dependencies = [
  "alloy-primitives",
@@ -2168,8 +2158,8 @@ dependencies = [
  "alloy-transport",
  "async-stream",
  "futures-util",
- "lunarbase-client",
- "lunarbase-math",
+ "lunarbase-pmm-v2-client",
+ "lunarbase-pmm-v2-math",
  "reqwest",
  "serde",
  "serde_json",
@@ -2180,21 +2170,48 @@ dependencies = [
 ]
 
 [[package]]
-name = "lunarbase-source-monad"
+name = "lunarbase-pmm-v2-source-monad"
 version = "0.3.0"
 dependencies = [
  "async-stream",
  "futures-util",
- "lunarbase-client",
- "lunarbase-math",
- "lunarbase-source-evm",
- "monad-event-ring",
- "monad-exec-events",
+ "lunarbase-pmm-v2-client",
+ "lunarbase-pmm-v2-math",
+ "lunarbase-pmm-v2-source-evm",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite",
  "url",
+]
+
+[[package]]
+name = "lunarbase-quote-logger"
+version = "0.3.0"
+dependencies = [
+ "clap",
+ "dotenvy",
+ "lunarbase-pmm-v2-client",
+ "lunarbase-pmm-v2-math",
+ "lunarbase-pmm-v2-source-evm",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
+name = "lunarbase-source-monad-native"
+version = "0.3.0"
+dependencies = [
+ "async-stream",
+ "lunarbase-pmm-v2-client",
+ "lunarbase-pmm-v2-math",
+ "lunarbase-pmm-v2-source-evm",
+ "lunarbase-pmm-v2-source-monad",
+ "monad-event-ring",
+ "monad-exec-events",
+ "tokio",
 ]
 
 [[package]]
@@ -2206,8 +2223,8 @@ dependencies = [
  "axum",
  "clap",
  "futures-util",
- "lunarbase-client",
- "lunarbase-math",
+ "lunarbase-pmm-v2-client",
+ "lunarbase-pmm-v2-math",
  "redis",
  "reqwest",
  "serde",
@@ -2926,9 +2943,9 @@ dependencies = [
 
 [[package]]
 name = "ruint"
-version = "1.19.0"
+version = "1.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45caf26f647c19115bf9c453c70ffe4a4a3a6390dceebd942610584f99b8ddce"
+checksum = "f5e99bff0393163bb25029a6af25d3d8d202ba5b5438a74d1bd8789f5c822970"
 dependencies = [
  "alloy-rlp",
  "ark-ff 0.3.0",

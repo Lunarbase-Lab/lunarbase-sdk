@@ -11,7 +11,7 @@ import {
   type Address,
   type QuoteRequest,
   type QuoteState,
-} from "./index.js";
+} from "@lunarbase-lab/pmm-v2-math";
 import * as AbiParameters from "ox/AbiParameters";
 import * as Hex from "ox/Hex";
 
@@ -28,7 +28,6 @@ type LaneVector = {
 };
 type Vector = {
   cash: string;
-  router: string;
   assetIn: string;
   assetOut: string;
   mode: "ExactIn" | "ExactOut";
@@ -138,7 +137,6 @@ function decodeFuzzVector(encoded: Hex.Hex): Vector {
   const [input] = AbiParameters.decode(abiFuzzVector, encoded);
   return {
     cash: input.cash,
-    router: "0x0000000000000000000000000000000000000000",
     assetIn: input.assetIn,
     assetOut: input.assetOut,
     mode: input.exactIn ? "ExactIn" : "ExactOut",

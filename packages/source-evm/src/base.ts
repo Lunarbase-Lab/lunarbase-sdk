@@ -1,5 +1,5 @@
 /** Official Base Flashblocks profile for the generic EVM source. */
-import { Network } from "@lunarbase/client";
+import { Network } from "@lunarbase-lab/pmm-v2-client";
 import { JsonRpcHttpClient } from "./rpc.js";
 import { EvmRpcSource, type WebSocketFactory, type WsRpcConfig } from "./ws.js";
 

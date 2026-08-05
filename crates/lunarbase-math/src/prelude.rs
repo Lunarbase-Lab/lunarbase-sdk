@@ -1,7 +1,6 @@
 //! Convenient imports for applications embedding LunarBase quote math.
 //!
-//! Library internals use canonical module paths; this module is an optional
-//! façade for downstream applications.
+//! The prelude keeps common quote-math types and functions in one import.
 
 pub use crate::arithmetic::{BPS, WAD};
 pub use crate::quote::{

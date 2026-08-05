@@ -1,154 +1,94 @@
-<div align="center">
-  <p><strong>◐ LUNARBASE</strong></p>
-  <p>
-    <a href="https://github.com/Lunarbase-Lab/lunarbase-sdk">Repository</a>
-    ·
-    <a href="https://spdx.org/licenses/MIT.html">MIT</a>
-    ·
-    <a href="https://spdx.org/licenses/Apache-2.0.html">Apache-2.0</a>
-  </p>
-</div>
-
 # LunarBase SDK
 
-Repository: `lunarbase-sdk`
-
-## About
-
-LunarBase SDK is the integration monorepository for bit-exact off-chain quote
-math, embeddable realtime clients, network data sources, and the
-production-oriented Rust indexer.
-
-The hot path is intentionally small:
-
-```text
-realtime stream → normalize → ordered reducer → in-memory state → quote/quoteMany
-```
-
-RPC and optional Redis checkpointing are limited to bootstrap and canonical
-recovery. Quote calculation performs no RPC, Redis access, state serialization,
-or full-state clone.
-
-The current SDK version is `0.3.0`. Its math compatibility baseline is
-`lunarbase-contracts@4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d:math-v4`.
-Canonical Solidity/Rust/TypeScript differential tests live in
-`lunarbase-contracts`.
+LunarBase SDK provides deterministic PMM v2 quote math, realtime state clients,
+network data sources, and a runnable quote indexer for Rust and TypeScript.
 
 ## Packages
 
-| Layer                      | Rust                                                                      | TypeScript                                                         | Status              |
-| -------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------ | ------------------- |
-| Pure quote math            | [`lunarbase-math`](crates/lunarbase-math/README.md)                       | [`@lunarbase/math`](packages/math/README.md)                       | parity-gated        |
-| Common reducer and runtime | [`lunarbase-client`](crates/lunarbase-client/README.md)                   | [`@lunarbase/client`](packages/client/README.md)                   | integration-ready   |
-| Generic EVM + Base profile | [`lunarbase-source-evm`](crates/lunarbase-source-evm/README.md)           | [`@lunarbase/source-evm`](packages/source-evm/README.md)           | release candidate   |
-| Monad sources              | [`lunarbase-source-monad`](crates/lunarbase-source-monad/README.md)       | [`@lunarbase/source-monad`](packages/source-monad/README.md)       | experimental        |
-| Arbitrum Nitro source      | [`lunarbase-source-arbitrum`](crates/lunarbase-source-arbitrum/README.md) | [`@lunarbase/source-arbitrum`](packages/source-arbitrum/README.md) | experimental        |
-| Runnable indexer           | [`lunarbase-indexer`](crates/lunarbase-indexer/README.md)                 | —                                                                  | Base is the default |
-| Validation tooling         | [`lunarbase-tools`](crates/lunarbase-tools/README.md)                     | —                                                                  | internal            |
+| Purpose             | Rust                                                                           | npm                                                                         | Status          |
+| ------------------- | ------------------------------------------------------------------------------ | --------------------------------------------------------------------------- | --------------- |
+| Quote math          | [lunarbase-pmm-v2-math](crates/lunarbase-math/README.md)                       | [@lunarbase-lab/pmm-v2-math](packages/math/README.md)                       | Fully supported |
+| Realtime client     | [lunarbase-pmm-v2-client](crates/lunarbase-client/README.md)                   | [@lunarbase-lab/pmm-v2-client](packages/client/README.md)                   | Fully supported |
+| EVM and Base source | [lunarbase-pmm-v2-source-evm](crates/lunarbase-source-evm/README.md)           | [@lunarbase-lab/pmm-v2-source-evm](packages/source-evm/README.md)           | Fully supported |
+| Monad source        | [lunarbase-pmm-v2-source-monad](crates/lunarbase-source-monad/README.md)       | [@lunarbase-lab/pmm-v2-source-monad](packages/source-monad/README.md)       | Maintenance     |
+| Arbitrum source     | [lunarbase-pmm-v2-source-arbitrum](crates/lunarbase-source-arbitrum/README.md) | [@lunarbase-lab/pmm-v2-source-arbitrum](packages/source-arbitrum/README.md) | Maintenance     |
 
-There are no per-network client wrappers or aggregate facade packages.
-Integrators depend only on the pure math, the common client, and the source
-implementation they use. Monad and Arbitrum packages must remain behind an
-explicit experimental gate until their node-level live validation is
-complete.
+All public packages use version 0.3.0.
 
-## Who this repository is for
+Maintenance packages remain publishable; updates focus on compatibility,
+reliability, and security fixes.
 
-- LunarBase partners embedding realtime off-chain quoting into an existing
-  Rust or TypeScript service.
-- Integrators that need a ready-to-run HTTP indexer with health, readiness, and
-  Prometheus endpoints.
-- Source authors connecting a new ordered data stream to the common
-  reducer.
-- LunarBase maintainers verifying bit-for-bit parity against the pinned
-  Solidity implementation.
+## Install
 
-The repository is not a generic EVM indexer. Its state model, event reducer,
-fee profile, and recovery rules are specific to LunarBase quoting.
+Rust:
 
-## Quick installation
-
-### Workspace
-
-Prerequisites: stable Rust 1.97+, Node.js 22+, Corepack or pnpm, and Foundry for the
-cross-language FFI suite.
-
-```bash
-git clone git@github.com:Lunarbase-Lab/lunarbase-sdk.git
-cd lunarbase-sdk
-corepack pnpm install --frozen-lockfile
-make verify
+```sh
+cargo add lunarbase-pmm-v2-math@0.3.0
+cargo add lunarbase-pmm-v2-client@0.3.0
+cargo add lunarbase-pmm-v2-source-evm@0.3.0
 ```
 
-Use `make help` for focused build, test, process E2E, load, FFI, Docker, and
-Monad validation commands.
+TypeScript:
 
-### Rust libraries
-
-Until crates are published, pin the repository revision and select only the
-packages needed by the application:
-
-```toml
-[dependencies]
-lunarbase-math = { git = "https://github.com/Lunarbase-Lab/lunarbase-sdk.git", rev = "<approved-revision>" }
-lunarbase-client = { git = "https://github.com/Lunarbase-Lab/lunarbase-sdk.git", rev = "<approved-revision>" }
-lunarbase-source-evm = { git = "https://github.com/Lunarbase-Lab/lunarbase-sdk.git", rev = "<approved-revision>" }
+```sh
+pnpm add @lunarbase-lab/pmm-v2-math@0.3.0
+pnpm add @lunarbase-lab/pmm-v2-client@0.3.0
+pnpm add @lunarbase-lab/pmm-v2-source-evm@0.3.0
 ```
 
-See the linked crate README files above for constructors, features, and
-runtime guarantees.
+Choose source-monad or source-arbitrum instead of source-evm when integrating
+those networks.
 
-### TypeScript libraries
+## Indexer
 
-After the `0.3.0` packages are published to the configured npm registry:
+The lunarbase-indexer workspace application exposes:
 
-```bash
-pnpm add @lunarbase/math @lunarbase/client @lunarbase/source-evm
+- POST /v1/quote
+- POST /v1/quotes
+- GET /healthz
+- GET /readyz
+- GET /metrics
+
+Deployment identity and endpoints are supplied through command-line arguments,
+LUNARBASE_* environment variables, or an operator-owned TOML file.
+
+```sh
+make run NETWORK=base CONFIG=/absolute/path/to/deployment.toml
 ```
 
-Use `@lunarbase/source-monad` or `@lunarbase/source-arbitrum` only for
-experimental validation. Package-specific imports and examples are documented
-in each package README.
+See the [indexer guide](crates/lunarbase-indexer/README.md) and
+[production runbook](docs/PRODUCTION_RUNBOOK.md).
 
-### Runnable client examples
+## Development
 
-The [`examples`](examples/README.md) directory contains equivalent Rust and
-TypeScript realtime quote loggers. After creating the language-specific
-`.env`, run `make quote-logger-rust` or `make quote-logger-ts`.
+Prerequisites are Rust 1.97.1, Node.js 22 or newer, pnpm 9.15.0, Docker,
+and the validation tools listed in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-### Runnable indexer
-
-Supply deployment identity and endpoints with CLI flags or `LUNARBASE_*`
-environment variables, then run:
-
-```bash
-make run
+```sh
+make install
+make pre-push
 ```
 
-An optional operator-owned TOML can provide a base layer. Checked-in profiles
-exist only under [`examples/indexer`](examples/indexer/README.md) as runnable
-examples and live-test fixtures.
+make install installs locked workspace dependencies and enables the tracked
+pre-push hook. make pre-push runs every reproducible CI, package-content,
+process, supply-chain, formatting, lint, test, and documentation gate.
 
-Base is the default feature. The service exposes `POST /v1/quote`,
-`POST /v1/quotes`, `GET /healthz`, `GET /readyz`, and `GET /metrics`. See the
-[`lunarbase-indexer` guide](crates/lunarbase-indexer/README.md) and
-[`PRODUCTION_RUNBOOK.md`](docs/PRODUCTION_RUNBOOK.md) before deployment.
+## Documentation
 
----
+- [Architecture](docs/ARCHITECTURE.md)
+- [Specification](docs/SPECIFICATION.md)
+- [Integration guide](docs/INTEGRATION.md)
+- [Production runbook](docs/PRODUCTION_RUNBOOK.md)
+- [Examples](examples/README.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security](SECURITY.md)
 
-<div align="center">
-  <p>
-    <a href="docs/ARCHITECTURE.md">Architecture</a>
-    ·
-    <a href="docs/SPECIFICATION.md">Specification</a>
-    ·
-    <a href="docs/PRODUCTION_RUNBOOK.md">Production runbook</a>
-  </p>
-  <p>
-    Licensed under
-    <a href="https://spdx.org/licenses/MIT.html">MIT</a>
-    or
-    <a href="https://spdx.org/licenses/Apache-2.0.html">Apache-2.0</a>.
-  </p>
-  <p>© LunarBase Lab</p>
-</div>
+## Releases
+
+Publishing a GitHub Release with a vX.Y.Z tag runs the complete release gate
+and publishes the five Rust crates to crates.io and the five scoped packages
+to npm in dependency order. The tag must match every public package version.
+
+## License
+
+Licensed under either Apache-2.0 or MIT at your option. See [LICENSE](LICENSE).

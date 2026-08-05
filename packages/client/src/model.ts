@@ -1,11 +1,11 @@
 /** Provider-independent model shared by every TypeScript network client. */
-import type { Address, LaneState, QuoteOutcome, QuoteRequest, QuoteState, Word } from "@lunarbase/math";
+import type { Address, LaneState, QuoteOutcome, QuoteRequest, QuoteState, Word } from "@lunarbase-lab/pmm-v2-math";
 import type { Hex } from "ox/Hex";
 
-/** Current JSON checkpoint schema. */
-export const SCHEMA_VERSION = 4;
-/** Solidity revision whose arithmetic behavior this SDK implements. */
-export const MATH_COMPATIBILITY_VERSION = "lunarbase-contracts@4bbf4d4666ac29412d7fbd946fd7a0fba8f9ac6d:math-v4";
+/** Current checkpoint schema. */
+export const SCHEMA_VERSION = 5;
+/** Quote-math compatibility profile implemented by this SDK. */
+export const MATH_COMPATIBILITY_VERSION = "lunarbase-pmm-v2";
 
 /** Supported source families. */
 export enum Network {
@@ -117,7 +117,7 @@ export interface DeploymentConfig {
   expectedImplementation: Address;
   /** Pinned runtime bytecode hash of `expectedImplementation`. */
   expectedImplementationCodeHash: Hex;
-  /** Human-readable contracts revision expected by the client. */
+  /** Quote-math compatibility profile expected by the client. */
   contractCompatibilityVersion: string;
   /** Optional fixed lane assets that avoid a discovery replay. */
   explicitLaneAssets: readonly Address[];
@@ -147,10 +147,18 @@ export interface Checkpoint {
   expectedImplementationCodeHash: Hex;
   /** EIP-155 chain identifier that owns the checkpoint. */
   chainId: bigint;
+  /** Network source family used to create the checkpoint. */
+  network: Network;
   /** Core contract whose state is serialized. */
   core: Address;
   /** Configured router whose fee profile is embedded in the state. */
   router: Address;
+  /** First deployment block used for lane discovery and recovery. */
+  deploymentBlock: bigint;
+  /** Router whitelist policy used when the state was bootstrapped. */
+  expectWhitelisted: boolean;
+  /** Fixed lane policy used when the state was bootstrapped. */
+  explicitLaneAssets: readonly Address[];
   /** Last fully applied and verified source position. */
   cursor: ChainCursor;
   /** Complete quote-critical state at `cursor`. */
@@ -179,7 +187,7 @@ export interface ChainDataSource {
   validateCheckpoint(checkpoint: Checkpoint): Promise<boolean>;
 }
 
-/** Decoded quote-critical Core event. `SwapExecuted` is intentionally absent. */
+/** Decoded quote-critical Core event. */
 export type QuoteEvent =
   | { kind: "LaneAdded"; asset: Address }
   | { kind: "LaneRemoved"; asset: Address }
@@ -253,7 +261,7 @@ export interface ClientQuote {
   executionBlockNumber: bigint;
   /** Core implementation bytecode hash associated with the state snapshot. */
   implementationCodeHash: Hex;
-  /** Pinned Solidity math revision implemented by this client. */
+  /** Quote-math compatibility profile used by this result. */
   mathCompatibilityVersion: string;
 }
 
@@ -267,7 +275,7 @@ export interface ClientBatchQuote {
   results: readonly QuoteOutcome[];
   /** Core implementation bytecode hash associated with the shared snapshot. */
   implementationCodeHash: Hex;
-  /** Pinned Solidity math revision implemented by this client. */
+  /** Quote-math compatibility profile used by this batch. */
   mathCompatibilityVersion: string;
 }
 
@@ -281,7 +289,7 @@ export interface IndexerHealth {
   commitment: Commitment;
   /** Expected Core implementation bytecode hash for this deployment. */
   implementationCodeHash: string;
-  /** Pinned Solidity arithmetic revision implemented by this client. */
+  /** Quote-math compatibility profile used by this runtime. */
   mathCompatibilityVersion: string;
 }
 

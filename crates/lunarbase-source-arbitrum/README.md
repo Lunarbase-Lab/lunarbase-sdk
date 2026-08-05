@@ -1,18 +1,22 @@
-# `lunarbase-source-arbitrum`
+# `lunarbase-pmm-v2-source-arbitrum`
 
-Experimental Arbitrum Nitro implementation of the common `ChainDataSource`
-contract.
+Arbitrum Nitro data source for `lunarbase-pmm-v2-client`.
 
-## Install and connect
+Status: **maintenance**. Updates focus on compatibility, reliability, and security fixes.
+
+## Install
 
 ```toml
 [dependencies]
-lunarbase-client = { git = "https://github.com/Lunarbase-Lab/lunarbase-sdk.git", rev = "<approved-revision>" }
-lunarbase-source-arbitrum = { git = "https://github.com/Lunarbase-Lab/lunarbase-sdk.git", rev = "<approved-revision>" }
+lunarbase-client = { package = "lunarbase-pmm-v2-client", version = "0.3.0" }
+lunarbase-source-arbitrum = { package = "lunarbase-pmm-v2-source-arbitrum", version = "0.3.0" }
 ```
+
+## Use
 
 ```rust
 use std::sync::Arc;
+
 use lunarbase_client::prelude::ConnectedQuoteClient;
 use lunarbase_source_arbitrum::prelude::ArbitrumNitroSource;
 
@@ -24,9 +28,9 @@ let source = Arc::new(ArbitrumNitroSource::from_urls(
 let client = ConnectedQuoteClient::connect(config, source, optional_checkpoint).await?;
 ```
 
-The source consumes executed logs and keeps the EVM execution-block context
-separate from stream ordering metadata.
+## Behavior
 
-Do not mark this package production-ready until execution `block.number`
-semantics, reconnect behavior, and canonical recovery have been validated
-against a real Nitro node.
+- HTTP RPC provides bootstrap, backfill, and canonical recovery.
+- A compatible Nitro HTTP endpoint must expose `l1BlockNumber` for every backfilled block.
+- The realtime endpoint must include `l1BlockNumber` in `newHeads` notifications.
+- The configured chain ID binds cursors and checkpoints to one deployment.

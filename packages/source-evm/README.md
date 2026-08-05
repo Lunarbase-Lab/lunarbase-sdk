@@ -1,19 +1,20 @@
-# `@lunarbase/source-evm`
+# `@lunarbase-lab/pmm-v2-source-evm`
 
-Generic EVM HTTP/WS implementation of the common `ChainDataSource` interface.
-Base Flashblocks is a configured profile of this source, not a separate client.
+EVM HTTP and WebSocket data source for the LunarBase client.
+
+Status: **fully supported** for standard EVM networks and Base Flashblocks.
 
 ## Install
 
 ```bash
-pnpm add @lunarbase/math @lunarbase/client @lunarbase/source-evm
+npm install @lunarbase-lab/pmm-v2-math @lunarbase-lab/pmm-v2-client @lunarbase-lab/pmm-v2-source-evm
 ```
 
-## Connect
+## Use
 
 ```ts
-import { connect } from "@lunarbase/client";
-import { createBaseFlashblocksSource } from "@lunarbase/source-evm";
+import { connect } from "@lunarbase-lab/pmm-v2-client";
+import { createBaseFlashblocksSource } from "@lunarbase-lab/pmm-v2-source-evm";
 
 const source = createBaseFlashblocksSource({
   httpRpcUrl,
@@ -25,8 +26,15 @@ const quote = client.quote(request);
 await client.shutdown();
 ```
 
-HTTP RPC is used for bootstrap and canonical recovery. The configured
-Flashblocks WebSocket endpoint supplies realtime pending logs and progressive
-heads. Transport dependencies can be injected through
-`BaseFlashblocksOptions` for tests or an existing application runtime. Use
-`EvmRpcSource` directly for standard EVM `logs + newHeads` streams.
+For Base, use `wss://mainnet-preconf.base.org` or
+`wss://sepolia-preconf.base.org` as the application-facing realtime
+endpoint. These endpoints provide `pendingLogs` and progressive `newHeads`;
+see the [Base Flashblocks API](https://docs.base.org/base-chain/api-reference/flashblocks-api/flashblocks-api-overview).
+
+Use `EvmRpcSource` for standard EVM `logs` and `newHeads` streams.
+
+## Guarantees
+
+- HTTP RPC provides bootstrap, backfill, and canonical recovery.
+- WebSocket updates are normalized into ordered client events.
+- The configured chain ID binds cursors and checkpoints to one deployment.

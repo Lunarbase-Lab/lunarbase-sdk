@@ -7,10 +7,10 @@ use crate::indexer::engine::QuoteIndexer;
 use crate::indexer::errors::{ClientRuntimeEvent, IndexerError};
 use crate::indexer::quote_types::{ClientBatchQuote, ClientQuote, IndexerHealth};
 use crate::indexer::tasks::{
-    ReducerRuntime, SourcePumpRuntime, recover_checkpoint, reducer_loop, source_pump,
-    wait_for_source_active,
+    ReducerRuntime, SourcePumpRuntime, emit_handoff_events, recover_checkpoint, reducer_loop,
+    source_pump, wait_for_source_active,
 };
-use crate::model::{Checkpoint, Commitment, SourceError};
+use crate::model::{Checkpoint, Commitment, ContractLog, SourceError};
 use crate::source::ChainDataSource;
 use futures_util::FutureExt;
 use lunarbase_math::state::{QuoteRequest, QuoteState};
@@ -55,6 +55,35 @@ impl ConnectedQuoteClient {
     where
         S: ChainDataSource + 'static,
     {
+        Self::connect_inner(config, source, optional_checkpoint, None).await
+    }
+
+    /// Connects while forwarding every canonically ordered Core log into a
+    /// required bounded sink before publishing the corresponding quote state.
+    ///
+    /// The bootstrap and reducer are the sole sink producer. Closing the sink is
+    /// fatal, so the runtime never serves while silently losing event output.
+    pub async fn connect_with_event_sink<S>(
+        config: ClientConnectConfig,
+        source: Arc<S>,
+        optional_checkpoint: Option<Checkpoint>,
+        core_event_sink: mpsc::Sender<ContractLog>,
+    ) -> Result<Self, IndexerError>
+    where
+        S: ChainDataSource + 'static,
+    {
+        Self::connect_inner(config, source, optional_checkpoint, Some(core_event_sink)).await
+    }
+
+    async fn connect_inner<S>(
+        config: ClientConnectConfig,
+        source: Arc<S>,
+        optional_checkpoint: Option<Checkpoint>,
+        core_event_sink: Option<mpsc::Sender<ContractLog>>,
+    ) -> Result<Self, IndexerError>
+    where
+        S: ChainDataSource + 'static,
+    {
         config.validate()?;
         if source.network() != config.deployment.network {
             return Err(SourceError::NetworkMismatch.into());
@@ -68,6 +97,7 @@ impl ConnectedQuoteClient {
         let (source_active_tx, mut source_active_rx) = watch::channel(false);
         let (runtime_events, _) = broadcast::channel(RUNTIME_EVENT_CAPACITY);
         let stats = Arc::new(ClientRuntimeStats::new(config.buffer_capacity));
+        let recovery_event_sink = core_event_sink;
         let pump_future = source_pump(
             source.clone(),
             config.filter.clone(),
@@ -97,19 +127,29 @@ impl ConnectedQuoteClient {
             .into());
         }
 
+        let mut checkpoint_recovered = false;
         let mut initial = if let Some(checkpoint) = optional_checkpoint {
             if checkpoint.is_compatible(&config.deployment)
                 && source.validate_checkpoint(&checkpoint).await?
             {
                 match QuoteIndexer::from_checkpoint(checkpoint, config.deployment.clone()) {
                     Ok(mut indexer) => {
-                        if recover_checkpoint(&mut indexer, source.as_ref(), &config.filter)
-                            .await
-                            .is_ok()
+                        match recover_checkpoint(
+                            &mut indexer,
+                            source.as_ref(),
+                            &config.filter,
+                            recovery_event_sink.as_ref(),
+                        )
+                        .await
                         {
-                            indexer
-                        } else {
-                            snapshot_indexer(source.as_ref(), &config).await?
+                            Ok(()) => {
+                                checkpoint_recovered = true;
+                                indexer
+                            }
+                            Err(IndexerError::EventSinkClosed) => {
+                                return Err(IndexerError::EventSinkClosed);
+                            }
+                            Err(_) => snapshot_indexer(source.as_ref(), &config).await?,
                         }
                     }
                     Err(_) => snapshot_indexer(source.as_ref(), &config).await?,
@@ -126,7 +166,21 @@ impl ConnectedQuoteClient {
             stats.queue_depth.fetch_sub(1, Ordering::Relaxed);
             buffered.push(update);
         }
+        crate::indexer::engine::sort_chain_updates(&mut buffered);
+        emit_handoff_events(
+            &initial,
+            &buffered,
+            recovery_event_sink.as_ref(),
+            checkpoint_recovered,
+        )
+        .await?;
         initial.apply_handoff(buffered)?;
+        if !wait_for_source_active(&mut source_active_rx, &mut bootstrap_cancel).await {
+            return Err(SourceError::Unavailable(
+                "realtime source stopped during bootstrap".into(),
+            )
+            .into());
+        }
 
         *shared
             .indexer
@@ -143,6 +197,7 @@ impl ConnectedQuoteClient {
             ReducerRuntime {
                 events: runtime_events.clone(),
                 stats: stats.clone(),
+                core_event_sink: recovery_event_sink,
             },
         );
         let reducer = tokio::spawn(supervise_task(

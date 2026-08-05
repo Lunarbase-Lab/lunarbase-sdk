@@ -92,7 +92,13 @@ pub fn decode_parser_value(value: &Value) -> Result<ParserMessage, ParserProtoco
         "newHead" => Ok(ParserMessage::Head(parse_head(result, false)?)),
         "blockStart" => Ok(ParserMessage::Head(parse_head(result, true)?)),
         "log" if result.get("kind").and_then(Value::as_str) == Some("event") => {
-            Ok(ParserMessage::Log(parse_log(result)?))
+            if parse_removed(result)? {
+                Ok(ParserMessage::Gap(
+                    "Monad parser retracted a log; canonical recovery required".into(),
+                ))
+            } else {
+                Ok(ParserMessage::Log(parse_log(result)?))
+            }
         }
         "alert" => {
             let message = result
@@ -110,6 +116,17 @@ pub fn decode_parser_value(value: &Value) -> Result<ParserMessage, ParserProtoco
         ),
         "health" => Ok(ParserMessage::Ignore),
         _ => Ok(ParserMessage::Ignore),
+    }
+}
+
+fn parse_removed(value: &Value) -> Result<bool, ParserProtocolError> {
+    match value.get("removed") {
+        None => Ok(false),
+        Some(Value::Bool(removed)) => Ok(*removed),
+        Some(_) => Err(ParserProtocolError::InvalidField {
+            field: "removed",
+            detail: "expected boolean".into(),
+        }),
     }
 }
 
@@ -309,6 +326,30 @@ mod tests {
         assert_eq!(log.log_index, 5);
         assert_eq!(log.data.as_ref(), [1, 2]);
         assert_eq!(log.topics, vec![B256::new(U256::ONE.to_be_bytes::<32>())]);
+    }
+
+    #[test]
+    fn removed_log_requires_canonical_recovery() {
+        let value = json!({
+            "jsonrpc": "2.0",
+            "method": "subscription",
+            "result": {
+                "subscription": "sub_1",
+                "type": "log",
+                "kind": "event",
+                "seqno": 900,
+                "blockNumber": 12,
+                "logIndex": 5,
+                "transactionIndex": 2,
+                "address": "0x0000000000000000000000000000000000000001",
+                "topics": [format!("0x{}01", "00".repeat(31))],
+                "data": "0x0102",
+                "removed": true
+            }
+        });
+        assert!(
+            matches!(decode_parser_value(&value).unwrap(), ParserMessage::Gap(reason) if reason.contains("retracted"))
+        );
     }
 
     #[test]

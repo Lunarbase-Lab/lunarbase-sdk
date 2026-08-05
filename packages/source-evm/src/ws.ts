@@ -1,6 +1,7 @@
 import {
   Commitment,
   CursorReorderBuffer,
+  Network as NetworkValue,
   type BackfillRequest,
   type BootstrapSnapshot,
   type ChainCursor,
@@ -11,16 +12,23 @@ import {
   type ContractLog,
   type DeploymentConfig,
   type Network,
-} from "@lunarbase/client";
+} from "@lunarbase-lab/pmm-v2-client";
 import type { Hex } from "ox/Hex";
 import { JsonRpcHttpClient, parseRpcLog, RpcError, RpcHttpBackend, RpcSnapshotProvider } from "./rpc.js";
 import {
   defaultWebSocketFactory,
   establishSocket,
+  type BoundedFrameQueue,
   type EstablishedSocket,
   type WebSocketFactory,
 } from "./ws/connection.js";
 import { gap, parseHead } from "./ws/protocol.js";
+
+const STANDARD_LOG_GRACE_MILLISECONDS = 2_000;
+const STANDARD_HEAD_DEADLINE = Symbol("standard-head-deadline");
+
+type ParsedHead = { cursor: ChainCursor; parentHash?: Hex };
+type OpenStandardHead = { readonly observedAt: number; readonly head: ParsedHead };
 
 export { BoundedFrameQueue, defaultWebSocketFactory } from "./ws/connection.js";
 export type { SocketEvent, WebSocketFactory, WebSocketLike } from "./ws/connection.js";
@@ -87,6 +95,8 @@ export class EvmRpcSource implements ChainDataSource {
   snapshot(deployment: DeploymentConfig): Promise<BootstrapSnapshot> {
     if (deployment.network !== this.network)
       return Promise.reject(new RpcError("INVALID", "RPC source network mismatch"));
+    if (deployment.chainId !== this.chainId)
+      return Promise.reject(new RpcError("INVALID", "RPC source chain id mismatch"));
     return this.snapshots.snapshot(deployment);
   }
 
@@ -130,17 +140,53 @@ export class EvmRpcSource implements ChainDataSource {
     let lastParentHash: Hex | undefined;
     let sourceSequence = 0n;
     let reorder = new CursorReorderBuffer(this.config.reorderCapacity);
+    const standardLogs = holdsStandardLogsUntilSuccessor(this.config);
+    let openStandardHeads: OpenStandardHead[] = [];
+    let firstStandardHeadBlock: bigint | undefined;
+    let publishedWatermark: ChainCursor | undefined;
 
     try {
       while (!signal?.aborted) {
-        let frame: string | undefined;
+        let frame: string | undefined | typeof STANDARD_HEAD_DEADLINE;
         try {
-          frame = prefetched.shift() ?? (await queue.next(signal));
+          frame =
+            prefetched.shift() ??
+            (await nextFrameOrStandardDeadline(
+              queue,
+              standardLogs ? standardHeadDeadline(openStandardHeads) : undefined,
+              signal,
+            ));
         } catch (error) {
           yield gap(`RPC WebSocket failed; canonical recovery required: ${message(error)}`, lastHead);
           return;
         }
+        if (frame === STANDARD_HEAD_DEADLINE) {
+          const completedHead = takeReadyStandardHead(openStandardHeads, monotonicMilliseconds());
+          if (completedHead === undefined) continue;
+          let updates: ChainUpdate[];
+          try {
+            updates = drainCompletedBlock(
+              reorder,
+              completedHead,
+              firstStandardHeadBlock === completedHead.cursor.blockNumber,
+            );
+            updates = await validatePrecedingStartupLogs(
+              updates,
+              completedHead,
+              this.rpc,
+              this.chainId,
+              this.network === NetworkValue.Arbitrum,
+            );
+          } catch (error) {
+            yield gap(`RPC completed block failed; canonical recovery required: ${message(error)}`, lastHead);
+            return;
+          }
+          for (const update of updates) yield update;
+          publishedWatermark = completedHead.cursor;
+          continue;
+        }
         if (frame === undefined) {
+          if (signal?.aborted) return;
           yield gap("RPC WebSocket closed; canonical recovery required", lastHead);
           return;
         }
@@ -173,6 +219,14 @@ export class EvmRpcSource implements ChainDataSource {
           }
           sourceSequence += 1n;
           log = { ...log, cursor: { ...log.cursor, sourceSequence } };
+          if (log.removed) {
+            yield gap("RPC retracted a subscription log; canonical recovery required", log.cursor);
+            return;
+          }
+          if (standardLogs && isAtOrBeforeWatermark(log.cursor, publishedWatermark)) {
+            yield gap("RPC delivered a log after its block watermark; canonical recovery required", log.cursor);
+            return;
+          }
           if (lastHead?.blockNumber === log.cursor.blockNumber)
             log = withExecutionContext(log, lastHead.executionBlockNumber);
           try {
@@ -181,34 +235,47 @@ export class EvmRpcSource implements ChainDataSource {
             yield gap(`RPC reorder buffer failed: ${message(error)}`, lastHead);
             return;
           }
-          if (lastHead)
+          if (!standardLogs && lastHead)
             for (const update of reorder.drainThrough(lastHead)) yield annotateExecutionContext(update, lastHead);
           continue;
         }
 
         if (subscription !== headsSubscription) continue;
-        let parsed: { cursor: ChainCursor; parentHash?: Hex };
+        let parsed: ParsedHead;
         try {
-          parsed = parseHead(params.result, this.chainId);
+          parsed = parseHead(params.result, this.chainId, this.network === NetworkValue.Arbitrum);
         } catch (error) {
           yield gap(`invalid RPC head notification: ${message(error)}`, lastHead);
           return;
         }
+        if (lastHead && sameHead(lastHead, lastParentHash, parsed)) continue;
         sourceSequence += 1n;
         parsed.cursor = { ...parsed.cursor, sourceSequence };
+        if (standardLogs && firstStandardHeadBlock === undefined) firstStandardHeadBlock = parsed.cursor.blockNumber;
+        if (lastHead && parsed.cursor.blockNumber > lastHead.blockNumber + 1n) {
+          yield gap("RPC WebSocket skipped one or more block heads; canonical recovery required", lastHead);
+          return;
+        }
         if (lastHead && headDiscontinuity(lastHead, lastParentHash, parsed, this.config.progressiveHeads)) {
           yield { kind: "Reorg", oldHead: lastHead, newHead: parsed.cursor };
           reorder = new CursorReorderBuffer(this.config.reorderCapacity);
+          openStandardHeads = [];
+          firstStandardHeadBlock = parsed.cursor.blockNumber;
         }
         lastHead = parsed.cursor;
         lastParentHash = parsed.parentHash;
+
+        if (standardLogs) observeStandardHead(openStandardHeads, parsed, monotonicMilliseconds());
+
         try {
           reorder.push({ kind: "Head", cursor: parsed.cursor });
         } catch (error) {
           yield gap(`RPC reorder buffer failed: ${message(error)}`, lastHead);
           return;
         }
-        for (const update of reorder.drainThrough(parsed.cursor)) yield annotateExecutionContext(update, parsed.cursor);
+        if (!standardLogs)
+          for (const update of reorder.drainThrough(parsed.cursor))
+            yield annotateExecutionContext(update, parsed.cursor);
       }
     } finally {
       close();
@@ -223,15 +290,27 @@ function validateConfig(config: WsRpcConfig): WsRpcConfig {
     queueCapacity: config.queueCapacity,
   }))
     if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`WS ${name} must be a positive safe integer`);
+  if (config.logsSubscription !== "logs" && config.logsSubscription !== "pendingLogs")
+    throw new Error("WS logsSubscription must be logs or pendingLogs");
   return Object.freeze(config);
+}
+
+function sameHead(lastHead: ChainCursor, lastParentHash: Hex | undefined, next: ParsedHead): boolean {
+  return (
+    next.cursor.blockNumber === lastHead.blockNumber &&
+    next.cursor.executionBlockNumber === lastHead.executionBlockNumber &&
+    next.cursor.blockHash === lastHead.blockHash &&
+    next.parentHash === lastParentHash
+  );
 }
 
 function headDiscontinuity(
   lastHead: ChainCursor,
   lastParentHash: Hex | undefined,
-  next: { cursor: ChainCursor; parentHash?: Hex },
+  next: ParsedHead,
   progressiveHeads: boolean,
 ): boolean {
+  if (sameHead(lastHead, lastParentHash, next)) return false;
   if (next.cursor.blockNumber > lastHead.blockNumber + 1n) return true;
   const sameHeight = next.cursor.blockNumber === lastHead.blockNumber;
   const changedParent =
@@ -244,6 +323,148 @@ function headDiscontinuity(
       lastHead.blockHash !== undefined &&
       next.parentHash !== lastHead.blockHash)
   );
+}
+
+function holdsStandardLogsUntilSuccessor(config: WsRpcConfig): boolean {
+  return config.logsSubscription === "logs";
+}
+
+function isAtOrBeforeWatermark(cursor: ChainCursor, watermark: ChainCursor | undefined): boolean {
+  return watermark !== undefined && cursor.blockNumber <= watermark.blockNumber;
+}
+
+function observeStandardHead(openHeads: OpenStandardHead[], head: ParsedHead, observedAt: number): void {
+  openHeads.push({ observedAt, head });
+}
+
+function standardHeadDeadline(openHeads: readonly OpenStandardHead[]): number | undefined {
+  const successor = openHeads[1];
+  return successor === undefined ? undefined : successor.observedAt + STANDARD_LOG_GRACE_MILLISECONDS;
+}
+
+function takeReadyStandardHead(openHeads: OpenStandardHead[], observedAt: number): ParsedHead | undefined {
+  const deadline = standardHeadDeadline(openHeads);
+  if (deadline === undefined || observedAt < deadline) return undefined;
+  return openHeads.shift()?.head;
+}
+
+async function nextFrameOrStandardDeadline(
+  queue: BoundedFrameQueue,
+  deadline: number | undefined,
+  signal?: AbortSignal,
+): Promise<string | undefined | typeof STANDARD_HEAD_DEADLINE> {
+  if (deadline === undefined) return queue.next(signal);
+  if (signal?.aborted) return undefined;
+
+  const wait = new AbortController();
+  const abort = () => wait.abort();
+  signal?.addEventListener("abort", abort, { once: true });
+  if (signal?.aborted) wait.abort();
+  let deadlineElapsed = false;
+  const timer = setTimeout(
+    () => {
+      deadlineElapsed = true;
+      wait.abort();
+    },
+    Math.max(0, deadline - monotonicMilliseconds()),
+  );
+  try {
+    const frame = await queue.next(wait.signal);
+    return deadlineElapsed ? STANDARD_HEAD_DEADLINE : frame;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
+  }
+}
+
+function drainCompletedBlock(
+  reorder: CursorReorderBuffer,
+  head: ParsedHead,
+  allowPrecedingStartupLogs: boolean,
+): ChainUpdate[] {
+  const blockHash = head.cursor.blockHash;
+  if (blockHash === undefined) throw new Error("completed RPC head has no block hash");
+
+  const logs: ChainUpdate[] = [];
+  let completedHead: ChainUpdate | undefined;
+  for (const update of reorder.drainThrough(head.cursor)) {
+    if (
+      update.kind === "Head" &&
+      update.cursor.blockNumber === head.cursor.blockNumber &&
+      sameHash(update.cursor.blockHash, blockHash)
+    ) {
+      completedHead = update;
+      continue;
+    }
+    if (
+      update.kind === "Log" &&
+      update.log.cursor.blockNumber === head.cursor.blockNumber &&
+      sameHash(update.log.cursor.blockHash, blockHash)
+    ) {
+      logs.push(annotateExecutionContext(update, head.cursor));
+      continue;
+    }
+    if (
+      update.kind === "Log" &&
+      allowPrecedingStartupLogs &&
+      update.log.cursor.blockNumber < head.cursor.blockNumber &&
+      update.log.cursor.blockHash !== undefined
+    ) {
+      logs.push(update);
+      continue;
+    }
+    if (update.kind === "Gap") {
+      const block = update.cursor?.blockNumber ?? 0n;
+      throw new Error(`buffered gap at block ${block} cannot complete RPC block ${head.cursor.blockNumber}`);
+    }
+    const kind = update.kind.toLowerCase();
+    const cursor = update.kind === "Log" ? update.log.cursor : update.kind === "Reorg" ? update.newHead : update.cursor;
+    throw new Error(
+      `buffered RPC ${kind} at block ${cursor.blockNumber} hash ${String(cursor.blockHash)} does not match completed block ${head.cursor.blockNumber} hash ${blockHash}`,
+    );
+  }
+  if (completedHead === undefined) throw new Error("completed RPC block has no matching buffered head");
+  return [...logs, completedHead];
+}
+
+async function validatePrecedingStartupLogs(
+  updates: ChainUpdate[],
+  completedHead: ParsedHead,
+  rpc: JsonRpcHttpClient,
+  chainId: bigint,
+  requireExecutionBlockNumber: boolean,
+): Promise<ChainUpdate[]> {
+  const canonicalBlocks = new Map<bigint, ChainCursor>();
+  for (let index = 0; index < updates.length; index += 1) {
+    const update = updates[index];
+    if (update?.kind !== "Log" || update.log.cursor.blockNumber >= completedHead.cursor.blockNumber) continue;
+    const blockNumber = update.log.cursor.blockNumber;
+    let canonical = canonicalBlocks.get(blockNumber);
+    if (canonical === undefined) {
+      canonical = await rpc.blockCursor(
+        `0x${blockNumber.toString(16)}`,
+        chainId,
+        Commitment.Canonical,
+        requireExecutionBlockNumber,
+      );
+      canonicalBlocks.set(blockNumber, canonical);
+    }
+    if (!sameHash(canonical.blockHash, update.log.cursor.blockHash))
+      throw new Error(`startup RPC log at block ${blockNumber} does not match its canonical block hash`);
+    updates[index] = {
+      kind: "Log",
+      log: withExecutionContext(update.log, canonical.executionBlockNumber),
+    };
+  }
+  return updates;
+}
+
+function sameHash(left: Hex | undefined, right: Hex | undefined): boolean {
+  return left !== undefined && right !== undefined && left.toLowerCase() === right.toLowerCase();
+}
+
+function monotonicMilliseconds(): number {
+  return globalThis.performance.now();
 }
 
 function annotateExecutionContext(update: ChainUpdate, head: ChainCursor): ChainUpdate {

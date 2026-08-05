@@ -25,6 +25,8 @@ struct RpcHead {
 #[serde(rename_all = "camelCase")]
 struct RpcLog {
     address: Address,
+    #[serde(default)]
+    transaction_hash: Option<B256>,
     topics: Vec<B256>,
     data: Bytes,
     #[serde(default, with = "alloy_serde::quantity::opt")]
@@ -35,7 +37,6 @@ struct RpcLog {
     transaction_index: Option<u64>,
     #[serde(default, with = "alloy_serde::quantity::opt")]
     log_index: Option<u64>,
-    #[serde(default)]
     removed: bool,
 }
 
@@ -45,6 +46,28 @@ pub(crate) struct ParsedRpcHead {
     pub hash: Option<B256>,
     pub parent_hash: Option<B256>,
     pub l1_block_number: Option<u64>,
+}
+
+pub(crate) fn validate_canonical_hex_u64(
+    value: Option<&Value>,
+    field: &str,
+) -> Result<u64, RpcError> {
+    let value = value
+        .and_then(Value::as_str)
+        .ok_or_else(|| RpcError::Invalid(format!("{field} is missing or is not a hex quantity")))?;
+    let digits = value
+        .strip_prefix("0x")
+        .filter(|digits| !digits.is_empty())
+        .ok_or_else(|| RpcError::Invalid(format!("{field} is not a canonical hex quantity")))?;
+    if (digits.len() > 1 && digits.starts_with('0'))
+        || !digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(RpcError::Invalid(format!(
+            "{field} is not a canonical hex quantity"
+        )));
+    }
+    u64::from_str_radix(digits, 16)
+        .map_err(|_| RpcError::Invalid(format!("{field} exceeds uint64")))
 }
 
 /// Decodes one standard Ethereum JSON-RPC log into Alloy primitives.
@@ -63,6 +86,11 @@ fn normalize_rpc_log(
     chain_id: u64,
     commitment: Commitment,
 ) -> Result<ContractLog, RpcError> {
+    if log.topics.len() > 4 {
+        return Err(RpcError::Invalid(
+            "RPC log contains more than four topics".into(),
+        ));
+    }
     let block_number = log
         .block_number
         .ok_or_else(|| RpcError::Invalid("pending log has no block number".into()))?;
@@ -78,6 +106,7 @@ fn normalize_rpc_log(
         .map_err(|_| RpcError::Invalid("log index exceeds uint32".into()))?;
     Ok(ContractLog {
         address: log.address,
+        transaction_hash: log.transaction_hash,
         topics: log.topics,
         data: log.data,
         removed: log.removed,

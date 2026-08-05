@@ -13,7 +13,11 @@ default = ["base"]
 evm = ["dep:lunarbase-source-evm"]
 base = ["evm"]
 monad = ["dep:lunarbase-source-monad"]
-monad-native = ["monad", "lunarbase-source-monad/native-event-ring"]
+monad-native = [
+    "monad",
+    "dep:lunarbase-source-monad-native",
+    "lunarbase-source-monad-native/native-event-ring",
+]
 arbitrum = ["dep:lunarbase-source-arbitrum"]
 all-networks = ["base", "monad", "arbitrum"]
 
@@ -21,12 +25,14 @@ all-networks = ["base", "monad", "arbitrum"]
 workspace = true
 
 [dependencies]
+alloy-primitives.workspace = true
 axum.workspace = true
 clap.workspace = true
 lunarbase-source-arbitrum = { workspace = true, optional = true }
 lunarbase-source-evm = { workspace = true, optional = true }
 lunarbase-client.workspace = true
 lunarbase-source-monad = { workspace = true, optional = true }
+lunarbase-source-monad-native = { workspace = true, optional = true }
 lunarbase-math.workspace = true
 redis.workspace = true
 serde.workspace = true
