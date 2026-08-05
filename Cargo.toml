@@ -51,7 +51,7 @@ futures-util = "0.3"
 async-stream = "0.3"
 redis = { version = "0.27", default-features = false }
 tokio = { version = "1", features = ["macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
-tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
 axum = { version = "0.7.9", default-features = false, features = ["http1", "json", "tokio"] }
 clap = { version = "4.5.60", features = ["derive", "env"] }
 toml = "0.8.23"
