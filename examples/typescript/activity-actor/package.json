@@ -18,7 +18,7 @@
   },
   "dependencies": {
     "@lunarbase-lab/pmm-v2-math": "workspace:*",
-    "viem": "2.55.2",
+    "viem": "2.55.10",
     "zod": "4.3.6"
   },
   "devDependencies": {
