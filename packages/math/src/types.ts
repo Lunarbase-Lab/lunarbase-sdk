@@ -134,7 +134,7 @@ export type UnavailableReason =
   | { kind: "SpreadConsumesAnchor" }
   | { kind: "InsufficientOutputReserve"; asset: Address };
 
-/** Discriminated union returned by all quote entry points. */
+/** Discriminated union returned by quote evaluation. */
 export type QuoteOutcome =
   { kind: "Available"; result: QuoteResult } | { kind: "Unavailable"; reason: UnavailableReason };
 

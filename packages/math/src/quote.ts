@@ -195,16 +195,6 @@ export function quote(request: QuoteRequest, executionBlockNumber: bigint, state
   return routeQuote(state, request, input, output);
 }
 
-/** Forces exact-input mode before delegating to the shared quote engine. */
-export function quoteExactIn(request: QuoteRequest, executionBlockNumber: bigint, state: QuoteState): QuoteOutcome {
-  return quote({ ...request, mode: "ExactIn" }, executionBlockNumber, state);
-}
-
-/** Forces exact-output mode before delegating to the shared quote engine. */
-export function quoteExactOut(request: QuoteRequest, executionBlockNumber: bigint, state: QuoteState): QuoteOutcome {
-  return quote({ ...request, mode: "ExactOut" }, executionBlockNumber, state);
-}
-
 /** Returns the Solidity-compatible exact-input amount or zero when unavailable. */
 export function solidityExactInAmount(outcome: QuoteOutcome): bigint {
   return outcome.kind === "Available" ? outcome.result.amountOut : 0n;

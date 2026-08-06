@@ -328,32 +328,6 @@ pub fn quote(
     };
     Ok(quote_route(state, request, input_lane, output_lane)?)
 }
-/// Calculates a quote while forcing `QuoteMode::ExactIn`.
-///
-/// This is a convenience wrapper around [`quote`] and does not change any
-/// rounding or sentinel behavior.
-pub fn quote_exact_in(
-    request: &QuoteRequest,
-    execution_block_number: u64,
-    state: &QuoteState,
-) -> Result<QuoteOutcome, QuoteError> {
-    let mut request = request.clone();
-    request.mode = QuoteMode::ExactIn;
-    quote(&request, execution_block_number, state)
-}
-/// Calculates a quote while forcing `QuoteMode::ExactOut`.
-///
-/// Exact-out unavailable results retain the public `U256::MAX` sentinel when
-/// converted with [`solidity_exact_out_amount`].
-pub fn quote_exact_out(
-    request: &QuoteRequest,
-    execution_block_number: u64,
-    state: &QuoteState,
-) -> Result<QuoteOutcome, QuoteError> {
-    let mut request = request.clone();
-    request.mode = QuoteMode::ExactOut;
-    quote(&request, execution_block_number, state)
-}
 /// Converts a rich quote outcome to `Lanes.quoteExactIn`'s public scalar.
 ///
 /// Available quotes return `amount_out`; every unavailable reason maps to zero.

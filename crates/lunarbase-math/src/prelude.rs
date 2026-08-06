@@ -4,7 +4,7 @@
 
 pub use crate::arithmetic::{BPS, WAD};
 pub use crate::quote::{
-    quote, quote_exact_in, quote_exact_out, solidity_exact_in_amount, solidity_exact_out_amount,
+    quote, solidity_exact_in_amount, solidity_exact_out_amount,
     solidity_exact_out_amount_for_request,
 };
 pub use crate::slot0::{LaneSlot0, decode_lane_slot0, encode_lane_slot0};
