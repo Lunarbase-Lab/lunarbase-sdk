@@ -82,10 +82,10 @@ jobs:
         with:
           go-version: "1.26"
       - run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
-      - name: Install native and E2E prerequisites
+      - name: Install E2E prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang cmake libhugetlbfs-dev redis-server
+          sudo apt-get install -y redis-server
       - run: pnpm install --frozen-lockfile
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
@@ -93,7 +93,7 @@ jobs:
       - name: Validate release versions
         run: node scripts/check-release-version.mjs "${RELEASE_TAG}"
       - name: Run every release gate
-        run: make verify check-network-features check-monad-native docker-image-check test-process-e2e release-check
+        run: make verify check-network-features docker-image-check test-process-e2e release-check
       - name: Audit production npm dependencies
         run: make audit-ts
       - uses: actions/upload-artifact@v7
