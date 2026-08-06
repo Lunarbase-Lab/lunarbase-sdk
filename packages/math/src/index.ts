@@ -1,8 +1,16 @@
 /** Public facade for the pure bigint math package. */
-export * from "./constants.js";
-export * from "./types.js";
-export * from "./arithmetic.js";
-export * from "./decimal.js";
-export * from "./slot0.js";
-export * from "./fees.js";
-export * from "./quote.js";
+export { BPS, MathError, WAD, parseAddress } from "./constants.js";
+export type { Address, Word } from "./constants.js";
+export { createLaneState, laneExists, lanePaused } from "./types.js";
+export type {
+  FeeProfile,
+  LaneState,
+  LaneSlot0,
+  QuoteMode,
+  QuoteOutcome,
+  QuoteRequest,
+  QuoteResult,
+  QuoteState,
+  UnavailableReason,
+} from "./types.js";
+export { quote, solidityQuoteAmount } from "./quote.js";

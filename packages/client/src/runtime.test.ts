@@ -1,14 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import {
-  WAD,
-  createLaneState,
-  decodeLaneSlot0,
-  encodeLaneSlot0,
-  type Address,
-  type QuoteRequest,
-  type QuoteState,
-} from "@lunarbase-lab/pmm-v2-math";
+import { WAD, createLaneState, type Address, type QuoteRequest, type QuoteState } from "@lunarbase-lab/pmm-v2-math";
+import { decodeLaneSlot0, encodeLaneSlot0 } from "@lunarbase-lab/pmm-v2-math/slot0";
 import * as HexValue from "ox/Hex";
 import type { Hex } from "ox/Hex";
 import {

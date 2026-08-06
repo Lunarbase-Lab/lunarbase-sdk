@@ -26,21 +26,6 @@ export interface LaneSlot0 {
   reservedHighBits: bigint;
 }
 
-/** Zero-valued lane slot used when constructing an empty state. */
-export const EMPTY_SLOT0: LaneSlot0 = Object.freeze({
-  price: 0n,
-  askFeeBps: 0n,
-  bidFeeBps: 0n,
-  pricePushThreshold: 0n,
-  thresholdEnabled: false,
-  latestUpdateBlock: 0n,
-  exists: false,
-  paused: false,
-  blockDelay: 0,
-  slippageKBps: 0,
-  reservedHighBits: 0n,
-});
-
 /** Compact lane state consumed by the quote engine. */
 export interface LaneState {
   /** Raw packed Solidity lane word consumed by quote math. */

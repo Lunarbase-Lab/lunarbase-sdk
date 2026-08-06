@@ -328,36 +328,18 @@ pub fn quote(
     };
     Ok(quote_route(state, request, input_lane, output_lane)?)
 }
-/// Converts a rich quote outcome to `Lanes.quoteExactIn`'s public scalar.
+/// Converts a rich quote outcome to the scalar returned by the Solidity API.
 ///
-/// Available quotes return `amount_out`; every unavailable reason maps to zero.
-pub fn solidity_exact_in_amount(outcome: &QuoteOutcome) -> U256 {
-    match outcome {
-        QuoteOutcome::Available(result) => result.amount_out,
-        QuoteOutcome::Unavailable(_) => U256::ZERO,
-    }
-}
-/// Converts a rich quote outcome to `Lanes.quoteExactOut`'s public scalar.
-///
-/// Available quotes return `amount_in`; unavailable results map to the
-/// contract's `U256::MAX` sentinel.
-pub fn solidity_exact_out_amount(outcome: &QuoteOutcome) -> U256 {
-    match outcome {
-        QuoteOutcome::Available(result) => result.amount_in,
-        QuoteOutcome::Unavailable(_) => U256::MAX,
-    }
-}
-/// Applies the special zero-request override to the exact-out sentinel.
-///
-/// Solidity returns zero for a zero requested amount, even though a generic
-/// unavailable exact-out outcome normally maps to `U256::MAX`.
-pub fn solidity_exact_out_amount_for_request(
-    request: &QuoteRequest,
-    outcome: &QuoteOutcome,
-) -> U256 {
-    if request.amount == U256::ZERO {
-        U256::ZERO
-    } else {
-        solidity_exact_out_amount(outcome)
+/// Exact-in unavailable quotes map to zero. Exact-out unavailable quotes map
+/// to `U256::MAX`, except that a zero-sized request preserves Solidity's zero
+/// sentinel. Available quotes select `amount_out` or `amount_in` according to
+/// [`QuoteRequest::mode`].
+pub fn solidity_quote_amount(request: &QuoteRequest, outcome: &QuoteOutcome) -> U256 {
+    match (request.mode, outcome) {
+        (QuoteMode::ExactIn, QuoteOutcome::Available(result)) => result.amount_out,
+        (QuoteMode::ExactIn, QuoteOutcome::Unavailable(_)) => U256::ZERO,
+        (QuoteMode::ExactOut, _) if request.amount == U256::ZERO => U256::ZERO,
+        (QuoteMode::ExactOut, QuoteOutcome::Available(result)) => result.amount_in,
+        (QuoteMode::ExactOut, QuoteOutcome::Unavailable(_)) => U256::MAX,
     }
 }

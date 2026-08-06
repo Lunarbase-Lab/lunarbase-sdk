@@ -1,4 +1,4 @@
-import { decodeLaneSlot0 } from "@lunarbase-lab/pmm-v2-math";
+import { decodeLaneSlot0 } from "@lunarbase-lab/pmm-v2-math/slot0";
 import {
   createPublicClient,
   createWalletClient,

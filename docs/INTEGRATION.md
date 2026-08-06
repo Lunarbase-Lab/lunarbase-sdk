@@ -11,7 +11,7 @@ one network source:
 | Monad       | lunarbase-pmm-v2-source-monad    | @lunarbase-lab/pmm-v2-source-monad    |
 | Arbitrum    | lunarbase-pmm-v2-source-arbitrum | @lunarbase-lab/pmm-v2-source-arbitrum |
 
-Use package version 0.3.0 consistently.
+Use package version 0.3.1 consistently.
 
 ## Configure a deployment
 

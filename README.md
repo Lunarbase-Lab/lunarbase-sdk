@@ -13,7 +13,7 @@ network data sources, and a runnable quote indexer for Rust and TypeScript.
 | Monad source        | [lunarbase-pmm-v2-source-monad](crates/lunarbase-source-monad/README.md)       | [@lunarbase-lab/pmm-v2-source-monad](packages/source-monad/README.md)       | Maintenance     |
 | Arbitrum source     | [lunarbase-pmm-v2-source-arbitrum](crates/lunarbase-source-arbitrum/README.md) | [@lunarbase-lab/pmm-v2-source-arbitrum](packages/source-arbitrum/README.md) | Maintenance     |
 
-All public packages use version 0.3.0.
+All public packages use version 0.3.1.
 
 Maintenance packages remain publishable; updates focus on compatibility,
 reliability, and security fixes.
@@ -23,17 +23,17 @@ reliability, and security fixes.
 Rust:
 
 ```sh
-cargo add lunarbase-pmm-v2-math@0.3.0
-cargo add lunarbase-pmm-v2-client@0.3.0
-cargo add lunarbase-pmm-v2-source-evm@0.3.0
+cargo add lunarbase-pmm-v2-math@0.3.1
+cargo add lunarbase-pmm-v2-client@0.3.1
+cargo add lunarbase-pmm-v2-source-evm@0.3.1
 ```
 
 TypeScript:
 
 ```sh
-pnpm add @lunarbase-lab/pmm-v2-math@0.3.0
-pnpm add @lunarbase-lab/pmm-v2-client@0.3.0
-pnpm add @lunarbase-lab/pmm-v2-source-evm@0.3.0
+pnpm add @lunarbase-lab/pmm-v2-math@0.3.1
+pnpm add @lunarbase-lab/pmm-v2-client@0.3.1
+pnpm add @lunarbase-lab/pmm-v2-source-evm@0.3.1
 ```
 
 Choose source-monad or source-arbitrum instead of source-evm when integrating

@@ -13,7 +13,7 @@ use crate::indexer::tasks::{
 use crate::model::{Checkpoint, Commitment, ContractLog, SourceError};
 use crate::source::ChainDataSource;
 use futures_util::FutureExt;
-use lunarbase_math::state::{QuoteRequest, QuoteState};
+use lunarbase_math::{QuoteRequest, QuoteState};
 use std::any::Any;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;

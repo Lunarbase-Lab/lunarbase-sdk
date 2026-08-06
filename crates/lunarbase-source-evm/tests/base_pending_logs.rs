@@ -1,7 +1,7 @@
 //! Base pending-log wire-shape regression.
 
 use lunarbase_client::model::Commitment;
-use lunarbase_math::types::B256;
+use lunarbase_math::B256;
 use lunarbase_source_evm::rpc::codec::parse_rpc_log;
 use serde_json::json;
 

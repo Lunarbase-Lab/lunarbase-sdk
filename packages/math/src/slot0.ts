@@ -193,7 +193,7 @@ export function encodeUpdateFees(askFeeBps: bigint, bidFeeBps: bigint): bigint {
   return askFeeBps | (bidFeeBps << 20n);
 }
 /** Decodes the packed update-fee payload as `[askFeeBps, bidFeeBps]`. */
-export function decodeUpdateFees(fees: bigint): readonly [bigint, bigint] {
+function decodeUpdateFees(fees: bigint): readonly [bigint, bigint] {
   validateField(fees, 40n, "fees");
   return [fees & fieldMask(20n), fees >> 20n];
 }

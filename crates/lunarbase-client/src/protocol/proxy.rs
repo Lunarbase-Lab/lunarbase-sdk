@@ -1,6 +1,6 @@
 //! ERC-1967 proxy constants and strict storage decoding.
 
-use lunarbase_math::types::{Address, B256};
+use lunarbase_math::{Address, B256};
 
 /// `bytes32(uint256(keccak256("eip1967.proxy.implementation")) - 1)`.
 pub const ERC1967_IMPLEMENTATION_SLOT: B256 = B256::new([
@@ -24,7 +24,7 @@ pub fn decode_implementation(word: B256) -> Option<Address> {
 #[cfg(test)]
 mod tests {
     use super::decode_implementation;
-    use lunarbase_math::types::{Address, B256};
+    use lunarbase_math::{Address, B256};
 
     #[test]
     fn decodes_only_canonical_non_zero_addresses() {

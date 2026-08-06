@@ -139,7 +139,7 @@ fn cursor_key(cursor: &ChainCursor, rank: u8) -> CursorKey {
 mod tests {
     use crate::model::{ChainCursor, ChainUpdate, Commitment, ContractLog};
     use crate::state::ordering::CursorReorderBuffer;
-    use lunarbase_math::types::{Address, Bytes};
+    use lunarbase_math::{Address, Bytes};
 
     fn cursor(block: u64, tx: Option<u32>, log: Option<u32>) -> ChainCursor {
         ChainCursor {

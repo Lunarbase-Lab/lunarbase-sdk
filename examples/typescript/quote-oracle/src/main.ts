@@ -2,16 +2,16 @@
 
 import { readFile } from "node:fs/promises";
 import {
-  encodeLaneSlot0,
   createLaneState,
   quote,
   parseAddress,
-  solidityExactOutAmountForRequest,
+  solidityQuoteAmount,
   type LaneState,
   type Address,
   type QuoteRequest,
   type QuoteState,
 } from "@lunarbase-lab/pmm-v2-math";
+import { encodeLaneSlot0 } from "@lunarbase-lab/pmm-v2-math/slot0";
 import * as AbiParameters from "ox/AbiParameters";
 import * as Hex from "ox/Hex";
 
@@ -169,7 +169,7 @@ function output(vector: Vector): Hex.Hex {
           ]
         : [
             0n,
-            built.request.mode === "ExactOut" ? solidityExactOutAmountForRequest(built.request, outcome) : 0n,
+            built.request.mode === "ExactOut" ? solidityQuoteAmount(built.request, outcome) : 0n,
             0n,
             0n,
             0n,

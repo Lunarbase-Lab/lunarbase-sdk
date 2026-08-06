@@ -11,8 +11,8 @@ use lunarbase_client::model::{
 use lunarbase_client::protocol::abi::{core, decode_core_event, lane_discovery_topics};
 use lunarbase_client::protocol::proxy::{ERC1967_IMPLEMENTATION_SLOT, decode_implementation};
 use lunarbase_math::arithmetic::BPS;
-use lunarbase_math::state::{LaneState, QuoteState};
-use lunarbase_math::types::{Address, U256};
+use lunarbase_math::{Address, U256};
+use lunarbase_math::{LaneState, QuoteState};
 use std::{collections::BTreeSet, sync::Arc};
 
 const SNAPSHOT_CONCURRENCY: usize = 16;
@@ -197,7 +197,7 @@ impl RpcSnapshotProvider {
         &self,
         core: Address,
         call: C,
-        block_hash: lunarbase_math::types::B256,
+        block_hash: lunarbase_math::B256,
     ) -> Result<C::Return, SourceError> {
         let response = self
             .rpc

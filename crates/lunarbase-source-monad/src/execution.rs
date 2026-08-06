@@ -2,7 +2,7 @@
 
 use lunarbase_client::model::{ChainCursor, ChainUpdate, Commitment, ContractLog, SourceError};
 use lunarbase_client::source::SourceStream;
-use lunarbase_math::types::{Address, B256, Bytes};
+use lunarbase_math::{Address, B256, Bytes};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Block lifecycle notification from an execution-event source.

@@ -11,7 +11,7 @@ use lunarbase_client::model::{
 };
 use lunarbase_client::protocol::abi::{core, quote_critical_topics};
 use lunarbase_client::state::reducer::QuoteReducer;
-use lunarbase_math::types::{Address, B256, U256};
+use lunarbase_math::{Address, B256, U256};
 
 #[test]
 fn generated_core_selectors_match_the_pinned_abi() {

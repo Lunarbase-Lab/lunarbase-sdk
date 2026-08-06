@@ -4,8 +4,8 @@ use crate::rpc::codec::{parse_rpc_head, parse_rpc_log, validate_canonical_hex_u6
 use alloy_primitives::{Bytes, U64, keccak256};
 use alloy_rpc_client::RpcClient;
 use lunarbase_client::model::{BackfillRequest, ChainCursor, Commitment, ContractLog, SourceError};
-use lunarbase_math::types::Address;
-use lunarbase_math::types::B256;
+use lunarbase_math::Address;
+use lunarbase_math::B256;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{collections::VecDeque, str::FromStr, sync::Arc};

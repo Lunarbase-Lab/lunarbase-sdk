@@ -2,7 +2,7 @@
 
 use crate::execution::{ExecutionHead, ExecutionLog};
 use lunarbase_client::model::{Commitment, SourceError};
-use lunarbase_math::types::{Address, B256, Bytes};
+use lunarbase_math::{Address, B256, Bytes};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -275,7 +275,7 @@ fn is_recovery_alert(message: &str) -> bool {
 mod tests {
     use crate::protocol::{ParserMessage, decode_parser_message, decode_parser_value};
     use lunarbase_client::model::Commitment;
-    use lunarbase_math::types::{B256, U256};
+    use lunarbase_math::{B256, U256};
     use serde_json::json;
 
     #[test]

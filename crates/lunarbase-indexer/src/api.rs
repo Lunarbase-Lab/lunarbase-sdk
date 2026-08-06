@@ -12,10 +12,8 @@ use lunarbase_client::indexer::client::ConnectedQuoteClient;
 use lunarbase_client::indexer::errors::IndexerError;
 use lunarbase_client::indexer::quote_types::{ClientBatchQuote, ClientQuote};
 use lunarbase_client::model::{ChainCursor, Commitment};
-use lunarbase_math::state::{
-    QuoteMode, QuoteOutcome, QuoteRequest, QuoteResult, UnavailableReason,
-};
-use lunarbase_math::types::{Address, B256, U256};
+use lunarbase_math::{Address, B256, U256};
+use lunarbase_math::{QuoteMode, QuoteOutcome, QuoteRequest, QuoteResult, UnavailableReason};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{future::Future, net::SocketAddr, str::FromStr, sync::Arc, time::Instant};

@@ -2,7 +2,7 @@
 
 use crate::model::{ContractLog, LogDecodeError, QuoteEvent};
 use alloy_sol_types::SolEvent;
-use lunarbase_math::types::{B256, U256};
+use lunarbase_math::{B256, U256};
 
 /// Generated function and event types shared by bootstrap and replay.
 pub mod core {
@@ -458,7 +458,7 @@ mod tests {
         describe_core_event,
     };
     use alloy_sol_types::SolEvent;
-    use lunarbase_math::types::{Address, B256, U256};
+    use lunarbase_math::{Address, B256, U256};
 
     #[test]
     fn generated_topics_match_the_pinned_solidity_abi() {

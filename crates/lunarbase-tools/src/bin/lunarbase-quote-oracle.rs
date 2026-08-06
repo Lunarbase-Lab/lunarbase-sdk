@@ -1,9 +1,9 @@
 //! JSON-lines oracle used by the canonical Solidity differential FFI suite.
 
-use lunarbase_math::quote::{quote, solidity_exact_out_amount_for_request};
 use lunarbase_math::slot0::{LaneSlot0, encode_lane_slot0};
-use lunarbase_math::state::{LaneState, QuoteMode, QuoteOutcome, QuoteRequest, QuoteState};
-use lunarbase_math::types::{Address, U256};
+use lunarbase_math::{Address, U256};
+use lunarbase_math::{LaneState, QuoteMode, QuoteOutcome, QuoteRequest, QuoteState};
+use lunarbase_math::{quote, solidity_quote_amount};
 use serde::Deserialize;
 use std::fs;
 use std::io::{self, Write};
@@ -134,7 +134,7 @@ fn unavailable_words(request: &QuoteRequest, outcome: &QuoteOutcome) -> [U256; 7
     [
         U256::ZERO,
         if request.mode == QuoteMode::ExactOut {
-            solidity_exact_out_amount_for_request(request, outcome)
+            solidity_quote_amount(request, outcome)
         } else {
             U256::ZERO
         },
@@ -211,8 +211,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::unavailable_words;
-    use lunarbase_math::state::{QuoteMode, QuoteOutcome, QuoteRequest, UnavailableReason};
-    use lunarbase_math::types::{Address, U256};
+    use lunarbase_math::{Address, U256};
+    use lunarbase_math::{QuoteMode, QuoteOutcome, QuoteRequest, UnavailableReason};
 
     fn request(mode: QuoteMode, amount: U256) -> QuoteRequest {
         QuoteRequest {

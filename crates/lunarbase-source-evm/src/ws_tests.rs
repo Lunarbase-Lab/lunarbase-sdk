@@ -18,7 +18,7 @@ use lunarbase_client::{
     source::ChainDataSource,
     state::ordering::CursorReorderBuffer,
 };
-use lunarbase_math::types::{Address, B256, Bytes, U256};
+use lunarbase_math::{Address, B256, Bytes, U256};
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,

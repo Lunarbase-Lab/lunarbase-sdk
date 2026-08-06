@@ -92,6 +92,17 @@ for (const expected of releaseNpmPackages) {
   if (exported?.import !== "./dist/index.js" || exported?.types !== "./dist/index.d.ts") {
     throw new Error(expected.name + " packed manifest has invalid exports");
   }
+  for (const [subpath, conditions] of Object.entries(manifest.exports ?? {})) {
+    for (const [condition, target] of Object.entries(conditions)) {
+      if (typeof target !== "string" || !target.startsWith("./")) {
+        throw new Error(expected.name + " has an invalid " + condition + " target for " + subpath);
+      }
+      const packedTarget = "package/" + target.slice(2);
+      if (!listing.includes(packedTarget)) {
+        throw new Error(expected.name + " archive is missing " + subpath + " " + condition + " target " + packedTarget);
+      }
+    }
+  }
   if (!listing.includes("package/README.md") || !listing.includes("package/LICENSE")) {
     throw new Error(expected.name + " archive must contain README.md and LICENSE");
   }

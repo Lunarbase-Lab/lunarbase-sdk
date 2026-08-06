@@ -68,7 +68,7 @@ impl ClientConnectConfig {
 mod tests {
     use super::*;
     use crate::model::{MATH_COMPATIBILITY_VERSION, Network};
-    use lunarbase_math::types::{Address, B256};
+    use lunarbase_math::{Address, B256};
 
     #[test]
     fn filter_accepts_only_empty_or_complete_quote_critical_topics() {

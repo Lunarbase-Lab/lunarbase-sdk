@@ -1,7 +1,7 @@
 use crate::support::e2e::environment::E2eError;
 use crate::support::e2e::helpers::wait_until;
 use crate::support::e2e::{ASSET, CASH, CORE, ROUTER};
-use lunarbase_math::types::Address;
+use lunarbase_math::Address;
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;

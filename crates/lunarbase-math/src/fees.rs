@@ -12,7 +12,7 @@ use crate::types::{MathError, U256};
 /// reverse direction, computes `floor(amount_in * price / WAD)`. A zero price
 /// returns zero before division, matching the quote engine's unavailable-path
 /// convention.
-pub fn quote_lane_exact_in(
+pub(crate) fn quote_lane_exact_in(
     price: U256,
     amount_in: U256,
     cash_to_asset: bool,
@@ -31,7 +31,7 @@ pub fn quote_lane_exact_in(
 /// For `cash_to_asset`, computes `ceil(amount_out * price / WAD)`; for the
 /// reverse direction, computes `ceil(amount_out * WAD / price)`. A zero price
 /// returns zero before division.
-pub fn quote_lane_exact_out(
+pub(crate) fn quote_lane_exact_out(
     price: U256,
     amount_out: U256,
     cash_to_asset: bool,
@@ -50,7 +50,7 @@ pub fn quote_lane_exact_out(
 /// The contract first performs a full-width ceil, then rounds up by
 /// `SLIPPAGE_SCALE`, and finally caps the result at `MAX_SLIPPAGE_BPS`. Any
 /// zero input short-circuits to zero.
-pub fn quote_lane_slippage_bps(
+pub(crate) fn quote_lane_slippage_bps(
     swap_cash_value: U256,
     principal_cash_value: U256,
     slippage_k_bps: U256,
@@ -68,7 +68,7 @@ pub fn quote_lane_slippage_bps(
 ///
 /// The two terms are intentionally not combined before rounding. The result
 /// is capped at `BPS`, and a zero total principal returns zero.
-pub fn quote_lane_weighted_slippage_k_bps(
+pub(crate) fn quote_lane_weighted_slippage_k_bps(
     first_principal: U256,
     first_k: U256,
     second_principal: U256,
@@ -87,7 +87,7 @@ pub fn quote_lane_weighted_slippage_k_bps(
 /// Raw fees are first clamped to `BPS`. Whitelisted routers keep that value;
 /// other routers receive the checked multiplier, also capped at `BPS`. A zero
 /// blacklist multiplier therefore produces a zero effective fee.
-pub fn calculate_fee_bps_for_router(
+pub(crate) fn calculate_fee_bps_for_router(
     whitelisted: bool,
     blacklist_fee_multiplier: U256,
     fee_bps: U256,
@@ -108,41 +108,28 @@ fn checked_mul_saturating(x: U256, y: U256) -> Result<U256, MathError> {
 ///
 /// The denominator is `BPS + fee_bps`, which preserves the contract's fee
 /// convention where the fee is taken from the grossed-up input.
-pub fn quote_lane_exact_in_fee(anchor: U256, fee_bps: U256) -> Result<U256, MathError> {
+pub(crate) fn quote_lane_exact_in_fee(anchor: U256, fee_bps: U256) -> Result<U256, MathError> {
     if anchor == U256::ZERO || fee_bps == U256::ZERO {
         return Ok(U256::ZERO);
     }
     full_mul_div_up(anchor, fee_bps, checked_add(BPS, fee_bps)?)
 }
 /// Computes the exact-out fee as `ceil(anchor * fee_bps / BPS)`.
-pub fn quote_lane_exact_out_fee(anchor: U256, fee_bps: U256) -> Result<U256, MathError> {
+pub(crate) fn quote_lane_exact_out_fee(anchor: U256, fee_bps: U256) -> Result<U256, MathError> {
     if anchor == U256::ZERO || fee_bps == U256::ZERO {
         return Ok(U256::ZERO);
     }
     full_mul_div_up(anchor, fee_bps, BPS)
-}
-/// Computes the exact-in route fee after adding the bid and ask fee legs.
-pub fn quote_lane_route_exact_in_fee(
-    anchor: U256,
-    bid_fee_bps: U256,
-    ask_fee_bps: U256,
-) -> Result<U256, MathError> {
-    quote_lane_exact_in_fee(anchor, checked_add(bid_fee_bps, ask_fee_bps)?)
-}
-/// Computes the exact-out route fee after adding the bid and ask fee legs.
-pub fn quote_lane_route_exact_out_fee(
-    anchor: U256,
-    bid_fee_bps: U256,
-    ask_fee_bps: U256,
-) -> Result<U256, MathError> {
-    quote_lane_exact_out_fee(anchor, checked_add(bid_fee_bps, ask_fee_bps)?)
 }
 /// Splits a calculated fee into partner and treasury portions.
 ///
 /// The partner amount is `floor(fee_amount * partner_fee_bps / BPS)` using
 /// the checked-256 multiplication primitive. The treasury receives the
 /// checked remainder, so both outputs sum to `fee_amount`.
-pub fn split_fee(fee_amount: U256, partner_fee_bps: U256) -> Result<(U256, U256), MathError> {
+pub(crate) fn split_fee(
+    fee_amount: U256,
+    partner_fee_bps: U256,
+) -> Result<(U256, U256), MathError> {
     if fee_amount == U256::ZERO {
         return Ok((U256::ZERO, U256::ZERO));
     }

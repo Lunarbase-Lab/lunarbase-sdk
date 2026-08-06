@@ -1,8 +1,8 @@
 //! Redis checkpoint persistence for faster restarts.
 
 use lunarbase_client::model::{ChainCursor, Checkpoint, Commitment, DeploymentConfig, Network};
-use lunarbase_math::state::{FeeProfile, LaneState, QuoteState};
-use lunarbase_math::types::{Address, B256, U256};
+use lunarbase_math::{Address, B256, U256};
+use lunarbase_math::{FeeProfile, LaneState, QuoteState};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -420,8 +420,8 @@ mod tests {
         SCHEMA_VERSION,
     };
     use lunarbase_math::slot0::set_lane_slot0_exists;
-    use lunarbase_math::state::{LaneState, QuoteState};
-    use lunarbase_math::types::{Address, B256, U256};
+    use lunarbase_math::{Address, B256, U256};
+    use lunarbase_math::{LaneState, QuoteState};
 
     fn address(suffix: u8) -> Address {
         let mut bytes = [0u8; 20];

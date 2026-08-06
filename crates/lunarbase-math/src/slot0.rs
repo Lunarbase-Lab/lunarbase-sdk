@@ -79,16 +79,6 @@ fn validate_native(value: u128, bits: usize, field: &'static str) -> Result<(), 
     Ok(())
 }
 
-fn validate_word(value: U256, bits: usize, field: &'static str) -> Result<(), MathError> {
-    if value > field_mask(bits) {
-        return Err(MathError::FieldOverflow {
-            field,
-            bits: bits as u16,
-        });
-    }
-    Ok(())
-}
-
 /// Decodes the exact Solidity storage layout into native-width fields.
 pub fn decode_lane_slot0(word: U256) -> LaneSlot0 {
     LaneSlot0 {
@@ -301,7 +291,7 @@ pub fn encode_update_fees(ask_fee_bps: u32, bid_fee_bps: u32) -> Result<u64, Mat
 /// # Errors
 ///
 /// Returns [`MathError::FieldOverflow`] when bits above `uint40` are set.
-pub fn decode_update_fees(fees: u64) -> Result<(u32, u32), MathError> {
+fn decode_update_fees(fees: u64) -> Result<(u32, u32), MathError> {
     validate_native(fees.into(), 40, "fees")?;
     let mask = (1u64 << FEE_BITS) - 1;
     Ok(((fees & mask) as u32, (fees >> FEE_BITS) as u32))
@@ -336,10 +326,4 @@ pub fn apply_lane_update_slot0(
         fields.paused = true;
     }
     encode_lane_slot0(&fields)
-}
-
-/// Validates and converts a word received from an ABI boundary to `uint112`.
-pub fn lane_price_from_word(value: U256) -> Result<u128, MathError> {
-    validate_word(value, PRICE_BITS, "price")?;
-    Ok(value.try_into().expect("validated uint112 fits u128"))
 }

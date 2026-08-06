@@ -3,7 +3,7 @@
 use crate::rpc::client::RpcError;
 use crate::rpc::codec::{parse_rpc_head, validate_canonical_hex_u64};
 use lunarbase_client::model::{ChainCursor, Commitment, ContractFilter};
-use lunarbase_math::types::B256;
+use lunarbase_math::B256;
 use serde_json::{Value, json};
 
 #[derive(Clone, Debug)]

@@ -9,8 +9,8 @@ use crate::model::{
 };
 use crate::protocol::abi::decode_core_event;
 use crate::state::reducer::{QuoteReducer, ReducerError};
-use lunarbase_math::quote::quote;
-use lunarbase_math::state::{QuoteOutcome, QuoteRequest, QuoteState};
+use lunarbase_math::quote;
+use lunarbase_math::{QuoteOutcome, QuoteRequest, QuoteState};
 
 #[derive(Clone, Debug)]
 /// Synchronous state machine used under the client's short `RwLock` guards.
@@ -354,7 +354,7 @@ pub(crate) fn sort_chain_updates(updates: &mut [ChainUpdate]) {
 mod canonical_floor_tests {
     use super::{canonical_floor_covers_log, snapshot_covers};
     use crate::model::{ChainCursor, Commitment};
-    use lunarbase_math::types::B256;
+    use lunarbase_math::B256;
 
     #[test]
     fn handoff_never_covers_an_update_from_another_chain() {

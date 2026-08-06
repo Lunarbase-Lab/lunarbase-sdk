@@ -28,7 +28,7 @@ impl Default for FeeProfile {
 impl FeeProfile {
     /// Returns the configured router's explicit-fee share for `asset`.
     #[inline]
-    pub fn partner_fee_bps(&self, asset: Address) -> U256 {
+    pub(crate) fn partner_fee_bps(&self, asset: Address) -> U256 {
         U256::from(self.partner_fee_bps.get(&asset).copied().unwrap_or(0))
     }
 }

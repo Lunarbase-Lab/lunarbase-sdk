@@ -5,7 +5,7 @@ use lunarbase_client::indexer::client_types::ClientConnectConfig;
 use lunarbase_client::model::{
     ContractFilter, DeploymentConfig, MATH_COMPATIBILITY_VERSION, Network,
 };
-use lunarbase_math::types::{Address, B256};
+use lunarbase_math::{Address, B256};
 use serde::Deserialize;
 use std::{net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
 use thiserror::Error;

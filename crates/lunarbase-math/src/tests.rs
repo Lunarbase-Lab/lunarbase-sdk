@@ -1,8 +1,5 @@
 use crate::arithmetic::WAD;
-use crate::quote::{
-    quote, solidity_exact_in_amount, solidity_exact_out_amount,
-    solidity_exact_out_amount_for_request,
-};
+use crate::quote::{quote, solidity_quote_amount};
 use crate::slot0::{
     LaneSlot0, apply_lane_update_slot0, decode_lane_slot0, encode_lane_slot0, encode_update_fees,
     lane_slot0_price,
@@ -198,13 +195,6 @@ fn lane_quote_ttl_includes_boundary_and_expires_next_block() {
         quote(&request, 104, &state).unwrap(),
         QuoteOutcome::Unavailable(UnavailableReason::StaleLane(asset))
     );
-}
-
-#[test]
-fn sentinels_match_solidity_edge_behavior() {
-    let outcome = QuoteOutcome::Unavailable(UnavailableReason::MissingLane(Address::ZERO));
-    assert_eq!(solidity_exact_in_amount(&outcome), U256::ZERO);
-    assert_eq!(solidity_exact_out_amount(&outcome), U256::MAX);
 }
 
 #[test]
@@ -492,11 +482,7 @@ fn shared_quote_vectors_match_rust_math() {
         }
         let outcome = outcome.unwrap();
         if let Some(public_amount) = vector.expected_public_amount {
-            let actual = if vector.mode == QuoteMode::ExactIn {
-                solidity_exact_in_amount(&outcome)
-            } else {
-                solidity_exact_out_amount_for_request(&request, &outcome)
-            };
+            let actual = solidity_quote_amount(&request, &outcome);
             assert_eq!(actual, golden_u256(&public_amount), "{}", vector.name);
         } else {
             let expected = vector.expected.expect("full expected result");

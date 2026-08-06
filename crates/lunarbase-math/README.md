@@ -8,7 +8,7 @@ Status: **fully supported**.
 
 ```toml
 [dependencies]
-lunarbase-math = { package = "lunarbase-pmm-v2-math", version = "0.3.0" }
+lunarbase-math = { package = "lunarbase-pmm-v2-math", version = "0.3.1" }
 ```
 
 ## Use
@@ -21,6 +21,16 @@ fn evaluate(request: &QuoteRequest, execution_block: u64, state: &QuoteState) {
     println!("{outcome:?}");
 }
 ```
+
+The crate root and `prelude` expose the complete quote data model. Optional
+low-level functionality remains grouped under explicit modules:
+
+```rust
+use lunarbase_math::arithmetic::full_mul_div_down;
+use lunarbase_math::slot0::decode_lane_slot0;
+```
+
+Fee stages and quote-engine modules are implementation details.
 
 ## Guarantees
 

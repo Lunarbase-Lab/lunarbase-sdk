@@ -8,7 +8,7 @@ Status: **fully supported**.
 
 ```toml
 [dependencies]
-lunarbase-client = { package = "lunarbase-pmm-v2-client", version = "0.3.0" }
+lunarbase-client = { package = "lunarbase-pmm-v2-client", version = "0.3.1" }
 ```
 
 Install one network source crate alongside the client.

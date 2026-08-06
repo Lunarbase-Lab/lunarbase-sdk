@@ -9,8 +9,8 @@ use lunarbase_math::slot0::{
     set_lane_slot0_block_delay, set_lane_slot0_exists, set_lane_slot0_paused,
     set_lane_slot0_price_push_threshold, set_lane_slot0_slippage_k_bps,
 };
-use lunarbase_math::state::{LaneState, QuoteState};
-use lunarbase_math::types::{Address, U256};
+use lunarbase_math::{Address, U256};
+use lunarbase_math::{LaneState, QuoteState};
 use thiserror::Error;
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -308,12 +308,12 @@ fn is_realtime_progression(previous: &ChainCursor, next: &ChainCursor) -> bool {
 mod tests {
     use super::{QuoteReducer, ReducerError};
     use crate::model::QuoteEvent;
+    use lunarbase_math::Address;
     use lunarbase_math::slot0::{
         LaneSlot0, decode_lane_slot0, encode_lane_slot0, lane_slot0_block_delay,
         lane_slot0_slippage_k_bps,
     };
-    use lunarbase_math::state::{LaneState, QuoteState};
-    use lunarbase_math::types::Address;
+    use lunarbase_math::{LaneState, QuoteState};
 
     fn address(value: u8) -> Address {
         Address::new([value; 20])

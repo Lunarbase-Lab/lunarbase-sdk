@@ -3,36 +3,29 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
   BPS,
-  EMPTY_SLOT0,
-  U256_MAX,
   WAD,
-  applyLaneUpdateSlot0,
-  calculateFeeBpsForRouter,
-  ceilDiv,
-  checkedAdd,
-  checkedMul,
-  checkedSub,
   createLaneState,
-  decimalNumberToBigInt,
+  parseAddress,
+  quote,
+  solidityQuoteAmount,
+  type Address,
+  type LaneSlot0,
+  type LaneState,
+  type QuoteState,
+} from "./index.js";
+import { checkedAdd, checkedMul, checkedSub, ensureDenominator } from "./arithmetic.js";
+import { decimalNumberToBigInt } from "./decimal.js";
+import { calculateFeeBpsForRouter, splitFee } from "./fees.js";
+import { U256_MAX, ceilDiv, fullMulDivDown, mulDivDown256 } from "./public-arithmetic.js";
+import {
+  applyLaneUpdateSlot0,
   decodeLaneSlot0,
   encodeLaneSlot0,
   encodeUpdateFees,
-  ensureDenominator,
-  fullMulDivDown,
   laneFeeBpsFromConventionalBps,
   lanePriceFromNumber,
-  splitFee,
   modelQuoteToLaneSlot0Fields,
-  mulDivDown256,
-  parseAddress,
-  quote,
-  solidityExactInAmount,
-  solidityExactOutAmount,
-  solidityExactOutAmountForRequest,
-  type LaneState,
-  type Address,
-  type QuoteState,
-} from "./index.js";
+} from "./slot0.js";
 
 interface GoldenLane {
   price: string;
@@ -74,6 +67,20 @@ interface GoldenVector {
 }
 
 const address = (last: string): Address => parseAddress(`0x${last.padStart(40, "0")}`);
+
+const EMPTY_SLOT0: LaneSlot0 = {
+  price: 0n,
+  askFeeBps: 0n,
+  bidFeeBps: 0n,
+  pricePushThreshold: 0n,
+  thresholdEnabled: false,
+  latestUpdateBlock: 0n,
+  exists: false,
+  paused: false,
+  blockDelay: 0,
+  slippageKBps: 0,
+  reservedHighBits: 0n,
+};
 
 test("decimal numbers scale through their canonical representation without binary multiplication drift", () => {
   assert.equal(decimalNumberToBigInt(2.824467842, 20), 282_446_784_200_000_000_000n);
@@ -200,8 +207,28 @@ test("direct quote returns complete result and Solidity sentinels", () => {
     ...state,
     lanes: new Map(),
   });
-  assert.equal(solidityExactInAmount(unavailable), 0n);
-  assert.equal(solidityExactOutAmount(unavailable), U256_MAX);
+  const exactIn = {
+    assetIn: address("1"),
+    assetOut: address("2"),
+    amount: 1n,
+    mode: "ExactIn",
+  } as const;
+  const exactOut = {
+    ...exactIn,
+    mode: "ExactOut",
+  } as const;
+  assert.equal(solidityQuoteAmount(exactIn, unavailable), 0n);
+  assert.equal(solidityQuoteAmount(exactOut, unavailable), U256_MAX);
+  assert.equal(
+    solidityQuoteAmount(
+      {
+        ...exactOut,
+        amount: 0n,
+      },
+      unavailable,
+    ),
+    0n,
+  );
 });
 
 test("lane quote TTL includes boundary and expires next block", () => {
@@ -455,10 +482,7 @@ test("shared golden vectors match TypeScript engine", () => {
         assert.equal(outcome.result.treasuryFee, BigInt(vector.expected.treasuryFee));
       }
     } else {
-      assert.equal(
-        vector.mode === "ExactIn" ? solidityExactInAmount(outcome) : solidityExactOutAmountForRequest(request, outcome),
-        BigInt(vector.expectedPublicAmount ?? "missing"),
-      );
+      assert.equal(solidityQuoteAmount(request, outcome), BigInt(vector.expectedPublicAmount ?? "missing"));
     }
   }
 });

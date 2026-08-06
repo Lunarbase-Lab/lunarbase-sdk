@@ -1,5 +1,6 @@
 /** Deployment and checkpoint compatibility validation. */
-import { BPS, decodeLaneSlot0, parseAddress } from "@lunarbase-lab/pmm-v2-math";
+import { BPS, parseAddress } from "@lunarbase-lab/pmm-v2-math";
+import { decodeLaneSlot0 } from "@lunarbase-lab/pmm-v2-math/slot0";
 import * as Hash from "ox/Hash";
 import * as Hex from "ox/Hex";
 import { Commitment, IndexerError, MATH_COMPATIBILITY_VERSION, Network, SCHEMA_VERSION } from "./model.js";

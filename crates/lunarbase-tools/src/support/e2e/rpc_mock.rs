@@ -5,7 +5,7 @@ use alloy_sol_types::{SolCall, SolValue};
 use axum::Json;
 use axum::extract::State;
 use lunarbase_client::protocol::abi::{TOPIC_LANE_ADDED, core};
-use lunarbase_math::types::{Address, B256, Bytes, U256};
+use lunarbase_math::{Address, B256, Bytes, U256};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;

@@ -300,7 +300,7 @@ fn core_event_id(log: &ContractLog) -> String {
     id
 }
 
-fn option_hash(value: Option<lunarbase_math::types::B256>) -> String {
+fn option_hash(value: Option<lunarbase_math::B256>) -> String {
     value.map_or_else(|| "none".into(), |value| format!("some:{value:#x}"))
 }
 
@@ -308,7 +308,7 @@ fn option_number<T: std::fmt::Display>(value: Option<T>) -> String {
     value.map_or_else(|| "none".into(), |value| format!("some:{value}"))
 }
 
-fn core_event_payload_digest(log: &ContractLog) -> lunarbase_math::types::B256 {
+fn core_event_payload_digest(log: &ContractLog) -> lunarbase_math::B256 {
     let mut payload = Vec::with_capacity(16 + log.topics.len() * 32 + log.data.len());
     payload.extend_from_slice(&(log.topics.len() as u64).to_be_bytes());
     for topic in &log.topics {
@@ -422,7 +422,7 @@ fn init_tracing() {
 mod tests {
     use super::{EventDedup, core_event_id, join_api_task, join_unit_task};
     use lunarbase_client::model::{ChainCursor, Commitment, ContractLog};
-    use lunarbase_math::types::{Address, B256, Bytes};
+    use lunarbase_math::{Address, B256, Bytes};
     use std::time::{Duration, Instant};
 
     #[tokio::test]

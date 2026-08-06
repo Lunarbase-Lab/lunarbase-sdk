@@ -2,7 +2,7 @@
 
 use crate::rpc::client::RpcError;
 use lunarbase_client::model::{ChainCursor, Commitment, ContractLog};
-use lunarbase_math::types::{Address, B256, Bytes};
+use lunarbase_math::{Address, B256, Bytes};
 use serde::Deserialize;
 use serde_json::Value;
 

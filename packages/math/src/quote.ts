@@ -1,4 +1,4 @@
-import { assertU256, type Address } from "./constants.js";
+import { assertU256, U256_MAX, type Address } from "./constants.js";
 import { checkedAdd, checkedSub } from "./arithmetic.js";
 import {
   laneSlot0AskFeeBps,
@@ -195,17 +195,12 @@ export function quote(request: QuoteRequest, executionBlockNumber: bigint, state
   return routeQuote(state, request, input, output);
 }
 
-/** Returns the Solidity-compatible exact-input amount or zero when unavailable. */
-export function solidityExactInAmount(outcome: QuoteOutcome): bigint {
-  return outcome.kind === "Available" ? outcome.result.amountOut : 0n;
-}
-
-/** Returns the Solidity-compatible exact-output amount or uint256 max when unavailable. */
-export function solidityExactOutAmount(outcome: QuoteOutcome): bigint {
-  return outcome.kind === "Available" ? outcome.result.amountIn : (1n << 256n) - 1n;
-}
-
-/** Applies Solidity's zero-request convention before converting an exact-output result. */
-export function solidityExactOutAmountForRequest(request: QuoteRequest, outcome: QuoteOutcome): bigint {
-  return request.amount === 0n ? 0n : solidityExactOutAmount(outcome);
+/**
+ * Converts a rich outcome to the scalar returned by the matching Solidity
+ * quote function, including exact-out sentinel behavior.
+ */
+export function solidityQuoteAmount(request: QuoteRequest, outcome: QuoteOutcome): bigint {
+  if (request.mode === "ExactIn") return outcome.kind === "Available" ? outcome.result.amountOut : 0n;
+  if (request.amount === 0n) return 0n;
+  return outcome.kind === "Available" ? outcome.result.amountIn : U256_MAX;
 }

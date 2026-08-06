@@ -2,17 +2,19 @@
 import {
   BPS,
   quote as computeQuote,
-  setLaneSlot0BlockDelay,
-  setLaneSlot0Exists,
-  setLaneSlot0Paused,
-  setLaneSlot0PricePushThreshold,
-  setLaneSlot0SlippageKBps,
   type Address,
   type LaneState,
   type QuoteOutcome,
   type QuoteRequest,
   type QuoteState,
 } from "@lunarbase-lab/pmm-v2-math";
+import {
+  setLaneSlot0BlockDelay,
+  setLaneSlot0Exists,
+  setLaneSlot0Paused,
+  setLaneSlot0PricePushThreshold,
+  setLaneSlot0SlippageKBps,
+} from "@lunarbase-lab/pmm-v2-math/slot0";
 import {
   Commitment,
   commitmentRank,

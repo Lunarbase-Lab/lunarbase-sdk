@@ -6,19 +6,26 @@
 
 /// Checked and full-width arithmetic primitives matching Solidity semantics.
 pub mod arithmetic;
-/// Fee, spread, and slippage calculations for individual lanes and routes.
-pub mod fees;
+mod fees;
 pub mod prelude;
-/// High-level exact-in and exact-out quote evaluation.
-pub mod quote;
+mod quote;
 /// Packing and decoding helpers for the protocol's `Lane.slot0` word.
 pub mod slot0;
-/// Quote requests, outcomes, and compact in-memory protocol state.
-pub mod state;
-/// Canonical Alloy EVM primitives and math errors used by this crate.
-pub mod types;
+mod state;
+mod types;
+
+pub use arithmetic::{BPS, WAD};
+pub use quote::{quote, solidity_quote_amount};
+pub use slot0::{LaneSlot0, decode_lane_slot0, encode_lane_slot0};
+pub use state::{
+    FeeProfile, LaneState, QuoteError, QuoteMode, QuoteOutcome, QuoteRequest, QuoteResult,
+    QuoteState, UnavailableReason,
+};
+pub use types::{Address, B256, Bytes, MathError, U256};
 
 #[cfg(test)]
 mod fee_tests;
+#[cfg(test)]
+mod sentinel_tests;
 #[cfg(test)]
 mod tests;

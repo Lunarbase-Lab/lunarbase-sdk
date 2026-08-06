@@ -4,7 +4,7 @@ use crate::parser::{
 };
 use crate::protocol::{ParserMessage, decode_parser_message};
 use lunarbase_client::model::ContractFilter;
-use lunarbase_math::types::{Address, B256, U256};
+use lunarbase_math::{Address, B256, U256};
 use serde_json::{Value, json};
 
 #[test]

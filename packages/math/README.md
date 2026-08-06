@@ -13,13 +13,22 @@ npm install @lunarbase-lab/pmm-v2-math
 ## Use
 
 ```ts
-import { quote, type QuoteRequest, type QuoteState } from "@lunarbase-lab/pmm-v2-math";
+import { quote, solidityQuoteAmount, type QuoteRequest, type QuoteState } from "@lunarbase-lab/pmm-v2-math";
 
 const outcome = quote(request satisfies QuoteRequest, executionBlock, state satisfies QuoteState);
+const contractAmount = solidityQuoteAmount(request, outcome);
 ```
 
-Use the exported conversion helpers for decimal model values before calling
-quote or state-packing APIs.
+The root entry point is intentionally limited to quotes, quote state, and
+canonical address helpers. Import optional low-level facilities explicitly:
+
+```ts
+import { fullMulDivDown } from "@lunarbase-lab/pmm-v2-math/arithmetic";
+import { decodeLaneSlot0, modelQuoteToLaneSlot0Fields } from "@lunarbase-lab/pmm-v2-math/slot0";
+```
+
+Fee stages and checked implementation primitives are internal details of the
+bit-exact quote engine.
 
 ## Guarantees
 

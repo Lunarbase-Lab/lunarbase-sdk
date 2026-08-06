@@ -42,7 +42,7 @@ PNPM_CMD := $(shell if command -v corepack >/dev/null 2>&1; then printf '%s' "co
 	check check-rust check-ts check-network-feature check-network-features check-monad-native \
 	fmt fmt-rust fmt-ts fmt-check fmt-check-rust fmt-check-ts lint lint-rust lint-ts \
 	test test-rust test-ts test-runtime test-process-e2e audit audit-rust audit-rust-ci audit-ts load monad-live-validate docs docs-rust ffi \
-	quote-logger quote-logger-rust quote-logger-ts activity-actor activity-actor-inspect activity-actor-wallet monad-parser-smoke docker-build docker-image-check docker-build-monad-native docker-up docker-down release-artifacts release-check release-version-check release-check-rust release-check-ts source-size-check repository-check check-scripts check-ci-tools verify ci-rust ci-ts ci-supply-chain ci pre-push clean check-pnpm
+	quote-logger quote-logger-rust quote-logger-ts activity-actor activity-actor-inspect activity-actor-wallet monad-parser-smoke docker-build docker-image-check docker-build-monad-native docker-up docker-down release-artifacts release-check release-version-check release-check-rust release-check-ts source-size-check repository-check public-api-check check-scripts check-ci-tools verify ci-rust ci-ts ci-supply-chain ci pre-push clean check-pnpm
 
 help:
 	@echo "LunarBase build targets:"
@@ -76,6 +76,7 @@ help:
 	@echo "  make release-check  Validate Rust/npm package contents"
 	@echo "  make source-size-check  Enforce the 500 non-comment code-line limit"
 	@echo "  make repository-check  Validate repository release hygiene"
+	@echo "  make public-api-check  Enforce the math package export allowlist"
 	@echo "  make verify         Run formatting, checks, lint, tests, and docs"
 	@echo "  make pre-push       Run every locally reproducible GitHub CI check"
 	@echo "  make install        Install locked pnpm dependencies and the Git hook"
@@ -262,7 +263,7 @@ release-artifacts:
 	$(CARGO) build --locked --release -p lunarbase-indexer --no-default-features --features base
 	cp target/release/lunarbase-indexer dist/lunarbase-indexer-base
 
-release-check: release-version-check release-check-rust release-check-ts
+release-check: public-api-check release-version-check release-check-rust release-check-ts
 
 release-version-check:
 	$(NODE) scripts/check-release-version.mjs
@@ -288,13 +289,16 @@ source-size-check:
 repository-check:
 	$(NODE) scripts/check-repository-hygiene.mjs
 
+public-api-check:
+	$(NODE) scripts/check-math-public-api.mjs
+
 ci-rust: fmt-check-rust check-rust lint-rust test-rust docs-rust
 
 ci-ts: fmt-check-ts check-ts lint-ts test-ts
 
 ci-supply-chain: audit-rust-ci audit-ts
 
-verify: repository-check source-size-check check-scripts ci-rust ci-ts
+verify: repository-check source-size-check public-api-check check-scripts ci-rust ci-ts
 
 ci: verify check-network-features check-monad-native docker-image-check test-process-e2e ci-supply-chain release-check
 

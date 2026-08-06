@@ -8,7 +8,7 @@ use lunarbase_client::model::{
     DeploymentConfig, Network, SourceError,
 };
 use lunarbase_client::source::{ChainDataSource, SourceStream};
-use lunarbase_math::types::{Address, B256};
+use lunarbase_math::{Address, B256};
 use lunarbase_source_evm::rpc::backend::RpcHttpBackend;
 use lunarbase_source_evm::rpc::client::RpcHttpClient;
 use lunarbase_source_evm::rpc::snapshot::RpcSnapshotProvider;

@@ -11,14 +11,6 @@ export function quoteLaneExactOutFee(anchor: bigint, feeBps: bigint): bigint {
   if (anchor === 0n || feeBps === 0n) return 0n;
   return fullMulDivUp(anchor, feeBps, BPS);
 }
-/** Combines bid and ask fees for a two-lane exact-input route. */
-export function quoteLaneRouteExactInFee(anchor: bigint, bidFeeBps: bigint, askFeeBps: bigint): bigint {
-  return quoteLaneExactInFee(anchor, checkedAdd(bidFeeBps, askFeeBps));
-}
-/** Combines bid and ask fees for a two-lane exact-output route. */
-export function quoteLaneRouteExactOutFee(anchor: bigint, bidFeeBps: bigint, askFeeBps: bigint): bigint {
-  return quoteLaneExactOutFee(anchor, checkedAdd(bidFeeBps, askFeeBps));
-}
 /** Applies whitelist/blacklist policy and caps the resulting fee at BPS. */
 export function calculateFeeBpsForRouter(whitelisted: boolean, blacklistFeeMultiplier: bigint, feeBps: bigint): bigint {
   const fee = feeBps > BPS ? BPS : feeBps;

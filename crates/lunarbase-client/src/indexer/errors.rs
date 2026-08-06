@@ -2,7 +2,7 @@
 
 use crate::model::{LogDecodeError, SourceError};
 use crate::state::reducer::ReducerError;
-use lunarbase_math::state::QuoteError;
+use lunarbase_math::QuoteError;
 use thiserror::Error;
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
