@@ -75,7 +75,7 @@ export interface FeeProfile {
   whitelisted: boolean;
   /** Global fee multiplier applied only to non-whitelisted routers. */
   blacklistFeeMultiplier: bigint;
-  /** Partner fee for the configured router, keyed by fee asset. */
+  /** Share of the explicit fee assigned to the configured router, keyed by fee asset. */
   partnerFeeBps: ReadonlyMap<Address, number>;
 }
 

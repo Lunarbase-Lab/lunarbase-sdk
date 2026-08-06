@@ -1,4 +1,5 @@
-use crate::arithmetic::WAD;
+use crate::arithmetic::{BPS, WAD};
+use crate::fees::split_fee;
 use crate::quote::{
     quote, solidity_exact_in_amount, solidity_exact_out_amount,
     solidity_exact_out_amount_for_request,
@@ -75,6 +76,18 @@ fn alloy_evm_primitives_use_canonical_hex_json() {
 }
 
 #[test]
+fn fee_split_applies_partner_share_to_explicit_fee() {
+    assert_eq!(
+        split_fee(n(1_000_000), n(250_000)).unwrap(),
+        (n(250_000), n(750_000))
+    );
+    assert_eq!(split_fee(n(1), n(500_000)).unwrap(), (n(0), n(1)));
+    assert_eq!(split_fee(n(0), n(500_000)).unwrap(), (n(0), n(0)));
+    assert_eq!(split_fee(n(1_000_000), BPS).unwrap(), (n(1_000_000), n(0)));
+    assert_eq!(split_fee(U256::MAX, n(2)).unwrap_err(), MathError::Overflow);
+}
+
+#[test]
 fn direct_quote_matches_fee_split() {
     let cash = address(1);
     let asset = address(2);
@@ -113,6 +126,9 @@ fn direct_quote_matches_fee_split() {
     assert_eq!(result.amount_in, n(100));
     assert_eq!(result.fee_asset, asset);
     assert!(result.amount_out > U256::ZERO);
+    assert_eq!(result.fee_amount, n(1));
+    assert_eq!(result.partner_fee, n(0));
+    assert_eq!(result.treasury_fee, n(1));
 }
 
 #[test]

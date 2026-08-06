@@ -84,8 +84,8 @@ pub fn full_mul_div_up(x: U256, y: U256, denominator: U256) -> Result<U256, Math
 /// Computes `floor(x * y / denominator)` with Solidity's checked-256 product.
 ///
 /// Unlike [`full_mul_div_down`], multiplication is performed in the 256-bit
-/// domain first. This is the primitive used by `splitFee` in the pinned
-/// contract and must not be replaced with the full-width variant.
+/// domain first. This is the primitive used by the contract's fee split and
+/// must not be replaced with the full-width variant.
 ///
 /// # Errors
 ///

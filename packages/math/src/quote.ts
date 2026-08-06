@@ -82,7 +82,7 @@ function assembleQuote(
   const insufficient = amountOut > outputReserve || (request.mode === "ExactIn" && fee > outputReserve - amountOut);
   if (insufficient)
     return { kind: "Unavailable", reason: { kind: "InsufficientOutputReserve", asset: request.assetOut } };
-  const [partner, treasury] = splitFee(anchor, fee, partnerFee(state, feeAsset));
+  const [partner, treasury] = splitFee(fee, partnerFee(state, feeAsset));
   return {
     kind: "Available",
     result: { amountIn, amountOut, feeAsset, feeAmount: fee, partnerFee: partner, treasuryFee: treasury },

@@ -79,6 +79,11 @@ cannot be overridden by a quote request.
 An available result contains amountIn, amountOut, feeAsset, feeAmount,
 partnerFee, and treasuryFee.
 
+The partner share is calculated from the explicit fee, not from the quote
+anchor: `partnerFee = floor(feeAmount * partnerFeeBps / BPS)`.
+`treasuryFee` receives the exact remainder, so
+`partnerFee + treasuryFee = feeAmount`.
+
 An unavailable result contains one deterministic reason:
 
 - zeroAmount

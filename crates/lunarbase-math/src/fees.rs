@@ -139,23 +139,17 @@ pub fn quote_lane_route_exact_out_fee(
 }
 /// Splits a calculated fee into partner and treasury portions.
 ///
-/// The partner amount is `floor(anchor * partner_fee_bps / BPS)` using the
-/// checked-256 multiplication primitive, then capped at the total fee. The
-/// treasury receives the checked remainder, so both outputs sum to
-/// `fee_amount`.
-pub fn split_fee(
-    anchor: U256,
-    fee_amount: U256,
-    partner_fee_bps: U256,
-) -> Result<(U256, U256), MathError> {
+/// The partner amount is `floor(fee_amount * partner_fee_bps / BPS)` using
+/// the checked-256 multiplication primitive. The treasury receives the
+/// checked remainder, so both outputs sum to `fee_amount`.
+pub fn split_fee(fee_amount: U256, partner_fee_bps: U256) -> Result<(U256, U256), MathError> {
     if fee_amount == U256::ZERO {
         return Ok((U256::ZERO, U256::ZERO));
     }
-    let candidate = if partner_fee_bps == U256::ZERO {
+    let partner = if partner_fee_bps == U256::ZERO {
         U256::ZERO
     } else {
-        mul_div_down_256(anchor, partner_fee_bps, BPS)?
+        mul_div_down_256(fee_amount, partner_fee_bps, BPS)?
     };
-    let partner = candidate.min(fee_amount);
     Ok((partner, checked_sub(fee_amount, partner)?))
 }

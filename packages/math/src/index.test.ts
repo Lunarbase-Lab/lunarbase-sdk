@@ -21,6 +21,7 @@ import {
   fullMulDivDown,
   laneFeeBpsFromConventionalBps,
   lanePriceFromNumber,
+  splitFee,
   modelQuoteToLaneSlot0Fields,
   mulDivDown256,
   parseAddress,
@@ -48,7 +49,10 @@ interface GoldenLane {
 interface GoldenExpected {
   amountIn: string;
   amountOut: string;
+  feeAsset: string;
   feeAmount: string;
+  partnerFee: string;
+  treasuryFee: string;
 }
 
 interface GoldenVector {
@@ -134,6 +138,21 @@ test("checked arithmetic rejects operands outside uint256", () => {
   assert.throws(() => checkedMul(-1n, 0n), /outside uint256/);
   assert.throws(() => ceilDiv(-1n, 1n), /outside uint256/);
   assert.throws(() => ensureDenominator(-1n), /outside uint256/);
+});
+
+test("fee split applies the partner share to the explicit fee", () => {
+  assert.deepEqual(splitFee(1_000_000n, 250_000n), [250_000n, 750_000n]);
+  assert.deepEqual(splitFee(1n, 500_000n), [0n, 1n]);
+  assert.deepEqual(splitFee(0n, 500_000n), [0n, 0n]);
+  assert.deepEqual(splitFee(1_000_000n, BPS), [1_000_000n, 0n]);
+  assert.throws(
+    () => splitFee(U256_MAX, 2n),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "OVERFLOW",
+  );
+  assert.throws(
+    () => splitFee(1_000_000n, BPS + 1n),
+    (error: unknown) => error instanceof Error && "code" in error && error.code === "OVERFLOW",
+  );
 });
 
 test("zero multiplier and whitelist behavior are explicit", () => {
@@ -430,7 +449,10 @@ test("shared golden vectors match TypeScript engine", () => {
       if (outcome.kind === "Available") {
         assert.equal(outcome.result.amountIn, BigInt(vector.expected.amountIn));
         assert.equal(outcome.result.amountOut, BigInt(vector.expected.amountOut));
+        assert.equal(outcome.result.feeAsset, parseAddress(vector.expected.feeAsset));
         assert.equal(outcome.result.feeAmount, BigInt(vector.expected.feeAmount));
+        assert.equal(outcome.result.partnerFee, BigInt(vector.expected.partnerFee));
+        assert.equal(outcome.result.treasuryFee, BigInt(vector.expected.treasuryFee));
       }
     } else {
       assert.equal(

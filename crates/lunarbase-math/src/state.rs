@@ -11,7 +11,7 @@ pub struct FeeProfile {
     pub whitelisted: bool,
     /// Global multiplier applied only when `whitelisted` is false.
     pub blacklist_fee_multiplier: U256,
-    /// Partner fee configured for the runtime's router, keyed by fee asset.
+    /// Share of the explicit fee assigned to the runtime's router, keyed by fee asset.
     pub partner_fee_bps: HashMap<Address, u32>,
 }
 
@@ -26,7 +26,7 @@ impl Default for FeeProfile {
 }
 
 impl FeeProfile {
-    /// Returns the configured router's partner fee for `asset`.
+    /// Returns the configured router's explicit-fee share for `asset`.
     #[inline]
     pub fn partner_fee_bps(&self, asset: Address) -> U256 {
         U256::from(self.partner_fee_bps.get(&asset).copied().unwrap_or(0))

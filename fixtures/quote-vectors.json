@@ -30,8 +30,8 @@
         "amountOut": "49",
         "feeAsset": "0x0000000000000000000000000000000000000002",
         "feeAmount": "1",
-        "partnerFee": "1",
-        "treasuryFee": "0"
+        "partnerFee": "0",
+        "treasuryFee": "1"
       }
     },
     {
@@ -62,8 +62,8 @@
         "amountOut": "100",
         "feeAsset": "0x0000000000000000000000000000000000000002",
         "feeAmount": "1",
-        "partnerFee": "1",
-        "treasuryFee": "0"
+        "partnerFee": "0",
+        "treasuryFee": "1"
       }
     },
     {
@@ -151,8 +151,8 @@
         "amountOut": "100",
         "feeAsset": "0x0000000000000000000000000000000000000001",
         "feeAmount": "2",
-        "partnerFee": "2",
-        "treasuryFee": "0"
+        "partnerFee": "1",
+        "treasuryFee": "1"
       }
     },
     {
@@ -183,8 +183,8 @@
         "amountOut": "198",
         "feeAsset": "0x0000000000000000000000000000000000000001",
         "feeAmount": "2",
-        "partnerFee": "2",
-        "treasuryFee": "0"
+        "partnerFee": "1",
+        "treasuryFee": "1"
       }
     },
     {
@@ -257,8 +257,8 @@
         "amountOut": "25",
         "feeAsset": "0x0000000000000000000000000000000000000002",
         "feeAmount": "25",
-        "partnerFee": "25",
-        "treasuryFee": "0"
+        "partnerFee": "12",
+        "treasuryFee": "13"
       }
     },
     {
@@ -289,8 +289,8 @@
         "amountOut": "49",
         "feeAsset": "0x0000000000000000000000000000000000000002",
         "feeAmount": "1",
-        "partnerFee": "1",
-        "treasuryFee": "0"
+        "partnerFee": "0",
+        "treasuryFee": "1"
       }
     },
     {

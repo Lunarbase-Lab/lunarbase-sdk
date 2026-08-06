@@ -50,10 +50,9 @@ export function quoteLaneWeightedSlippageKBps(
   return weighted > BPS ? BPS : weighted;
 }
 /** Splits a fee into partner and treasury portions with downward partner rounding. */
-export function splitFee(anchor: bigint, feeAmount: bigint, partnerFeeBps: bigint): readonly [bigint, bigint] {
+export function splitFee(feeAmount: bigint, partnerFeeBps: bigint): readonly [bigint, bigint] {
   if (feeAmount === 0n) return [0n, 0n];
-  const candidate = partnerFeeBps === 0n ? 0n : mulDivDown256(anchor, partnerFeeBps, BPS);
-  const partner = candidate > feeAmount ? feeAmount : candidate;
+  const partner = partnerFeeBps === 0n ? 0n : mulDivDown256(feeAmount, partnerFeeBps, BPS);
   return [partner, checkedSub(feeAmount, partner)];
 }
 /** Converts an exact-input amount through a lane price with floor rounding. */

@@ -104,7 +104,7 @@ fn assemble_quote(
             UnavailableReason::InsufficientOutputReserve(request.asset_out),
         ));
     }
-    let (partner, treasury) = split_fee(anchor, fee, state.fee_profile.partner_fee_bps(fee_asset))?;
+    let (partner, treasury) = split_fee(fee, state.fee_profile.partner_fee_bps(fee_asset))?;
     Ok(QuoteOutcome::Available(QuoteResult {
         amount_in,
         amount_out,
