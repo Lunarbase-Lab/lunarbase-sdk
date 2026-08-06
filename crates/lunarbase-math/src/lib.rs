@@ -19,4 +19,6 @@ pub mod state;
 pub mod types;
 
 #[cfg(test)]
+mod fee_tests;
+#[cfg(test)]
 mod tests;
