@@ -189,7 +189,7 @@ struct ApiQuoteResponse {
     cursor: ApiCursor,
     execution_block_number: u64,
     implementation_code_hash: String,
-    math_compatibility_version: String,
+    math_compatibility_version: &'static str,
     result: ApiQuoteOutcome,
 }
 
@@ -211,7 +211,7 @@ struct ApiBatchResponse {
     cursor: ApiCursor,
     execution_block_number: u64,
     implementation_code_hash: String,
-    math_compatibility_version: String,
+    math_compatibility_version: &'static str,
     results: Vec<ApiQuoteOutcome>,
 }
 

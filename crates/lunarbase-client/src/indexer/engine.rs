@@ -47,7 +47,7 @@ impl PreparedQuoteSnapshot {
             execution_block_number: self.cursor.execution_block_number,
             cursor: self.cursor,
             implementation_code_hash: self.implementation_code_hash,
-            math_compatibility_version: MATH_COMPATIBILITY_VERSION.into(),
+            math_compatibility_version: MATH_COMPATIBILITY_VERSION,
         })
     }
 
@@ -66,7 +66,7 @@ impl PreparedQuoteSnapshot {
             cursor: self.cursor,
             execution_block_number,
             implementation_code_hash: self.implementation_code_hash,
-            math_compatibility_version: MATH_COMPATIBILITY_VERSION.into(),
+            math_compatibility_version: MATH_COMPATIBILITY_VERSION,
         })
     }
 }
@@ -305,7 +305,7 @@ impl QuoteIndexer {
             execution_block_number: cursor.as_ref().map(|cursor| cursor.execution_block_number),
             cursor,
             implementation_code_hash: self.deployment.expected_implementation_code_hash,
-            math_compatibility_version: MATH_COMPATIBILITY_VERSION.into(),
+            math_compatibility_version: MATH_COMPATIBILITY_VERSION,
         }
     }
 

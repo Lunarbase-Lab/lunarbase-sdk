@@ -16,7 +16,7 @@ pub struct ClientQuote {
     /// Core implementation bytecode hash associated with the state snapshot.
     pub implementation_code_hash: B256,
     /// Quote-math compatibility profile used by this result.
-    pub math_compatibility_version: String,
+    pub math_compatibility_version: &'static str,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -31,7 +31,7 @@ pub struct ClientBatchQuote {
     /// Core implementation bytecode hash associated with the shared snapshot.
     pub implementation_code_hash: B256,
     /// Quote-math compatibility profile used by this batch.
-    pub math_compatibility_version: String,
+    pub math_compatibility_version: &'static str,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -48,5 +48,5 @@ pub struct IndexerHealth {
     /// Expected Core implementation bytecode hash for this deployment.
     pub implementation_code_hash: B256,
     /// Quote-math compatibility profile used by this runtime.
-    pub math_compatibility_version: String,
+    pub math_compatibility_version: &'static str,
 }
