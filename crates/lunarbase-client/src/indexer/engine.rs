@@ -10,7 +10,8 @@ use crate::model::{
 use crate::protocol::abi::decode_core_event;
 use crate::state::reducer::{QuoteReducer, ReducerError};
 use lunarbase_math::quote;
-use lunarbase_math::{QuoteOutcome, QuoteRequest, QuoteState};
+use lunarbase_math::{B256, QuoteOutcome, QuoteRequest, QuoteState};
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 /// Synchronous state machine used under the client's short `RwLock` guards.
@@ -22,6 +23,52 @@ pub struct QuoteIndexer {
     /// Last canonical snapshot/backfill cursor whose state already includes
     /// every quote-critical log through that block.
     canonical_floor: Option<ChainCursor>,
+}
+
+const MAX_BATCH_QUOTES: usize = 256;
+
+/// Coherent state/cursor handle evaluated after the shared read lock is released.
+pub(crate) struct PreparedQuoteSnapshot {
+    state: Arc<QuoteState>,
+    cursor: ChainCursor,
+    implementation_code_hash: B256,
+}
+
+impl PreparedQuoteSnapshot {
+    /// Evaluates one request against the captured immutable state.
+    pub(crate) fn evaluate(self, request: &QuoteRequest) -> Result<ClientQuote, IndexerError> {
+        let outcome = quote(
+            request,
+            self.cursor.execution_block_number,
+            self.state.as_ref(),
+        )?;
+        Ok(ClientQuote {
+            outcome,
+            execution_block_number: self.cursor.execution_block_number,
+            cursor: self.cursor,
+            implementation_code_hash: self.implementation_code_hash,
+            math_compatibility_version: MATH_COMPATIBILITY_VERSION.into(),
+        })
+    }
+
+    /// Evaluates a complete batch against the same immutable state and cursor.
+    pub(crate) fn evaluate_many(
+        self,
+        requests: &[QuoteRequest],
+    ) -> Result<ClientBatchQuote, IndexerError> {
+        let execution_block_number = self.cursor.execution_block_number;
+        let outcomes = requests
+            .iter()
+            .map(|request| quote(request, execution_block_number, self.state.as_ref()))
+            .collect::<Result<Vec<QuoteOutcome>, _>>()?;
+        Ok(ClientBatchQuote {
+            outcomes,
+            cursor: self.cursor,
+            execution_block_number,
+            implementation_code_hash: self.implementation_code_hash,
+            math_compatibility_version: MATH_COMPATIBILITY_VERSION.into(),
+        })
+    }
 }
 
 impl QuoteIndexer {
@@ -204,49 +251,47 @@ impl QuoteIndexer {
         Ok(self.reducer.state())
     }
 
-    /// Evaluates one request against the runtime-owned execution block.
-    pub fn quote(&self, request: &QuoteRequest) -> Result<ClientQuote, IndexerError> {
-        let state = self.state()?;
+    fn prepare_snapshot(&self) -> Result<PreparedQuoteSnapshot, IndexerError> {
+        self.state()?;
+        let state = self.reducer.state_snapshot();
         let cursor = self
             .reducer
             .cursor()
             .cloned()
             .ok_or(IndexerError::NoCursor)?;
-        let outcome = quote(request, cursor.execution_block_number, state)?;
-        Ok(ClientQuote {
-            outcome,
-            execution_block_number: cursor.execution_block_number,
+        Ok(PreparedQuoteSnapshot {
+            state,
             cursor,
             implementation_code_hash: self.deployment.expected_implementation_code_hash,
-            math_compatibility_version: MATH_COMPATIBILITY_VERSION.into(),
         })
+    }
+
+    /// Captures a coherent immutable state/cursor handle for one quote.
+    pub(crate) fn prepare_quote(&self) -> Result<PreparedQuoteSnapshot, IndexerError> {
+        self.prepare_snapshot()
+    }
+
+    /// Captures a coherent immutable state/cursor handle for a complete batch.
+    pub(crate) fn prepare_quote_many(
+        &self,
+        requests: &[QuoteRequest],
+    ) -> Result<PreparedQuoteSnapshot, IndexerError> {
+        if requests.len() > MAX_BATCH_QUOTES {
+            return Err(IndexerError::InvalidRequest(format!(
+                "quote_many accepts at most {MAX_BATCH_QUOTES} requests"
+            )));
+        }
+        self.prepare_snapshot()
+    }
+
+    /// Evaluates one request against the runtime-owned execution block.
+    pub fn quote(&self, request: &QuoteRequest) -> Result<ClientQuote, IndexerError> {
+        self.prepare_quote()?.evaluate(request)
     }
 
     /// Evaluates a batch under one immutable state/cursor snapshot.
     pub fn quote_many(&self, requests: &[QuoteRequest]) -> Result<ClientBatchQuote, IndexerError> {
-        if requests.len() > 256 {
-            return Err(IndexerError::InvalidRequest(
-                "quote_many accepts at most 256 requests".into(),
-            ));
-        }
-        let state = self.state()?;
-        let cursor = self
-            .reducer
-            .cursor()
-            .cloned()
-            .ok_or(IndexerError::NoCursor)?;
-        let execution_block_number = cursor.execution_block_number;
-        let outcomes = requests
-            .iter()
-            .map(|request| quote(request, execution_block_number, state))
-            .collect::<Result<Vec<QuoteOutcome>, _>>()?;
-        Ok(ClientBatchQuote {
-            outcomes,
-            cursor,
-            execution_block_number,
-            implementation_code_hash: self.deployment.expected_implementation_code_hash,
-            math_compatibility_version: MATH_COMPATIBILITY_VERSION.into(),
-        })
+        self.prepare_quote_many(requests)?.evaluate_many(requests)
     }
 
     /// Reports readiness and current execution context.

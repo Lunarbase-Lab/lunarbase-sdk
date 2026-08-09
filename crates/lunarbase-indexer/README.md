@@ -16,6 +16,7 @@ LUNARBASE_EXPECTED_IMPLEMENTATION=0x... \
 LUNARBASE_EXPECTED_IMPLEMENTATION_CODE_HASH=0x... \
 LUNARBASE_HTTP_RPC_URL=https://... \
 LUNARBASE_REALTIME_URL=wss://... \
+LUNARBASE_EVENT_LOG_MIN_COMMITMENT=realtime \
 make run
 ```
 
@@ -36,6 +37,20 @@ Base is the default feature. Select evm, monad, monad-native, or arbitrum with
 Deployment identity, router policy, execution context, and freshness policy
 cannot be overridden by HTTP requests. When source continuity or deployment
 identity is uncertain, readiness is revoked until canonical recovery succeeds.
+
+## Event logging
+
+`event_log_min_commitment` (or
+`LUNARBASE_EVENT_LOG_MIN_COMMITMENT`/`--event-log-min-commitment`) accepts
+`realtime`, `canonical`, or `finalized` and defaults to `realtime`. The reducer
+applies an accepted source update and releases the state lock before awaiting
+the bounded event logger, so the current quote-state update has priority.
+
+Commitment is never synthesized. EVM, Base, and Arbitrum live subscriptions
+normally emit realtime logs, so selecting `canonical` or `finalized` filters
+those live logs; canonical recovery/backfill logs can still pass a `canonical`
+threshold. Startup output reports the selected threshold and warns when a
+higher threshold suppresses the selected network's normal live logs.
 
 ## Checkpoints
 

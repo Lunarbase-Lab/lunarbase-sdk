@@ -1,7 +1,8 @@
 //! Connected client lifecycle, quote access, and graceful shutdown.
 
 use crate::indexer::client_types::{
-    ClientConnectConfig, ClientRuntimeStats, ClientRuntimeStatsSnapshot, SharedQuoteState,
+    ClientConnectConfig, ClientRuntimeStats, ClientRuntimeStatsSnapshot, CoreEventSink,
+    CoreEventSinkPolicy, SharedQuoteState,
 };
 use crate::indexer::engine::QuoteIndexer;
 use crate::indexer::errors::{ClientRuntimeEvent, IndexerError};
@@ -58,11 +59,11 @@ impl ConnectedQuoteClient {
         Self::connect_inner(config, source, optional_checkpoint, None).await
     }
 
-    /// Connects while forwarding every canonically ordered Core log into a
-    /// required bounded sink before publishing the corresponding quote state.
+    /// Connects while forwarding every ordered Core log into a required sink.
     ///
-    /// The bootstrap and reducer are the sole sink producer. Closing the sink is
-    /// fatal, so the runtime never serves while silently losing event output.
+    /// Each live update is applied before the reducer awaits sink capacity.
+    /// Closing the sink remains fatal, so accepted logs are never silently
+    /// discarded.
     pub async fn connect_with_event_sink<S>(
         config: ClientConnectConfig,
         source: Arc<S>,
@@ -72,14 +73,45 @@ impl ConnectedQuoteClient {
     where
         S: ChainDataSource + 'static,
     {
-        Self::connect_inner(config, source, optional_checkpoint, Some(core_event_sink)).await
+        Self::connect_with_event_sink_policy(
+            config,
+            source,
+            optional_checkpoint,
+            core_event_sink,
+            CoreEventSinkPolicy::default(),
+        )
+        .await
+    }
+
+    /// Connects with an explicit minimum commitment for required event output.
+    ///
+    /// Source logs below `policy.minimum_commitment` are not sent to the sink.
+    /// A source must actually emit logs at the requested level; the client does
+    /// not promote realtime cursors into canonical or finalized cursors.
+    pub async fn connect_with_event_sink_policy<S>(
+        config: ClientConnectConfig,
+        source: Arc<S>,
+        optional_checkpoint: Option<Checkpoint>,
+        core_event_sink: mpsc::Sender<ContractLog>,
+        policy: CoreEventSinkPolicy,
+    ) -> Result<Self, IndexerError>
+    where
+        S: ChainDataSource + 'static,
+    {
+        Self::connect_inner(
+            config,
+            source,
+            optional_checkpoint,
+            Some(CoreEventSink::new(core_event_sink, policy)),
+        )
+        .await
     }
 
     async fn connect_inner<S>(
         config: ClientConnectConfig,
         source: Arc<S>,
         optional_checkpoint: Option<Checkpoint>,
-        core_event_sink: Option<mpsc::Sender<ContractLog>>,
+        core_event_sink: Option<CoreEventSink>,
     ) -> Result<Self, IndexerError>
     where
         S: ChainDataSource + 'static,
@@ -251,11 +283,15 @@ impl ConnectedQuoteClient {
         if !self.is_ready() {
             return Err(IndexerError::NotReady);
         }
-        self.shared
-            .indexer
-            .read()
-            .map_err(|_| IndexerError::LockPoisoned)?
-            .quote(request)
+        let prepared = {
+            let indexer = self
+                .shared
+                .indexer
+                .read()
+                .map_err(|_| IndexerError::LockPoisoned)?;
+            indexer.prepare_quote()?
+        };
+        prepared.evaluate(request)
     }
 
     /// Evaluates all requests under one state/cursor snapshot.
@@ -263,11 +299,15 @@ impl ConnectedQuoteClient {
         if !self.is_ready() {
             return Err(IndexerError::NotReady);
         }
-        self.shared
-            .indexer
-            .read()
-            .map_err(|_| IndexerError::LockPoisoned)?
-            .quote_many(requests)
+        let prepared = {
+            let indexer = self
+                .shared
+                .indexer
+                .read()
+                .map_err(|_| IndexerError::LockPoisoned)?;
+            indexer.prepare_quote_many(requests)?
+        };
+        prepared.evaluate_many(requests)
     }
 
     /// Returns current readiness and execution context.

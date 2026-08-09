@@ -4,7 +4,9 @@
 
 pub use crate::bootstrap::BootstrapSnapshot;
 pub use crate::indexer::client::ConnectedQuoteClient;
-pub use crate::indexer::client_types::{ClientConnectConfig, ClientRuntimeStatsSnapshot};
+pub use crate::indexer::client_types::{
+    ClientConnectConfig, ClientRuntimeStatsSnapshot, CoreEventSinkPolicy,
+};
 pub use crate::indexer::engine::QuoteIndexer;
 pub use crate::indexer::errors::{ClientRuntimeEvent, IndexerError};
 pub use crate::indexer::quote_types::{ClientBatchQuote, ClientQuote, IndexerHealth};

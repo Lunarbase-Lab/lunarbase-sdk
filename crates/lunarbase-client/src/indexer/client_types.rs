@@ -2,7 +2,7 @@
 
 use crate::indexer::engine::QuoteIndexer;
 use crate::indexer::errors::IndexerError;
-use crate::model::{ContractFilter, DeploymentConfig, SourceError};
+use crate::model::{Commitment, ContractFilter, ContractLog, DeploymentConfig, SourceError};
 use crate::protocol::abi::quote_critical_topics;
 use std::sync::{
     RwLock,
@@ -10,7 +10,7 @@ use std::sync::{
 };
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc};
 
 #[derive(Clone, Debug)]
 /// Connection and bounded-queue settings for an embeddable client.
@@ -61,6 +61,44 @@ impl ClientConnectConfig {
             .into());
         }
         Ok(())
+    }
+}
+
+/// Selects which ordered Core logs are forwarded to a required event sink.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CoreEventSinkPolicy {
+    /// Lowest source-provided commitment accepted by the event sink.
+    pub minimum_commitment: Commitment,
+}
+
+impl Default for CoreEventSinkPolicy {
+    fn default() -> Self {
+        Self {
+            minimum_commitment: Commitment::Realtime,
+        }
+    }
+}
+
+impl CoreEventSinkPolicy {
+    /// Returns whether a log at `commitment` should be forwarded.
+    pub fn accepts(self, commitment: Commitment) -> bool {
+        commitment >= self.minimum_commitment
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct CoreEventSink {
+    pub(super) sender: mpsc::Sender<ContractLog>,
+    pub(super) policy: CoreEventSinkPolicy,
+}
+
+impl CoreEventSink {
+    pub(super) fn new(sender: mpsc::Sender<ContractLog>, policy: CoreEventSinkPolicy) -> Self {
+        Self { sender, policy }
+    }
+
+    pub(super) fn accepts(&self, commitment: Commitment) -> bool {
+        self.policy.accepts(commitment)
     }
 }
 
@@ -122,6 +160,18 @@ mod tests {
             reconnect_delay: Duration::from_millis(10),
             source_stall_timeout: Duration::from_secs(1),
         }
+    }
+
+    #[test]
+    fn event_sink_policy_accepts_only_requested_commitments() {
+        let policy = CoreEventSinkPolicy {
+            minimum_commitment: Commitment::Canonical,
+        };
+        assert!(!policy.accepts(Commitment::Realtime));
+        assert!(policy.accepts(Commitment::Canonical));
+        assert!(policy.accepts(Commitment::Finalized));
+
+        assert!(CoreEventSinkPolicy::default().accepts(Commitment::Realtime));
     }
 }
 

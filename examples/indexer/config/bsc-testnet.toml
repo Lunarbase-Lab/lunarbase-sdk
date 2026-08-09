@@ -10,6 +10,7 @@ expected_implementation_code_hash = "0x11111111111111111111111111111111111111111
 contract_compatibility_version = "lunarbase-pmm-v2"
 http_rpc_url = "https://bsc-testnet-rpc.publicnode.com"
 realtime_url = "wss://bsc-testnet-rpc.publicnode.com"
+event_log_min_commitment = "realtime"
 explicit_lane_assets = [
   "0x0000000000000000000000000000000000000004",
   "0x0000000000000000000000000000000000000003",

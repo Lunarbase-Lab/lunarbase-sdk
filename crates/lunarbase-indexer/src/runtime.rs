@@ -2,6 +2,7 @@
 
 use crate::{checkpoint::RedisCheckpointStore, config::Config, metrics::Metrics};
 use lunarbase_client::indexer::client::ConnectedQuoteClient;
+use lunarbase_client::indexer::client_types::CoreEventSinkPolicy;
 use lunarbase_client::indexer::errors::IndexerError;
 use lunarbase_client::model::{Checkpoint, ContractLog, Network};
 use std::{sync::Arc, time::Duration};
@@ -53,11 +54,14 @@ async fn connect_evm(
         config.client.deployment.chain_id,
         "latest",
     ));
-    Ok(ConnectedQuoteClient::connect_with_event_sink(
+    Ok(ConnectedQuoteClient::connect_with_event_sink_policy(
         config.client.clone(),
         source,
         checkpoint,
         core_event_sink,
+        CoreEventSinkPolicy {
+            minimum_commitment: config.event_log_min_commitment,
+        },
     )
     .await?)
 }
@@ -85,11 +89,14 @@ async fn connect_base(
         config.realtime_url.clone(),
         config.client.deployment.chain_id,
     ));
-    Ok(ConnectedQuoteClient::connect_with_event_sink(
+    Ok(ConnectedQuoteClient::connect_with_event_sink_policy(
         config.client.clone(),
         source,
         checkpoint,
         core_event_sink,
+        CoreEventSinkPolicy {
+            minimum_commitment: config.event_log_min_commitment,
+        },
     )
     .await?)
 }
@@ -124,11 +131,14 @@ async fn connect_monad(
             )
             .map_err(IndexerError::from)?,
         );
-        Ok(ConnectedQuoteClient::connect_with_event_sink(
+        Ok(ConnectedQuoteClient::connect_with_event_sink_policy(
             config.client.clone(),
             source,
             checkpoint,
             core_event_sink,
+            CoreEventSinkPolicy {
+                minimum_commitment: config.event_log_min_commitment,
+            },
         )
         .await?)
     }
@@ -146,11 +156,14 @@ async fn connect_monad(
             )
             .map_err(IndexerError::from)?,
         );
-        Ok(ConnectedQuoteClient::connect_with_event_sink(
+        Ok(ConnectedQuoteClient::connect_with_event_sink_policy(
             config.client.clone(),
             source,
             checkpoint,
             core_event_sink,
+            CoreEventSinkPolicy {
+                minimum_commitment: config.event_log_min_commitment,
+            },
         )
         .await?)
     }
@@ -179,11 +192,14 @@ async fn connect_arbitrum(
         )
         .map_err(IndexerError::from)?,
     );
-    Ok(ConnectedQuoteClient::connect_with_event_sink(
+    Ok(ConnectedQuoteClient::connect_with_event_sink_policy(
         config.client.clone(),
         source,
         checkpoint,
         core_event_sink,
+        CoreEventSinkPolicy {
+            minimum_commitment: config.event_log_min_commitment,
+        },
     )
     .await?)
 }

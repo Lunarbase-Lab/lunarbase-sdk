@@ -11,6 +11,7 @@ use lunarbase_math::slot0::{
 };
 use lunarbase_math::{Address, U256};
 use lunarbase_math::{LaneState, QuoteState};
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -51,7 +52,7 @@ pub enum ReducerError {
 /// Every fallible value is validated before state mutation.
 pub struct QuoteReducer {
     /// Complete quote-critical state mutated only by the ordered reducer task.
-    state: QuoteState,
+    state: Arc<QuoteState>,
     /// Only router whose partner fee and whitelist changes affect this instance.
     configured_router: Address,
     /// Last normalized head or event position accepted by the reducer.
@@ -64,7 +65,7 @@ impl QuoteReducer {
     /// Creates a not-ready reducer around a block-tagged state.
     pub fn new(state: QuoteState, configured_router: Address) -> Self {
         Self {
-            state,
+            state: Arc::new(state),
             configured_router,
             cursor: None,
             ready: false,
@@ -74,7 +75,7 @@ impl QuoteReducer {
     /// Restores a ready reducer from a prevalidated checkpoint.
     pub fn from_checkpoint(checkpoint: Checkpoint) -> Self {
         Self {
-            state: checkpoint.state,
+            state: Arc::new(checkpoint.state),
             configured_router: checkpoint.router,
             cursor: Some(checkpoint.cursor),
             ready: true,
@@ -83,7 +84,12 @@ impl QuoteReducer {
 
     /// Returns the current immutable state view.
     pub fn state(&self) -> &QuoteState {
-        &self.state
+        self.state.as_ref()
+    }
+
+    /// Clones the immutable state handle without cloning the underlying maps.
+    pub(crate) fn state_snapshot(&self) -> Arc<QuoteState> {
+        Arc::clone(&self.state)
     }
 
     /// Returns the last accepted cursor.
@@ -182,12 +188,12 @@ impl QuoteReducer {
     fn apply_event(&mut self, event: QuoteEvent) -> Result<(), ReducerError> {
         match event {
             QuoteEvent::LaneAdded { asset } => {
-                let lane = self.state.lanes.entry(asset).or_default();
+                let lane = self.state_mut().lanes.entry(asset).or_default();
                 let slot0 = set_lane_slot0_exists(lane.slot0, true);
                 lane.slot0 = set_lane_slot0_paused(slot0, true);
             }
             QuoteEvent::LaneRemoved { asset } => {
-                self.state.lanes.remove(&asset);
+                self.state_mut().lanes.remove(&asset);
             }
             QuoteEvent::LaneUpdated { asset, slot0 } => {
                 self.lane_mut(asset)?.slot0 = slot0;
@@ -225,18 +231,21 @@ impl QuoteReducer {
                 if U256::from(fee) > BPS {
                     return Err(ReducerError::InvalidWidth);
                 }
-                self.state.fee_profile.partner_fee_bps.insert(asset, fee);
+                self.state_mut()
+                    .fee_profile
+                    .partner_fee_bps
+                    .insert(asset, fee);
             }
             QuoteEvent::WhitelistSet {
                 router,
                 whitelisted,
             } => {
                 if router == self.configured_router {
-                    self.state.fee_profile.whitelisted = whitelisted;
+                    self.state_mut().fee_profile.whitelisted = whitelisted;
                 }
             }
             QuoteEvent::BlacklistFeeMultiplierSet { multiplier } => {
-                self.state.fee_profile.blacklist_fee_multiplier = multiplier;
+                self.state_mut().fee_profile.blacklist_fee_multiplier = multiplier;
             }
             QuoteEvent::DepositExecuted { asset, principal } => {
                 let lane = self.lane_mut(asset)?;
@@ -259,7 +268,7 @@ impl QuoteReducer {
                 asset_reserve,
                 cash_reserve,
             } => {
-                self.state.cash_reserve = cash_reserve;
+                self.state_mut().cash_reserve = cash_reserve;
                 if asset != self.state.cash {
                     self.lane_mut(asset)?.asset_reserve = asset_reserve;
                 }
@@ -271,8 +280,12 @@ impl QuoteReducer {
         Ok(())
     }
 
+    fn state_mut(&mut self) -> &mut QuoteState {
+        Arc::make_mut(&mut self.state)
+    }
+
     fn lane_mut(&mut self, asset: Address) -> Result<&mut LaneState, ReducerError> {
-        self.state
+        self.state_mut()
             .lanes
             .get_mut(&asset)
             .ok_or(ReducerError::UnknownLane)
@@ -293,7 +306,7 @@ impl QuoteReducer {
             expect_whitelisted: deployment.expect_whitelisted,
             explicit_lane_assets: deployment.explicit_lane_assets.clone(),
             cursor: self.cursor.clone()?,
-            state: self.state.clone(),
+            state: self.state.as_ref().clone(),
         })
     }
 }
@@ -424,5 +437,30 @@ mod tests {
             Err(ReducerError::UnknownLane)
         );
         assert!(reducer.state().lanes.is_empty());
+    }
+
+    #[test]
+    fn state_snapshot_remains_immutable_after_copy_on_write_update() {
+        let cash = address(1);
+        let mut reducer = QuoteReducer::new(
+            QuoteState {
+                cash,
+                cash_reserve: 10,
+                ..Default::default()
+            },
+            address(3),
+        );
+        let snapshot = reducer.state_snapshot();
+
+        reducer
+            .apply_event(QuoteEvent::Sync {
+                asset: cash,
+                asset_reserve: 0,
+                cash_reserve: 12,
+            })
+            .unwrap();
+
+        assert_eq!(snapshot.cash_reserve, 10);
+        assert_eq!(reducer.state().cash_reserve, 12);
     }
 }

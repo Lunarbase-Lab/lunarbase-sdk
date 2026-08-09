@@ -33,6 +33,7 @@ services:
       LUNARBASE_EXPECT_WHITELISTED: "${LUNARBASE_EXPECT_WHITELISTED:-true}"
       LUNARBASE_HTTP_RPC_URL: "${LUNARBASE_HTTP_RPC_URL:-http://host.docker.internal:8545}"
       LUNARBASE_REALTIME_URL: "${LUNARBASE_REALTIME_URL:-ws://host.docker.internal:8546}"
+      LUNARBASE_EVENT_LOG_MIN_COMMITMENT: "${LUNARBASE_EVENT_LOG_MIN_COMMITMENT:-realtime}"
     ports:
       - "8080:8080"
     extra_hosts:

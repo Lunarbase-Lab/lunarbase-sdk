@@ -25,6 +25,7 @@ LUNARBASE_EXPECTED_IMPLEMENTATION=0x... \
 LUNARBASE_EXPECTED_IMPLEMENTATION_CODE_HASH=0x... \
 LUNARBASE_HTTP_RPC_URL=https://... \
 LUNARBASE_REALTIME_URL=wss://... \
+LUNARBASE_EVENT_LOG_MIN_COMMITMENT=realtime \
 lunarbase-indexer
 ```
 
@@ -32,6 +33,10 @@ Explicit CLI flags override environment values, which override the optional
 TOML. Operational defaults cover bind address, queue bounds, reconnect timing,
 checkpoint cadence, and shutdown timeout; deployment identity and source
 endpoints are always explicit.
+
+The Core event logger accepts `realtime`, `canonical`, or `finalized` through
+`LUNARBASE_EVENT_LOG_MIN_COMMITMENT`. Commitment comes from the source; choosing
+`canonical` on Base therefore suppresses normal realtime live logs.
 
 The adjacent [`prometheus-alerts.yml`](prometheus-alerts.yml) is an example for
 external monitoring and is not loaded by the indexer.

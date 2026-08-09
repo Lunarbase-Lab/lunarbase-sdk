@@ -8,6 +8,7 @@ bind = "0.0.0.0:8080"
 queue_bound = 16384
 reconnect_delay_milliseconds = 500
 source_stall_timeout_milliseconds = 30000
+event_log_min_commitment = "realtime"
 redis_url = "redis://redis:6379/"
 checkpoint_interval_seconds = 30
 shutdown_timeout_seconds = 20

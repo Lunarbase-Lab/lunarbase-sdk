@@ -11,7 +11,7 @@ use checkpoint::RedisCheckpointStore;
 use clap::Parser;
 use config::{Cli, Config};
 use lunarbase_client::indexer::errors::ClientRuntimeEvent;
-use lunarbase_client::model::ContractLog;
+use lunarbase_client::model::{Commitment, ContractLog, Network};
 use lunarbase_client::protocol::abi::describe_core_event;
 use metrics::Metrics;
 use std::{
@@ -41,6 +41,23 @@ async fn main() {
 async fn run() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
     let config = Config::load(&cli)?;
+    tracing::info!(
+        minimum_commitment = ?config.event_log_min_commitment,
+        reducer_before_event_sink = true,
+        "Core event logging policy configured"
+    );
+    if config.event_log_min_commitment > Commitment::Realtime
+        && matches!(
+            config.client.deployment.network,
+            Network::Evm | Network::Base | Network::Arbitrum
+        )
+    {
+        tracing::warn!(
+            network = ?config.client.deployment.network,
+            minimum_commitment = ?config.event_log_min_commitment,
+            "live source emits realtime Core logs; higher-commitment event output is normally limited to canonical recovery/backfill"
+        );
+    }
     let metrics = Arc::new(Metrics::default());
     let signal = wait_for_signal();
     tokio::pin!(signal);
@@ -97,6 +114,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         router = %config.client.deployment.router,
         bind = %config.bind,
         redis = store.is_some(),
+        event_log_min_commitment = ?config.event_log_min_commitment,
         "lunarbase-indexer is ready"
     );
 
