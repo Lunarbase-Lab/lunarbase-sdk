@@ -1,7 +1,7 @@
 //! Alloy-backed normalization of Ethereum JSON-RPC heads and logs.
 
 use crate::rpc::client::RpcError;
-use lunarbase_client::model::{ChainCursor, Commitment, ContractLog};
+use lunarbase_client::model::{ChainCursor, Commitment, ContractFilter, ContractLog};
 use lunarbase_math::{Address, B256, Bytes};
 use serde::Deserialize;
 use serde_json::Value;
@@ -79,6 +79,24 @@ pub fn parse_rpc_log(
     let log = serde_json::from_value::<RpcLog>(value.clone())
         .map_err(|error| RpcError::Invalid(format!("invalid RPC log: {error}")))?;
     normalize_rpc_log(log, chain_id, commitment)
+}
+
+/// Decodes one RPC log and verifies that the provider honored the requested
+/// contract-address filter before the log can enter a source stream.
+pub(crate) fn parse_filtered_rpc_log(
+    value: &Value,
+    chain_id: u64,
+    commitment: Commitment,
+    filter: &ContractFilter,
+) -> Result<ContractLog, RpcError> {
+    let log = parse_rpc_log(value, chain_id, commitment)?;
+    if log.address != filter.address {
+        return Err(RpcError::Invalid(format!(
+            "RPC log address mismatch: expected {:#x}, got {:#x}",
+            filter.address, log.address
+        )));
+    }
+    Ok(log)
 }
 
 fn normalize_rpc_log(

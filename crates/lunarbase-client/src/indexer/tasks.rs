@@ -4,7 +4,9 @@ use crate::indexer::client::publish;
 use crate::indexer::client_types::{
     ClientConnectConfig, ClientRuntimeStats, CoreEventSink, SharedQuoteState, unix_millis,
 };
-use crate::indexer::engine::QuoteIndexer;
+use crate::indexer::engine::{
+    QuoteIndexer, validate_core_log_identity, validate_core_recovery_log,
+};
 use crate::indexer::errors::{ClientRuntimeEvent, IndexerError};
 use crate::model::{BackfillRequest, ChainUpdate, Commitment, ContractFilter, ContractLog};
 use crate::source::{ChainDataSource, SourceStream};
@@ -431,17 +433,12 @@ async fn load_recovery_events<S: ChainDataSource>(
         .await?;
     logs.sort_by_key(|log| log.cursor.event_order());
     for log in &logs {
-        if log.cursor.chain_id != to.chain_id {
-            return Err(ReducerError::ChainIdMismatch.into());
-        }
-        if log.cursor.block_number < from.block_number
-            || log.cursor.block_number > to.block_number
-            || log.cursor.block_hash.is_none()
-        {
-            return Err(IndexerError::Gap(
-                "canonical recovery backfill returned an out-of-range or hashless log".into(),
-            ));
-        }
+        validate_core_recovery_log(
+            log,
+            filter.address,
+            to.chain_id,
+            from.block_number..=to.block_number,
+        )?;
     }
     Ok(logs)
 }
@@ -472,6 +469,11 @@ async fn install_recovered_state(
     ordered_logs.sort_by_key(|log| log.cursor.event_order());
     ordered_logs.dedup_by(|right, left| same_core_event_identity(left, right));
     for log in ordered_logs {
+        validate_core_log_identity(
+            &log,
+            candidate.deployment().core,
+            candidate.deployment().chain_id,
+        )?;
         send_required_core_event(core_event_sink, log).await?;
     }
 
@@ -483,11 +485,20 @@ async fn install_recovered_state(
 }
 
 pub(super) async fn emit_handoff_events(
-    indexer: &QuoteIndexer,
+    indexer: &mut QuoteIndexer,
     buffered: &[ChainUpdate],
     core_event_sink: Option<&CoreEventSink>,
     skip_canonical_covered: bool,
 ) -> Result<(), IndexerError> {
+    for update in buffered {
+        if let ChainUpdate::Log(log) = update {
+            validate_core_log_identity(
+                log,
+                indexer.deployment().core,
+                indexer.deployment().chain_id,
+            )?;
+        }
+    }
     let mut logs = buffered
         .iter()
         .filter_map(|update| match update {
@@ -583,6 +594,12 @@ pub(super) async fn recover_checkpoint<S: ChainDataSource>(
             .await?;
         logs.sort_by_key(|log| log.cursor.event_order());
         for log in logs {
+            validate_core_recovery_log(
+                &log,
+                indexer.deployment().core,
+                indexer.deployment().chain_id,
+                from_block..=head.block_number,
+            )?;
             if log.cursor.event_order() <= checkpoint_cursor.event_order() {
                 continue;
             }

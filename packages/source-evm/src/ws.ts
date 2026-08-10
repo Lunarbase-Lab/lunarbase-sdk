@@ -13,6 +13,7 @@ import {
   type DeploymentConfig,
   type Network,
 } from "@lunarbase-lab/pmm-v2-client";
+import { parseAddress, type Address } from "@lunarbase-lab/pmm-v2-math";
 import type { Hex } from "ox/Hex";
 import { JsonRpcHttpClient, parseRpcLog, RpcError, RpcHttpBackend, RpcSnapshotProvider } from "./rpc.js";
 import {
@@ -111,7 +112,8 @@ export class EvmRpcSource implements ChainDataSource {
    * connecting or while the node has rejected either subscription.
    */
   async subscribe(filter: ContractFilter, signal?: AbortSignal): Promise<AsyncIterable<ChainUpdate>> {
-    const connection = await establishSocket(
+    const expectedAddress = parseAddress(filter.address);
+    const connection = establishSocket(
       this.wsEndpoint,
       this.factory,
       filter,
@@ -121,7 +123,16 @@ export class EvmRpcSource implements ChainDataSource {
       this.config.maxFrameBytes,
       signal,
     );
-    return this.readSocket(connection, signal);
+    try {
+      const [established] = await Promise.all([connection, this.http.verifyChainId()]);
+      return this.readSocket(established, expectedAddress, signal);
+    } catch (error) {
+      void connection.then(
+        (established) => established.close(),
+        () => undefined,
+      );
+      throw error;
+    }
   }
 
   /** Returns the canonical HTTP recovery head. */
@@ -134,7 +145,11 @@ export class EvmRpcSource implements ChainDataSource {
     return this.http.validateCheckpoint(checkpoint);
   }
 
-  private async *readSocket(connection: EstablishedSocket, signal?: AbortSignal): AsyncIterable<ChainUpdate> {
+  private async *readSocket(
+    connection: EstablishedSocket,
+    expectedAddress: Address,
+    signal?: AbortSignal,
+  ): AsyncIterable<ChainUpdate> {
     const { queue, logsSubscription, headsSubscription, prefetched, close } = connection;
     let lastHead: ChainCursor | undefined;
     let lastParentHash: Hex | undefined;
@@ -215,6 +230,10 @@ export class EvmRpcSource implements ChainDataSource {
             log = parseRpcLog(params.result, this.chainId, Commitment.Realtime);
           } catch (error) {
             yield gap(`invalid RPC log notification: ${message(error)}`, lastHead);
+            return;
+          }
+          if (log.address !== expectedAddress) {
+            yield gap(`RPC log address mismatch: expected ${expectedAddress}, got ${log.address}`, log.cursor);
             return;
           }
           sourceSequence += 1n;

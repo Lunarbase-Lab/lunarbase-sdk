@@ -207,6 +207,7 @@ export class JsonRpcHttpClient {
     commitment: ChainCursor["commitment"],
   ): Promise<ContractLog[]> {
     if (request.fromBlock > request.toBlock) throw new RpcError("INVALID", "log range starts after its end");
+    const expectedAddress = addressKey(request.filter.address);
     const events = eventsForTopics(request.filter.topics);
     const pending = initialLogRanges(request.fromBlock, request.toBlock);
     const logs: ContractLog[] = [];
@@ -222,7 +223,12 @@ export class JsonRpcHttpClient {
             strict: false,
           }),
         );
-        logs.push(...chunk.map((value) => normalizeViemLog(value, chainId, commitment)));
+        for (const value of chunk) {
+          const log = normalizeViemLog(value, chainId, commitment);
+          if (log.address !== expectedAddress)
+            throw new RpcError("INVALID", `RPC log address mismatch: expected ${expectedAddress}, got ${log.address}`);
+          logs.push(log);
+        }
       } catch (error) {
         if (fromBlock >= toBlock || !isLogRangeLimit(error)) throw error;
         const middle = fromBlock + (toBlock - fromBlock) / 2n;
@@ -260,8 +266,48 @@ function isLogRangeLimit(error: unknown): boolean {
   );
 }
 
+class ChainVerification {
+  private verified = false;
+  private pendingVerifications = 0;
+  private tail: Promise<void> = Promise.resolve();
+
+  verify(check: () => Promise<void>): Promise<void> {
+    this.pendingVerifications += 1;
+    this.verified = false;
+    return this.exclusive(async () => {
+      try {
+        await check();
+        this.verified = true;
+      } finally {
+        this.pendingVerifications -= 1;
+        if (this.pendingVerifications > 0) this.verified = false;
+      }
+    });
+  }
+
+  ensure(check: () => Promise<void>): Promise<void> {
+    if (this.pendingVerifications === 0 && this.verified) return Promise.resolve();
+    return this.exclusive(async () => {
+      if (this.pendingVerifications === 0 && this.verified) return;
+      await check();
+      this.verified = this.pendingVerifications === 0;
+    });
+  }
+
+  private exclusive(operation: () => Promise<void>): Promise<void> {
+    const result = this.tail.then(operation, operation);
+    this.tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+}
+
 /** Canonical HTTP fallback for backfill, heads, and checkpoint validation. */
 export class RpcHttpBackend {
+  private readonly chainVerification = new ChainVerification();
+
   constructor(
     /** Strict read-only JSON-RPC client. */
     readonly rpc: JsonRpcHttpClient,
@@ -273,8 +319,24 @@ export class RpcHttpBackend {
     readonly snapshotTag = "latest",
   ) {}
 
+  /** Revalidates the independent HTTP endpoint for every subscription. */
+  verifyChainId(): Promise<void> {
+    return this.chainVerification.verify(() => this.checkChainId());
+  }
+
+  private ensureChainId(): Promise<void> {
+    return this.chainVerification.ensure(() => this.checkChainId());
+  }
+
+  private async checkChainId(): Promise<void> {
+    const actual = await this.rpc.chainId();
+    if (actual !== this.chainId)
+      throw new RpcError("INVALID", `HTTP RPC chain id mismatch: expected ${this.chainId}, got ${actual}`);
+  }
+
   /** Reads the block-tagged source head. */
-  canonicalHead(): Promise<ChainCursor> {
+  async canonicalHead(): Promise<ChainCursor> {
+    await this.ensureChainId();
     return this.rpc.blockCursor(
       this.snapshotTag,
       this.chainId,
@@ -283,12 +345,15 @@ export class RpcHttpBackend {
   }
 
   /** Backfills canonical logs through one `eth_getLogs` request. */
-  backfill(request: BackfillRequest): Promise<readonly ContractLog[]> {
+  async backfill(request: BackfillRequest): Promise<readonly ContractLog[]> {
+    await this.ensureChainId();
     return this.rpc.getLogs(request, this.chainId, CommitmentValue.Canonical);
   }
 
   /** Confirms checkpoint canonicality and the ERC-1967 implementation identity. */
   async validateCheckpoint(checkpoint: Checkpoint): Promise<boolean> {
+    if (checkpoint.chainId !== this.chainId || checkpoint.cursor.chainId !== this.chainId) return false;
+    await this.ensureChainId();
     const canonical = await this.rpc.blockCursor(
       Hex.fromNumber(checkpoint.cursor.blockNumber),
       this.chainId,

@@ -16,7 +16,7 @@ test("Base uses official pendingLogs plus newHeads transport", () => {
 test("Base treats changing same-height Flashblock heads as progress", async () => {
   const socket = new FakeSocket();
   const source = createBaseFlashblocksSource(sourceConfig(), {
-    fetcher: (() => Promise.reject(new Error("unused"))) as typeof fetch,
+    fetcher: chainIdFetcher(),
     webSocketFactory: () => socket,
   });
   const abort = new AbortController();
@@ -103,4 +103,14 @@ function sourceConfig() {
     realtimeUrl: "ws://unused",
     chainId: 8453n,
   };
+}
+
+function chainIdFetcher(): typeof fetch {
+  return (async (_input: string | URL | Request, init?: RequestInit) => {
+    const request = JSON.parse(String(init?.body)) as { readonly id: number; readonly method: string };
+    assert.equal(request.method, "eth_chainId");
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: "0x2105" }), {
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
 }

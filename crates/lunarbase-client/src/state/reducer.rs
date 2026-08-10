@@ -20,6 +20,9 @@ pub enum ReducerError {
     /// An update cursor belongs to another EIP-155 chain.
     #[error("cursor chain id mismatch")]
     ChainIdMismatch,
+    /// A normalized log was emitted by a contract other than the configured Core.
+    #[error("contract log address does not match deployment Core")]
+    ContractAddressMismatch,
     /// An event precedes the last accepted position in deterministic ordering.
     #[error("cursor regression")]
     CursorRegression,

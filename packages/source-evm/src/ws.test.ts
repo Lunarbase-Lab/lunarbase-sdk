@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { Network } from "@lunarbase-lab/pmm-v2-client";
+import { CORE_EVENT_TOPICS, Network } from "@lunarbase-lab/pmm-v2-client";
 import { EvmRpcSource, JsonRpcHttpClient, type SocketEvent, type WebSocketLike } from "./index.js";
 import { parseHead } from "./ws/protocol.js";
 
@@ -241,6 +241,30 @@ test("standard logs discard an incomplete block when the socket disconnects", as
   });
 });
 
+test("live logs fail closed for a valid Core event from another contract", async () => {
+  const socket = new FakeSocket();
+  const iterator = await pendingLogsIterator(socket);
+  const first = iterator.next();
+
+  socket.emit("message", {
+    data: JSON.stringify(
+      logNotification(42n, "11", 0n, 0n, {
+        address: "0x0000000000000000000000000000000000000002",
+        topics: [CORE_EVENT_TOPICS.LaneAdded, "0x0000000000000000000000001111111111111111111111111111111111111111"],
+      }),
+    ),
+  });
+
+  const update = (await first).value;
+  assert.equal(update?.kind, "Gap");
+  if (update?.kind === "Gap") {
+    assert.equal(update.cursor?.blockNumber, 42n);
+    assert.ok(update.reason.includes("address mismatch"));
+  }
+  assert.equal((await iterator.next()).done, true);
+  assert.equal(socket.closeCalls, 1);
+});
+
 test("handshake deadline is not extended by an unrelated frame", async (context) => {
   context.mock.timers.enable({ apis: ["setTimeout"] });
   try {
@@ -299,12 +323,64 @@ test("handshake requires numeric request ids and stable subscription acknowledge
   assert.equal(conflictSocket.closeCalls, 1);
 });
 
+test("every WebSocket subscription validates the configured chain id", async () => {
+  const firstSocket = new FakeSocket();
+  const reconnectSocket = new FakeSocket();
+  const sockets = [firstSocket, reconnectSocket];
+  let connection = 0;
+  const source = new EvmRpcSource(
+    chainRpc(97n),
+    "ws://unused",
+    Network.Evm,
+    97n,
+    "latest",
+    {},
+    () => sockets[connection++]!,
+  );
+
+  const firstAbort = new AbortController();
+  const first = source.subscribe(FILTER, firstAbort.signal);
+  firstSocket.emit("open", {});
+  emitHandshake(firstSocket, "0x61");
+  const firstIterator = (await first)[Symbol.asyncIterator]();
+  const stopped = firstIterator.next();
+  firstAbort.abort();
+  assert.equal((await stopped).done, true);
+  assert.equal(firstSocket.closeCalls, 1);
+
+  const reconnect = source.subscribe(FILTER);
+  const rejected = assert.rejects(reconnect, /chain id mismatch: expected 97, got 98/);
+  reconnectSocket.emit("open", {});
+  emitHandshake(reconnectSocket, "0x62");
+  await rejected;
+  assert.equal(reconnectSocket.closeCalls, 1);
+  assert.equal(connection, 2);
+});
+
+function chainRpc(chainId: bigint | (() => bigint)): JsonRpcHttpClient {
+  const readChainId = typeof chainId === "bigint" ? () => chainId : chainId;
+  const fetcher = (async (_input: string | URL | Request, init?: RequestInit) => {
+    const request = JSON.parse(String(init?.body)) as { readonly id: number; readonly method: string };
+    assert.equal(request.method, "eth_chainId");
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: hex(readChainId()) }), {
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+  return new JsonRpcHttpClient("http://unused", fetcher);
+}
+
+function emitHandshake(socket: FakeSocket, chainId: string): void {
+  socket.emit("message", { data: JSON.stringify({ jsonrpc: "2.0", id: 1, result: "logs" }) });
+  socket.emit("message", { data: JSON.stringify({ jsonrpc: "2.0", id: 2, result: "heads" }) });
+  socket.emit("message", { data: JSON.stringify({ jsonrpc: "2.0", id: 3, result: chainId }) });
+}
+
 function pendingHandshake(
   socket: FakeSocket,
   queueCapacity = 4,
 ): Promise<AsyncIterable<import("@lunarbase-lab/pmm-v2-client").ChainUpdate>> {
   const source = new EvmRpcSource(
-    new JsonRpcHttpClient("http://unused", (() => Promise.reject(new Error("unused"))) as typeof fetch),
+    chainRpc(97n),
     "ws://unused",
     Network.Evm,
     97n,
@@ -322,7 +398,7 @@ async function pendingLogsIterator(
   signal?: AbortSignal,
 ): Promise<AsyncIterator<import("@lunarbase-lab/pmm-v2-client").ChainUpdate>> {
   const source = new EvmRpcSource(
-    new JsonRpcHttpClient("http://unused", (() => Promise.reject(new Error("unused"))) as typeof fetch),
+    chainRpc(8453n),
     "ws://unused",
     Network.Base,
     8453n,
@@ -342,7 +418,7 @@ async function arbitrumIterator(
   socket: FakeSocket,
 ): Promise<AsyncIterator<import("@lunarbase-lab/pmm-v2-client").ChainUpdate>> {
   const source = new EvmRpcSource(
-    new JsonRpcHttpClient("http://unused", (() => Promise.reject(new Error("unused"))) as typeof fetch),
+    chainRpc(42161n),
     "ws://unused",
     Network.Arbitrum,
     42161n,
@@ -362,15 +438,7 @@ async function standardIterator(
   socket: FakeSocket,
   signal?: AbortSignal,
 ): Promise<AsyncIterator<import("@lunarbase-lab/pmm-v2-client").ChainUpdate>> {
-  const source = new EvmRpcSource(
-    new JsonRpcHttpClient("http://unused", (() => Promise.reject(new Error("unused"))) as typeof fetch),
-    "ws://unused",
-    Network.Evm,
-    97n,
-    "latest",
-    {},
-    () => socket,
-  );
+  const source = new EvmRpcSource(chainRpc(97n), "ws://unused", Network.Evm, 97n, "latest", {}, () => socket);
   const stream = source.subscribe(FILTER, signal);
   socket.emit("open", {});
   socket.emit("message", { data: JSON.stringify({ jsonrpc: "2.0", id: 1, result: "logs" }) });
@@ -421,7 +489,13 @@ function headNotification(blockNumber: bigint, hashByte: string, parentByte: str
   };
 }
 
-function logNotification(blockNumber: bigint, hashByte: string, transactionIndex: bigint, logIndex: bigint) {
+function logNotification(
+  blockNumber: bigint,
+  hashByte: string,
+  transactionIndex: bigint,
+  logIndex: bigint,
+  overrides: Readonly<Record<string, unknown>> = {},
+) {
   return {
     jsonrpc: "2.0",
     method: "eth_subscription",
@@ -437,6 +511,7 @@ function logNotification(blockNumber: bigint, hashByte: string, transactionIndex
         transactionIndex: hex(transactionIndex),
         logIndex: hex(logIndex),
         removed: false,
+        ...overrides,
       },
     },
   };

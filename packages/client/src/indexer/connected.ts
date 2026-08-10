@@ -1,5 +1,5 @@
 /** Connected source/reducer lifecycle for embeddable TypeScript clients. */
-import type { QuoteRequest } from "@lunarbase-lab/pmm-v2-math";
+import { parseAddress, type QuoteRequest } from "@lunarbase-lab/pmm-v2-math";
 import { checkpointMatchesDeployment, validateDeploymentConfig } from "../bootstrap.js";
 import { IndexerError } from "../model.js";
 import type {
@@ -12,7 +12,7 @@ import type {
   IndexerHealth,
 } from "../model.js";
 import { compareCursor } from "../source.js";
-import { QuoteIndexer } from "./engine.js";
+import { QuoteIndexer, validateCoreLogIdentity } from "./engine.js";
 import { validateFilterTopics } from "./filter.js";
 import { delay, pumpSource, SourceActivity } from "./source_task.js";
 import { BoundedUpdateQueue } from "./update_queue.js";
@@ -217,10 +217,22 @@ async function restoreCheckpoint(
       ? checkpoint.cursor.blockNumber + 1n
       : checkpoint.cursor.blockNumber;
   if (fromBlock <= head.blockNumber) {
-    const logs = [...(await source.backfill({ fromBlock, toBlock: head.blockNumber, filter: config.filter }))]
+    const received = [...(await source.backfill({ fromBlock, toBlock: head.blockNumber, filter: config.filter }))];
+    const expectedCore = parseAddress(config.deployment.core);
+    for (const log of received) {
+      validateCoreLogIdentity(log, expectedCore, config.deployment.chainId);
+      if (
+        log.removed ||
+        log.cursor.blockNumber < fromBlock ||
+        log.cursor.blockNumber > head.blockNumber ||
+        log.cursor.blockHash === undefined
+      )
+        throw new IndexerError("GAP", "canonical recovery backfill returned an invalid log");
+    }
+    const pending = received
       .filter((log) => compareCursor(log.cursor, checkpoint.cursor) > 0)
       .sort((left, right) => compareCursor(left.cursor, right.cursor));
-    for (const log of logs) indexer.applyCoreUpdate({ kind: "Log", log });
+    for (const log of pending) indexer.applyCoreUpdate({ kind: "Log", log });
   }
   indexer.applyCoreUpdate({ kind: "Head", cursor: head });
   indexer.setCanonicalFloor(head);

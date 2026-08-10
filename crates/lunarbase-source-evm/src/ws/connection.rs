@@ -139,17 +139,7 @@ async fn read_acknowledgements(
                 record_subscription_ack(&mut heads_subscription, &value, "heads")?;
             }
             Some(3) => {
-                let raw = value.get("result").and_then(Value::as_str).ok_or_else(|| {
-                    SourceError::Unavailable("RPC chain-id response is invalid".into())
-                })?;
-                let actual = U64::from_str(raw)
-                    .map_err(|_| SourceError::Unavailable("RPC chain id is invalid".into()))?
-                    .to::<u64>();
-                if actual != expected_chain_id {
-                    return Err(SourceError::Unavailable(format!(
-                        "WebSocket RPC chain id mismatch: expected {expected_chain_id}, got {actual}"
-                    )));
-                }
+                validate_chain_id_response(&value, expected_chain_id)?;
                 chain_verified = true;
             }
             _ => push_prefetched(&mut buffered, payload, prefetch_capacity)?,
@@ -161,6 +151,22 @@ async fn read_acknowledgements(
         heads_subscription: heads_subscription.expect("checked above"),
         buffered,
     })
+}
+
+fn validate_chain_id_response(value: &Value, expected_chain_id: u64) -> Result<(), SourceError> {
+    let raw = value
+        .get("result")
+        .and_then(Value::as_str)
+        .ok_or_else(|| SourceError::Unavailable("RPC chain-id response is invalid".into()))?;
+    let actual = U64::from_str(raw)
+        .map_err(|_| SourceError::Unavailable("RPC chain id is invalid".into()))?
+        .to::<u64>();
+    if actual != expected_chain_id {
+        return Err(SourceError::Unavailable(format!(
+            "WebSocket RPC chain id mismatch: expected {expected_chain_id}, got {actual}"
+        )));
+    }
+    Ok(())
 }
 
 fn push_prefetched(
@@ -244,12 +250,17 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        before_handshake_deadline, handshake_response_id, push_prefetched, record_subscription_ack,
+        before_handshake_deadline, establish, handshake_response_id, push_prefetched,
+        record_subscription_ack, validate_chain_id_response,
     };
-    use lunarbase_client::model::SourceError;
+    use futures_util::{SinkExt, StreamExt};
+    use lunarbase_client::model::{ContractFilter, SourceError};
+    use lunarbase_math::Address;
     use serde_json::json;
     use std::{collections::VecDeque, future::pending};
+    use tokio::net::TcpListener;
     use tokio::time::Instant;
+    use tokio_tungstenite::{accept_async, tungstenite::Message};
 
     #[test]
     fn handshake_requires_numeric_request_ids_and_stable_subscription_acks() {
@@ -278,6 +289,66 @@ mod tests {
 
         assert!(error.to_string().contains("prefetch overflow"));
         assert_eq!(buffered.len(), 2);
+    }
+
+    #[test]
+    fn handshake_rejects_invalid_or_foreign_chain_ids() {
+        validate_chain_id_response(&json!({"result": "0x61"}), 97).unwrap();
+
+        let mismatch = validate_chain_id_response(&json!({"result": "0x1"}), 97).unwrap_err();
+        assert!(mismatch.to_string().contains("expected 97, got 1"));
+
+        assert!(validate_chain_id_response(&json!({"result": 97}), 97).is_err());
+        assert!(validate_chain_id_response(&json!({"result": "not-a-chain-id"}), 97).is_err());
+    }
+
+    #[tokio::test]
+    async fn initial_connect_and_reconnect_both_verify_chain_id() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for chain_id in [97_u64, 1] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = accept_async(stream).await.unwrap();
+                for _ in 0..3 {
+                    let request = socket.next().await.unwrap().unwrap();
+                    let Message::Text(request) = request else {
+                        panic!("expected a text JSON-RPC request");
+                    };
+                    let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+                    let id = request["id"].as_u64().unwrap();
+                    let result = match id {
+                        1 => json!("logs-subscription"),
+                        2 => json!("heads-subscription"),
+                        3 => json!(format!("0x{chain_id:x}")),
+                        _ => panic!("unexpected JSON-RPC request id"),
+                    };
+                    socket
+                        .send(Message::Text(
+                            json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string(),
+                        ))
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+        let filter = ContractFilter {
+            address: Address::new([1_u8; 20]),
+            topics: Vec::new(),
+        };
+
+        let initial = establish(&endpoint, &filter, "logs", 97, 1024, 4)
+            .await
+            .unwrap();
+        drop(initial);
+        let reconnect = establish(&endpoint, &filter, "logs", 97, 1024, 4).await;
+        let error = match reconnect {
+            Ok(_) => panic!("foreign reconnect chain id was accepted"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("expected 97, got 1"));
+        server.await.unwrap();
     }
 
     #[tokio::test]

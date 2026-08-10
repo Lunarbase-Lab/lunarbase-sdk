@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import {
   Commitment,
+  CORE_EVENT_TOPICS,
   MATH_COMPATIBILITY_VERSION,
   Network,
   QuoteReducer,
@@ -121,6 +122,37 @@ test("backfill with empty topics requests and returns every Core log", async () 
   assert.equal(logs.length, 1);
   assert.equal(logs[0]?.cursor.blockNumber, 42n);
   assert.deepEqual((requests[0]?.params[0] as { topics?: unknown }).topics, []);
+});
+
+test("backfill rejects an otherwise valid Core log from another contract", async () => {
+  const expectedAddress = parseAddress("0x0000000000000000000000000000000000000001");
+  const client = new JsonRpcHttpClient(
+    "https://rpc.example",
+    rpcFetcher(
+      () => [
+        rawRpcLog({
+          address: "0x0000000000000000000000000000000000000002",
+          topics: [CORE_EVENT_TOPICS.LaneAdded, `0x${"00".repeat(12)}${"11".repeat(20)}`],
+          transactionIndex: "0x0",
+          logIndex: "0x0",
+        }),
+      ],
+      [],
+    ),
+  );
+
+  await assert.rejects(
+    client.getLogs(
+      {
+        fromBlock: 42n,
+        toBlock: 42n,
+        filter: { address: expectedAddress, topics: [] },
+      },
+      8453n,
+      Commitment.Canonical,
+    ),
+    (error: unknown) => error instanceof RpcError && error.code === "INVALID" && /address mismatch/.test(error.message),
+  );
 });
 
 test("raw RPC log parsing validates and canonicalizes every field", () => {

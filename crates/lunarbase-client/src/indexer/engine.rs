@@ -10,7 +10,8 @@ use crate::model::{
 use crate::protocol::abi::decode_core_event;
 use crate::state::reducer::{QuoteReducer, ReducerError};
 use lunarbase_math::quote;
-use lunarbase_math::{B256, QuoteOutcome, QuoteRequest, QuoteState};
+use lunarbase_math::{Address, B256, QuoteOutcome, QuoteRequest, QuoteState};
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
@@ -73,9 +74,15 @@ impl PreparedQuoteSnapshot {
 
 impl QuoteIndexer {
     pub(crate) fn canonical_floor_covers_core_log(
-        &self,
+        &mut self,
         log: &ContractLog,
     ) -> Result<bool, IndexerError> {
+        if let Err(error) =
+            validate_core_log_identity(log, self.deployment.core, self.deployment.chain_id)
+        {
+            self.reducer.mark_not_ready();
+            return Err(error);
+        }
         if log.removed {
             return Ok(false);
         }
@@ -131,6 +138,7 @@ impl QuoteIndexer {
         self.reducer.bootstrap(snapshot.cursor);
         self.canonical_floor = Some(snapshot_cursor.clone());
         for update in buffered {
+            self.validate_core_update_identity(&update)?;
             let cursor = update_cursor(&update);
             if let Some(cursor) = cursor {
                 if cursor.chain_id != snapshot_chain {
@@ -141,7 +149,7 @@ impl QuoteIndexer {
                     continue;
                 }
             }
-            if let Err(error) = self.apply_core_update(update) {
+            if let Err(error) = self.apply_validated_core_update(update) {
                 self.reducer.mark_not_ready();
                 return Err(error);
             }
@@ -165,6 +173,7 @@ impl QuoteIndexer {
             .ok_or(IndexerError::NoCursor)?;
         buffered.sort_by_key(update_order);
         for update in buffered {
+            self.validate_core_update_identity(&update)?;
             if let Some(cursor) = update_cursor(&update) {
                 if cursor.chain_id != current.chain_id {
                     self.reducer.mark_not_ready();
@@ -174,7 +183,7 @@ impl QuoteIndexer {
                     continue;
                 }
             }
-            self.apply_core_update(update)?;
+            self.apply_validated_core_update(update)?;
         }
         self.reducer.publish_ready();
         Ok(())
@@ -182,6 +191,15 @@ impl QuoteIndexer {
 
     /// Applies one normalized update with a caller-supplied decoder.
     pub fn apply_update(
+        &mut self,
+        update: ChainUpdate,
+        decoder: &impl Fn(&ContractLog) -> Option<QuoteEvent>,
+    ) -> Result<(), IndexerError> {
+        self.validate_core_update_identity(&update)?;
+        self.apply_validated_update(update, decoder)
+    }
+
+    fn apply_validated_update(
         &mut self,
         update: ChainUpdate,
         decoder: &impl Fn(&ContractLog) -> Option<QuoteEvent>,
@@ -219,10 +237,26 @@ impl QuoteIndexer {
         Ok(())
     }
 
+    fn validate_core_update_identity(&mut self, update: &ChainUpdate) -> Result<(), IndexerError> {
+        if let ChainUpdate::Log(log) = update
+            && let Err(error) =
+                validate_core_log_identity(log, self.deployment.core, self.deployment.chain_id)
+        {
+            self.reducer.mark_not_ready();
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Applies one update through the pinned Core ABI decoder.
     pub fn apply_core_update(&mut self, update: ChainUpdate) -> Result<(), IndexerError> {
+        self.validate_core_update_identity(&update)?;
+        self.apply_validated_core_update(update)
+    }
+
+    fn apply_validated_core_update(&mut self, update: ChainUpdate) -> Result<(), IndexerError> {
         if matches!(&update, ChainUpdate::Log(log) if log.removed) {
-            return self.apply_update(update, &|_| None);
+            return self.apply_validated_update(update, &|_| None);
         }
         if let ChainUpdate::Log(log) = &update {
             if let Some(floor) = self.canonical_floor.as_ref()
@@ -231,9 +265,9 @@ impl QuoteIndexer {
                 return Ok(());
             }
             let event = decode_core_event(log)?;
-            return self.apply_update(update, &|_| event.clone());
+            return self.apply_validated_update(update, &|_| event.clone());
         }
-        self.apply_update(update, &|_| None)
+        self.apply_validated_update(update, &|_| None)
     }
 
     /// Records a completed canonical recovery range. Realtime logs at or
@@ -323,6 +357,40 @@ impl QuoteIndexer {
     pub fn deployment(&self) -> &DeploymentConfig {
         &self.deployment
     }
+}
+
+/// Rejects source/filter violations before ABI decoding or event publication.
+pub(crate) fn validate_core_log_identity(
+    log: &ContractLog,
+    expected_core: Address,
+    expected_chain_id: u64,
+) -> Result<(), IndexerError> {
+    if log.address != expected_core {
+        return Err(ReducerError::ContractAddressMismatch.into());
+    }
+    if log.cursor.chain_id != expected_chain_id {
+        return Err(ReducerError::ChainIdMismatch.into());
+    }
+    Ok(())
+}
+
+/// Validates canonical backfill identity and bounds before cursor filtering.
+pub(crate) fn validate_core_recovery_log(
+    log: &ContractLog,
+    expected_core: Address,
+    expected_chain_id: u64,
+    block_range: RangeInclusive<u64>,
+) -> Result<(), IndexerError> {
+    validate_core_log_identity(log, expected_core, expected_chain_id)?;
+    if log.removed
+        || log.cursor.block_hash.is_none()
+        || !block_range.contains(&log.cursor.block_number)
+    {
+        return Err(IndexerError::Gap(
+            "canonical recovery backfill returned an invalid log".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn snapshot_covers(update: &ChainCursor, snapshot: &ChainCursor) -> Result<bool, IndexerError> {

@@ -1,5 +1,5 @@
 /** Synchronous in-memory quote engine around the ordered reducer. */
-import type { QuoteRequest } from "@lunarbase-lab/pmm-v2-math";
+import { parseAddress, type Address, type QuoteRequest } from "@lunarbase-lab/pmm-v2-math";
 import { checkpointMatchesDeployment } from "../bootstrap.js";
 import { decodeCoreEvent } from "../protocol/abi.js";
 import { QuoteReducer } from "../state/reducer.js";
@@ -12,12 +12,15 @@ import type {
   ClientBatchQuote,
   ClientQuote,
   DeploymentConfig,
+  ContractLog,
   IndexerHealth,
 } from "../model.js";
 import { compareCursor, updateCursor } from "../source.js";
 
 /** Provider-neutral quote engine. No method on its hot path performs I/O. */
 export class QuoteIndexer {
+  /** Canonical Core identity reused without per-log string allocation. */
+  private readonly coreAddress: Address;
   private constructor(
     /** Ordered owner of current quote-critical state and cursor. */
     private reducer: QuoteReducer,
@@ -25,7 +28,9 @@ export class QuoteIndexer {
     private readonly deployment: DeploymentConfig,
     /** Canonical state boundary already represented by the reducer. */
     private canonicalFloor?: ChainCursor,
-  ) {}
+  ) {
+    this.coreAddress = parseAddress(deployment.core);
+  }
 
   /** Builds a ready indexer from one coherent source snapshot. */
   static fromSnapshot(snapshot: BootstrapSnapshot, deployment: DeploymentConfig): QuoteIndexer {
@@ -67,6 +72,7 @@ export class QuoteIndexer {
       try {
         if (update.kind === "Gap") throw new IndexerError("GAP", update.reason);
         if (update.kind === "Reorg") throw new IndexerError("GAP", "reorg during snapshot handoff");
+        this.validateCoreLogIdentity(update);
         const cursor = updateCursor(update);
         if (!cursor) continue;
         if (snapshotCovers(cursor, snapshotCursor)) continue;
@@ -89,6 +95,7 @@ export class QuoteIndexer {
 
   /** Applies one normalized update through the pinned Core ABI decoder. */
   applyCoreUpdate(update: ChainUpdate): void {
+    this.validateCoreLogIdentity(update);
     try {
       switch (update.kind) {
         case "Log": {
@@ -160,6 +167,16 @@ export class QuoteIndexer {
     this.reducer.markNotReady();
   }
 
+  private validateCoreLogIdentity(update: ChainUpdate): void {
+    if (update.kind !== "Log") return;
+    try {
+      validateCoreLogIdentity(update.log, this.coreAddress, this.deployment.chainId);
+    } catch (error) {
+      this.reducer.markNotReady();
+      throw error;
+    }
+  }
+
   private requireCursor() {
     const cursor = this.reducer.cursor();
     if (!cursor) throw new IndexerError("NO_CURSOR", "indexer has no cursor");
@@ -173,6 +190,13 @@ export class QuoteIndexer {
     )
       throw new IndexerError("CODE_HASH_MISMATCH", "snapshot implementation identity mismatch");
   }
+}
+/** Validates normalized log identity before any ordering shortcut or decode. */
+export function validateCoreLogIdentity(log: ContractLog, expectedCore: Address, expectedChainId: bigint): void {
+  if (log.address !== expectedCore)
+    throw new IndexerError("REDUCER", "contract log address does not match deployment Core");
+  if (log.cursor.chainId !== expectedChainId)
+    throw new IndexerError("REDUCER", "contract log cursor chain id mismatch");
 }
 
 function snapshotCovers(update: ChainCursor, snapshot: ChainCursor): boolean {

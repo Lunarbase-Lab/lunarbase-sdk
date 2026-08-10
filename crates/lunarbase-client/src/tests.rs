@@ -587,6 +587,8 @@ mod event_sink_policy;
 
 mod checkpoint_validation;
 
+mod source_identity;
+
 fn config() -> ClientConnectConfig {
     ClientConnectConfig {
         deployment: DeploymentConfig {

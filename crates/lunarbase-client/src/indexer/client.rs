@@ -200,7 +200,7 @@ impl ConnectedQuoteClient {
         }
         crate::indexer::engine::sort_chain_updates(&mut buffered);
         emit_handoff_events(
-            &initial,
+            &mut initial,
             &buffered,
             recovery_event_sink.as_ref(),
             checkpoint_recovered,

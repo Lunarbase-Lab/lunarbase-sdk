@@ -24,6 +24,7 @@ use std::{
     collections::VecDeque,
     time::{Duration, Instant},
 };
+use tokio::net::TcpListener;
 
 #[test]
 fn builds_standard_logs_subscription() {
@@ -357,6 +358,40 @@ async fn source_rejects_snapshot_deployment_chain_mismatch_before_rpc() {
 
     assert!(error.to_string().contains("chain id mismatch"));
     assert!(asserter.read_q().is_empty());
+}
+
+#[tokio::test]
+async fn subscribe_rechecks_http_chain_even_when_the_session_is_cached() {
+    let asserter = Asserter::new();
+    let client = RpcHttpClient::from_client(RpcClient::mocked(asserter.clone()));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (_stream, _) = listener.accept().await.unwrap();
+        std::future::pending::<()>().await;
+    });
+    let source = EvmRpcSource::new(client, endpoint, Network::Evm, 97, "latest");
+    asserter.push_success(&json!("0x61"));
+    asserter.push_success(&json!("0x62"));
+    source.http.verify_chain_id().await.unwrap();
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        source.subscribe(ContractFilter {
+            address: Address::new([1; 20]),
+            topics: Vec::new(),
+        }),
+    )
+    .await
+    .expect("HTTP mismatch must win before the pending WS handshake");
+    let error = match result {
+        Ok(_) => panic!("cached HTTP verification bypassed reconnect validation"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("expected 97, got 98"));
+    assert!(asserter.read_q().is_empty());
+    server.abort();
 }
 
 #[test]

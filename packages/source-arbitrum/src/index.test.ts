@@ -24,7 +24,8 @@ function rpcFetcher(
   return (async (_input: string | URL | Request, init?: RequestInit) => {
     const request = JSON.parse(String(init?.body)) as RpcRequest;
     requests.push(request);
-    return new Response(JSON.stringify({ jsonrpc: "2.0", id: responseId(request), result: responder(request) }), {
+    const result = request.method === "eth_chainId" ? "0xa4b1" : responder(request);
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: responseId(request), result }), {
       headers: { "content-type": "application/json" },
     });
   }) as typeof fetch;
@@ -115,7 +116,7 @@ test("canonical head is pinned to explicit Nitro execution context", async () =>
 
   assert.equal(cursor.executionBlockNumber, 7n);
   assert.deepEqual(
-    requests.map((request) => request.params[0]),
+    requests.filter((request) => request.method === "eth_getBlockByNumber").map((request) => request.params[0]),
     ["latest", "0x2a"],
   );
 });
@@ -163,7 +164,7 @@ test("backfill rejects execution context from a different branch", async () => {
   await assert.rejects(operation, (error: unknown) => error instanceof RpcError && error.code === "INVALID");
   assert.deepEqual(
     requests.map((request) => request.method),
-    ["eth_getLogs", "eth_getBlockByNumber"],
+    ["eth_chainId", "eth_getLogs", "eth_getBlockByNumber"],
   );
 });
 
@@ -183,7 +184,7 @@ test("backfill rejects missing or conflicting log block hashes", async () => {
     await assert.rejects(operation, (error: unknown) => error instanceof RpcError && error.code === "INVALID");
     assert.deepEqual(
       requests.map((request) => request.method),
-      ["eth_getLogs"],
+      ["eth_chainId", "eth_getLogs"],
     );
   }
 });
@@ -209,7 +210,7 @@ test("backfill rejects absent or malformed Nitro execution context", async () =>
     await assert.rejects(operation, (error: unknown) => error instanceof RpcError && error.code === "INVALID");
     assert.deepEqual(
       requests.map((request) => request.method),
-      ["eth_getLogs", "eth_getBlockByNumber"],
+      ["eth_chainId", "eth_getLogs", "eth_getBlockByNumber"],
     );
   }
 });

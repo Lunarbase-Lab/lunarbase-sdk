@@ -87,6 +87,7 @@ async fn rpc(State(state): State<RpcState>, Json(request): Json<Value>) -> Json<
         block_tag: block_tag.clone(),
     });
     let result = match method {
+        "eth_chainId" => Some(json!("0xa4b1")),
         "eth_getLogs" => Some(Value::Array(state.logs.as_ref().clone())),
         "eth_getBlockByNumber" => block_tag
             .as_ref()

@@ -10,7 +10,7 @@
 
 use crate::rpc::backend::RpcHttpBackend;
 use crate::rpc::client::RpcHttpClient;
-use crate::rpc::codec::parse_rpc_log;
+use crate::rpc::codec::parse_filtered_rpc_log;
 use crate::rpc::snapshot::RpcSnapshotProvider;
 use async_stream::stream;
 use futures_util::StreamExt;
@@ -200,15 +200,17 @@ impl ChainDataSource for EvmRpcSource {
 
     async fn subscribe(&self, filter: ContractFilter) -> Result<SourceStream, SourceError> {
         self.config.validate()?;
-        let established = establish(
-            self.ws_endpoint.as_ref(),
-            &filter,
-            &self.config.logs_subscription,
-            self.http.chain_id(),
-            self.config.max_frame_bytes,
-            self.config.reorder_capacity,
-        )
-        .await?;
+        let (_, established) = tokio::try_join!(
+            self.http.verify_chain_id(),
+            establish(
+                self.ws_endpoint.as_ref(),
+                &filter,
+                &self.config.logs_subscription,
+                self.http.chain_id(),
+                self.config.max_frame_bytes,
+                self.config.reorder_capacity,
+            ),
+        )?;
         let logs_subscription = established.logs_subscription;
         let heads_subscription = established.heads_subscription;
         let mut buffered = established.buffered;
@@ -355,7 +357,12 @@ impl ChainDataSource for EvmRpcSource {
                 };
 
                 if logs_subscription == subscription {
-                    let mut log = match parse_rpc_log(result, chain_id, Commitment::Realtime) {
+                    let mut log = match parse_filtered_rpc_log(
+                        result,
+                        chain_id,
+                        Commitment::Realtime,
+                        &filter,
+                    ) {
                         Ok(log) => log,
                         Err(error) => {
                             yield Err(SourceError::Unavailable(format!("invalid RPC log notification: {error}")));

@@ -1,6 +1,6 @@
 //! Minimal read-only Alloy HTTP client without transaction fillers.
 
-use crate::rpc::codec::{parse_rpc_head, parse_rpc_log, validate_canonical_hex_u64};
+use crate::rpc::codec::{parse_filtered_rpc_log, parse_rpc_head, validate_canonical_hex_u64};
 use alloy_primitives::{Bytes, U64, keccak256};
 use alloy_rpc_client::RpcClient;
 use lunarbase_client::model::{BackfillRequest, ChainCursor, Commitment, ContractLog, SourceError};
@@ -270,7 +270,9 @@ impl RpcHttpClient {
                 Ok(logs) => {
                     let logs = logs
                         .into_iter()
-                        .map(|log| parse_rpc_log(&log, chain_id, commitment))
+                        .map(|log| {
+                            parse_filtered_rpc_log(&log, chain_id, commitment, &request.filter)
+                        })
                         .collect::<Result<Vec<_>, _>>()?;
                     normalized.extend(logs);
                 }

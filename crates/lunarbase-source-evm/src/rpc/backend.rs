@@ -5,7 +5,91 @@ use lunarbase_client::model::{
     BackfillRequest, ChainCursor, Checkpoint, Commitment, ContractLog, Network, SourceError,
 };
 use lunarbase_client::protocol::proxy::{ERC1967_IMPLEMENTATION_SLOT, decode_implementation};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
+use tokio::sync::Mutex;
+
+#[cfg(test)]
+use tokio::sync::{Notify, Semaphore};
+
+#[derive(Default)]
+struct ChainVerification {
+    verified: AtomicBool,
+    pending: AtomicUsize,
+    singleflight: Mutex<()>,
+}
+
+impl ChainVerification {
+    fn is_idle_and_verified(&self) -> bool {
+        self.pending.load(Ordering::Acquire) == 0
+            && self.verified.load(Ordering::Acquire)
+            && self.pending.load(Ordering::Acquire) == 0
+    }
+
+    fn publish_ensure_success(&self) {
+        if self.pending.load(Ordering::Acquire) == 0 {
+            self.verified.store(true, Ordering::Release);
+            if self.pending.load(Ordering::Acquire) != 0 {
+                self.verified.store(false, Ordering::Release);
+            }
+        }
+    }
+}
+
+struct PendingVerification<'a> {
+    state: &'a ChainVerification,
+}
+
+impl<'a> PendingVerification<'a> {
+    fn begin(state: &'a ChainVerification) -> Self {
+        state.pending.fetch_add(1, Ordering::AcqRel);
+        state.verified.store(false, Ordering::Release);
+        Self { state }
+    }
+
+    fn publish_success_if_last(&self) {
+        if self.state.pending.load(Ordering::Acquire) == 1 {
+            self.state.verified.store(true, Ordering::Release);
+            if self.state.pending.load(Ordering::Acquire) != 1 {
+                self.state.verified.store(false, Ordering::Release);
+            }
+        }
+    }
+}
+
+impl Drop for PendingVerification<'_> {
+    fn drop(&mut self) {
+        let previous = self.state.pending.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "pending verification count underflow");
+    }
+}
+
+#[cfg(test)]
+struct VerificationHook {
+    started: Notify,
+    proceed: Semaphore,
+}
+
+#[cfg(test)]
+impl VerificationHook {
+    fn new() -> Self {
+        Self {
+            started: Notify::new(),
+            proceed: Semaphore::new(0),
+        }
+    }
+
+    async fn pause(&self) {
+        self.started.notify_one();
+        self.proceed
+            .acquire()
+            .await
+            .expect("verification hook remains open")
+            .forget();
+    }
+}
 
 #[derive(Clone)]
 /// Canonical HTTP backend used by realtime network sources.
@@ -18,6 +102,10 @@ pub struct RpcHttpBackend {
     chain_id: u64,
     /// Explicit block tag used to make bootstrap reads coherent.
     snapshot_tag: Arc<str>,
+    /// Shared verification session used by every clone of this HTTP backend.
+    chain_verification: Arc<ChainVerification>,
+    #[cfg(test)]
+    verification_hook: Option<Arc<VerificationHook>>,
 }
 
 impl RpcHttpBackend {
@@ -33,6 +121,9 @@ impl RpcHttpBackend {
             network,
             chain_id,
             snapshot_tag: Arc::from(snapshot_tag.into()),
+            chain_verification: Arc::new(ChainVerification::default()),
+            #[cfg(test)]
+            verification_hook: None,
         }
     }
 
@@ -55,6 +146,47 @@ impl RpcHttpBackend {
     pub fn snapshot_tag(&self) -> &str {
         &self.snapshot_tag
     }
+
+    /// Rechecks the independent HTTP endpoint even when this backend was
+    /// verified previously. Realtime subscribe/reconnect boundaries use this
+    /// method so an endpoint change cannot inherit an older session result.
+    pub(crate) async fn verify_chain_id(&self) -> Result<(), SourceError> {
+        let pending = PendingVerification::begin(&self.chain_verification);
+        let _guard = self.chain_verification.singleflight.lock().await;
+        self.verify_chain_id_locked().await?;
+        pending.publish_success_if_last();
+        Ok(())
+    }
+
+    /// Verifies a standalone canonical operation once per shared backend
+    /// session. The fast path performs only atomic checks and no RPC.
+    async fn ensure_chain_id(&self) -> Result<(), SourceError> {
+        if self.chain_verification.is_idle_and_verified() {
+            return Ok(());
+        }
+        let _guard = self.chain_verification.singleflight.lock().await;
+        if self.chain_verification.is_idle_and_verified() {
+            return Ok(());
+        }
+        self.verify_chain_id_locked().await?;
+        self.chain_verification.publish_ensure_success();
+        Ok(())
+    }
+
+    async fn verify_chain_id_locked(&self) -> Result<(), SourceError> {
+        #[cfg(test)]
+        if let Some(hook) = self.verification_hook.as_ref() {
+            hook.pause().await;
+        }
+        let actual = self.rpc.chain_id().await?;
+        if actual != self.chain_id {
+            return Err(SourceError::Unavailable(format!(
+                "HTTP RPC chain id mismatch: expected {}, got {actual}",
+                self.chain_id
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl RpcHttpBackend {
@@ -63,6 +195,7 @@ impl RpcHttpBackend {
         if network != self.network {
             return Err(SourceError::NetworkMismatch);
         }
+        self.ensure_chain_id().await?;
         let commitment = if self.snapshot_tag.as_ref() == "finalized" {
             Commitment::Finalized
         } else {
@@ -79,6 +212,7 @@ impl RpcHttpBackend {
         &self,
         request: BackfillRequest,
     ) -> Result<Vec<ContractLog>, SourceError> {
+        self.ensure_chain_id().await?;
         self.rpc
             .get_logs(&request, self.chain_id, Commitment::Canonical)
             .await
@@ -87,6 +221,10 @@ impl RpcHttpBackend {
 
     /// Verifies checkpoint canonicality and the ERC-1967 implementation identity.
     pub async fn validate_checkpoint(&self, checkpoint: &Checkpoint) -> Result<bool, SourceError> {
+        if checkpoint.chain_id != self.chain_id || checkpoint.cursor.chain_id != self.chain_id {
+            return Ok(false);
+        }
+        self.ensure_chain_id().await?;
         let tag = format!("0x{:x}", checkpoint.cursor.block_number);
         let canonical = self
             .rpc
@@ -113,3 +251,7 @@ impl RpcHttpBackend {
         Ok(code_hash == checkpoint.expected_implementation_code_hash)
     }
 }
+
+#[cfg(test)]
+#[path = "backend_tests.rs"]
+mod verification_tests;

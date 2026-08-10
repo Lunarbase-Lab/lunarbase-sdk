@@ -1,17 +1,18 @@
+use crate::rpc::backend::RpcHttpBackend;
 use crate::rpc::client::{RpcHttpClient, backfill_filter};
-use crate::rpc::codec::parse_rpc_log;
+use crate::rpc::codec::{parse_filtered_rpc_log, parse_rpc_log};
 use crate::rpc::snapshot::RpcSnapshotProvider;
 use alloy_primitives::{Bytes, keccak256};
 use alloy_rpc_client::RpcClient;
 use alloy_sol_types::SolCall;
 use alloy_transport::mock::Asserter;
 use lunarbase_client::model::{
-    BackfillRequest, Commitment, ContractFilter, DeploymentConfig, MATH_COMPATIBILITY_VERSION,
-    Network, QuoteEvent,
+    BackfillRequest, ChainCursor, Checkpoint, Commitment, ContractFilter, DeploymentConfig,
+    MATH_COMPATIBILITY_VERSION, Network, QuoteEvent,
 };
 use lunarbase_client::protocol::abi::{core, quote_critical_topics};
 use lunarbase_client::state::reducer::QuoteReducer;
-use lunarbase_math::{Address, B256, U256};
+use lunarbase_math::{Address, B256, QuoteState, U256};
 
 #[test]
 fn generated_core_selectors_match_the_pinned_abi() {
@@ -66,6 +67,130 @@ fn rpc_log_rejects_more_than_four_topics() {
 
     let error = parse_rpc_log(&value, 97, Commitment::Realtime).unwrap_err();
     assert!(error.to_string().contains("more than four topics"));
+}
+
+#[test]
+fn filtered_rpc_log_rejects_a_foreign_contract_address() {
+    let filter = ContractFilter {
+        address: Address::new([2_u8; 20]),
+        topics: Vec::new(),
+    };
+
+    let error =
+        parse_filtered_rpc_log(&rpc_log_value(), 97, Commitment::Realtime, &filter).unwrap_err();
+
+    assert!(error.to_string().contains("RPC log address mismatch"));
+}
+
+#[tokio::test]
+async fn backfill_rejects_a_foreign_contract_address() {
+    let asserter = Asserter::new();
+    let client = RpcHttpClient::from_client(RpcClient::mocked(asserter.clone()));
+    let mut value = rpc_log_value();
+    value["address"] = serde_json::json!(format!("{:#x}", Address::new([2_u8; 20])));
+    asserter.push_success(&vec![rpc_log_value(), value]);
+
+    let error = client
+        .get_logs(&request(), 8453, Commitment::Canonical)
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("RPC log address mismatch"));
+}
+
+#[tokio::test]
+async fn standalone_canonical_boundaries_reject_a_foreign_http_chain() {
+    let (backend, asserter) = backend_with_chain_response(98);
+    let error = backend.snapshot_cursor(Network::Evm).await.unwrap_err();
+    assert!(error.to_string().contains("expected 97, got 98"));
+    assert!(asserter.read_q().is_empty());
+
+    let (backend, asserter) = backend_with_chain_response(98);
+    let error = backend.backfill(request()).await.unwrap_err();
+    assert!(error.to_string().contains("expected 97, got 98"));
+    assert!(asserter.read_q().is_empty());
+
+    let (backend, asserter) = backend_with_chain_response(98);
+    let error = backend
+        .validate_checkpoint(&checkpoint())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("expected 97, got 98"));
+    assert!(asserter.read_q().is_empty());
+}
+
+#[tokio::test]
+async fn checkpoint_validation_rejects_foreign_identity_before_rpc() {
+    let asserter = Asserter::new();
+    let client = RpcHttpClient::from_client(RpcClient::mocked(asserter.clone()));
+    let backend = RpcHttpBackend::new(client, Network::Evm, 97, "latest");
+    let mut checkpoint = checkpoint();
+    checkpoint.chain_id = 98;
+    checkpoint.cursor.chain_id = 98;
+
+    assert!(!backend.validate_checkpoint(&checkpoint).await.unwrap());
+    assert!(asserter.read_q().is_empty());
+}
+
+#[tokio::test]
+async fn verified_http_session_is_shared_but_explicit_reconnect_rechecks() {
+    let asserter = Asserter::new();
+    let client = RpcHttpClient::from_client(RpcClient::mocked(asserter.clone()));
+    let backend = RpcHttpBackend::new(client, Network::Evm, 97, "latest");
+    asserter.push_success(&serde_json::json!("0x61"));
+    asserter.push_success(&serde_json::json!({
+        "number": "0x2a",
+        "hash": format!("{:#x}", B256::new([0x11; 32])),
+    }));
+    asserter.push_success(&Vec::<serde_json::Value>::new());
+    asserter.push_success(&serde_json::json!({
+        "number": "0x2a",
+        "hash": format!("{:#x}", B256::new([0x22; 32])),
+    }));
+    asserter.push_success(&serde_json::json!("0x62"));
+
+    backend.verify_chain_id().await.unwrap();
+    backend.clone().snapshot_cursor(Network::Evm).await.unwrap();
+    assert!(backend.backfill(request()).await.unwrap().is_empty());
+    assert!(!backend.validate_checkpoint(&checkpoint()).await.unwrap());
+    let error = backend.verify_chain_id().await.unwrap_err();
+
+    assert!(error.to_string().contains("expected 97, got 98"));
+    assert!(asserter.read_q().is_empty());
+}
+
+fn backend_with_chain_response(chain_id: u64) -> (RpcHttpBackend, Asserter) {
+    let asserter = Asserter::new();
+    let client = RpcHttpClient::from_client(RpcClient::mocked(asserter.clone()));
+    asserter.push_success(&serde_json::json!(format!("0x{chain_id:x}")));
+    (
+        RpcHttpBackend::new(client, Network::Evm, 97, "latest"),
+        asserter,
+    )
+}
+
+fn checkpoint() -> Checkpoint {
+    let deployment = DeploymentConfig {
+        network: Network::Evm,
+        chain_id: 97,
+        core: Address::new([1; 20]),
+        router: Address::new([2; 20]),
+        expect_whitelisted: true,
+        deployment_block: 1,
+        expected_implementation: Address::new([3; 20]),
+        expected_implementation_code_hash: B256::new([4; 32]),
+        contract_compatibility_version: MATH_COMPATIBILITY_VERSION.into(),
+        explicit_lane_assets: Vec::new(),
+    };
+    let mut reducer = QuoteReducer::new(QuoteState::default(), deployment.router);
+    reducer.bootstrap(ChainCursor::block(
+        97,
+        42,
+        Some(B256::new([0x11; 32])),
+        Commitment::Canonical,
+    ));
+    reducer.publish_ready();
+    reducer.checkpoint(&deployment).unwrap()
 }
 
 fn rpc_log_value() -> serde_json::Value {
