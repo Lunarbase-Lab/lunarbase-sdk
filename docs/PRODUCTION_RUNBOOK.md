@@ -85,6 +85,17 @@ Record throughput, p95 and p99 latency, memory, indexed block progress, and
 recovery behavior. Repeat with the same provider limits and replica resources
 used in production.
 
+Before and after quote-path changes, run the deterministic in-process matrix:
+
+```sh
+make performance-baseline
+```
+
+The timing phase exercises one real `ConnectedQuoteClient` from 128 concurrent
+readers. Allocation counting runs separately with one reader because its
+instrumented allocator would otherwise distort latency and RSS. Compare JSON
+reports only on the same pinned host, release profile, and CPU policy.
+
 ## Release verification
 
 Before publishing or deploying:

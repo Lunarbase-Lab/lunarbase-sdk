@@ -11,7 +11,11 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+allocation-stats = ["dep:allocation-counter"]
+
 [dependencies]
+allocation-counter = { version = "=0.8.1", optional = true }
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 axum.workspace = true

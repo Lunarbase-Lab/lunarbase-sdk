@@ -6,7 +6,7 @@
 
 SHELL := /bin/sh
 
-.NOTPARALLEL: ci pre-push release-check
+.NOTPARALLEL: ci pre-push release-check performance-baseline
 
 CARGO ?= cargo
 PNPM ?= pnpm
@@ -41,7 +41,7 @@ PNPM_CMD := $(shell if command -v corepack >/dev/null 2>&1; then printf '%s' "co
 .PHONY: help install hooks-install build build-rust build-ts build-math-ts build-release build-indexer run run-indexer \
 	check check-rust check-ts check-network-feature check-network-features check-monad-native \
 	fmt fmt-rust fmt-ts fmt-check fmt-check-rust fmt-check-ts lint lint-rust lint-ts \
-	test test-rust test-ts test-runtime test-process-e2e audit audit-rust audit-rust-ci audit-ts load monad-live-validate docs docs-rust ffi \
+	test test-rust test-ts test-runtime test-process-e2e audit audit-rust audit-rust-ci audit-ts load performance-baseline quote-benchmark quote-allocation-benchmark monad-live-validate docs docs-rust ffi \
 	quote-logger quote-logger-rust quote-logger-ts activity-actor activity-actor-inspect activity-actor-wallet monad-parser-smoke docker-build docker-image-check docker-build-monad-native docker-up docker-down release-artifacts release-check release-version-check release-check-rust release-check-ts source-size-check repository-check public-api-check check-scripts check-ci-tools verify ci-rust ci-ts ci-supply-chain ci pre-push clean check-pnpm
 
 help:
@@ -57,6 +57,7 @@ help:
 	@echo "  make test-runtime   Test only client runtime crates/packages"
 	@echo "  make test-process-e2e  Run real-process RPC/WS/Redis/multi-replica scenarios"
 	@echo "  make load           Benchmark 15 lanes / 100 pairs by default"
+	@echo "  make performance-baseline  Run the reproducible quote timing/allocation matrix"
 	@echo "  make monad-live-validate  Run the real Monad parser/RPC/indexer soak"
 	@echo "  make lint           Run Rust clippy and TypeScript ESLint"
 	@echo "  make audit          Check Rust advisories/licenses/sources and npm advisories"
@@ -195,6 +196,25 @@ load:
 		--indexer-url "$${INDEXER_URL:-http://127.0.0.1:8080}" \
 		--lanes "$${LANES:-15}" --pairs "$${PAIRS:-100}" \
 		--requests "$${REQUESTS:-20000}" --concurrency "$${CONCURRENCY:-128}"
+
+performance-baseline: quote-benchmark quote-allocation-benchmark
+
+quote-benchmark:
+	@set -eu; for lanes in 15 64; do for batch in 1 16 256; do \
+		$(CARGO) run --locked --release -p lunarbase-tools --bin lunarbase-quote-bench -- \
+			--mode timing --lanes "$$lanes" --pairs 100 --batch-size "$$batch" \
+			--concurrency 128 --measured-quotes "$${MEASURED_QUOTES:-1048576}" \
+			--warmup-calls "$${WARMUP_CALLS:-4096}"; \
+	done; done
+
+quote-allocation-benchmark:
+	@set -eu; for lanes in 15 64; do for batch in 1 16 256; do \
+		$(CARGO) run --locked --release -p lunarbase-tools --bin lunarbase-quote-bench \
+			--features allocation-stats -- \
+			--mode allocations --lanes "$$lanes" --pairs 100 --batch-size "$$batch" \
+			--concurrency 1 --allocation-calls "$${ALLOCATION_CALLS:-4096}" \
+			--warmup-calls "$${WARMUP_CALLS:-4096}"; \
+	done; done
 
 monad-live-validate:
 	$(CARGO) run -p lunarbase-tools --bin lunarbase-monad-validate -- \
