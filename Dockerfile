@@ -19,9 +19,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --locked \
     --release \
     -p lunarbase-indexer \
+    -p lunarbase-event-worker \
     --no-default-features \
     --features "${NETWORK_FEATURES}" \
-    && cp /workspace/target/release/lunarbase-indexer /tmp/lunarbase-indexer
+    && cp /workspace/target/release/lunarbase-indexer /tmp/lunarbase-indexer \
+    && cp /workspace/target/release/lunarbase-event-worker /tmp/lunarbase-event-worker
 
 FROM debian:trixie-slim AS runtime
 ARG NETWORK_FEATURES=base
@@ -33,6 +35,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 RUN useradd --create-home --uid 10001 lunarbase
 COPY --from=builder /tmp/lunarbase-indexer /usr/local/bin/lunarbase-indexer
+COPY --from=builder /tmp/lunarbase-event-worker /usr/local/bin/lunarbase-event-worker
 USER lunarbase
-EXPOSE 8080
+EXPOSE 8080 9091
 ENTRYPOINT ["/usr/local/bin/lunarbase-indexer"]

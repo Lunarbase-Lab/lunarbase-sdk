@@ -2,16 +2,11 @@
 
 use crate::{checkpoint::RedisCheckpointStore, config::Config, metrics::Metrics};
 use lunarbase_client::indexer::client::ConnectedQuoteClient;
-use lunarbase_client::indexer::client_types::CoreEventSinkPolicy;
 use lunarbase_client::indexer::errors::IndexerError;
-use lunarbase_client::model::{Checkpoint, ContractLog, Network};
+use lunarbase_client::model::{Checkpoint, Network};
 use std::{sync::Arc, time::Duration};
 use thiserror::Error;
-use tokio::{
-    sync::{mpsc, watch},
-    task::JoinHandle,
-    time::interval,
-};
+use tokio::{sync::watch, task::JoinHandle, time::interval};
 
 #[derive(Debug, Error)]
 /// Service startup failure.
@@ -28,13 +23,12 @@ pub enum RuntimeError {
 pub async fn connect_client(
     config: &Config,
     checkpoint: Option<Checkpoint>,
-    core_event_sink: mpsc::Sender<ContractLog>,
 ) -> Result<ConnectedQuoteClient, RuntimeError> {
     match config.client.deployment.network {
-        Network::Evm => connect_evm(config, checkpoint, core_event_sink).await,
-        Network::Base => connect_base(config, checkpoint, core_event_sink).await,
-        Network::Monad => connect_monad(config, checkpoint, core_event_sink).await,
-        Network::Arbitrum => connect_arbitrum(config, checkpoint, core_event_sink).await,
+        Network::Evm => connect_evm(config, checkpoint).await,
+        Network::Base => connect_base(config, checkpoint).await,
+        Network::Monad => connect_monad(config, checkpoint).await,
+        Network::Arbitrum => connect_arbitrum(config, checkpoint).await,
     }
 }
 
@@ -42,7 +36,6 @@ pub async fn connect_client(
 async fn connect_evm(
     config: &Config,
     checkpoint: Option<Checkpoint>,
-    core_event_sink: mpsc::Sender<ContractLog>,
 ) -> Result<ConnectedQuoteClient, RuntimeError> {
     let rpc = lunarbase_source_evm::rpc::client::RpcHttpClient::new(config.http_rpc_url.clone())
         .map_err(lunarbase_client::model::SourceError::from)
@@ -54,23 +47,13 @@ async fn connect_evm(
         config.client.deployment.chain_id,
         "latest",
     ));
-    Ok(ConnectedQuoteClient::connect_with_event_sink_policy(
-        config.client.clone(),
-        source,
-        checkpoint,
-        core_event_sink,
-        CoreEventSinkPolicy {
-            minimum_commitment: config.event_log_min_commitment,
-        },
-    )
-    .await?)
+    Ok(ConnectedQuoteClient::connect(config.client.clone(), source, checkpoint).await?)
 }
 
 #[cfg(not(feature = "evm"))]
 async fn connect_evm(
     _config: &Config,
     _checkpoint: Option<Checkpoint>,
-    _core_event_sink: mpsc::Sender<ContractLog>,
 ) -> Result<ConnectedQuoteClient, RuntimeError> {
     Err(RuntimeError::UnsupportedNetwork(Network::Evm))
 }
@@ -79,7 +62,6 @@ async fn connect_evm(
 async fn connect_base(
     config: &Config,
     checkpoint: Option<Checkpoint>,
-    core_event_sink: mpsc::Sender<ContractLog>,
 ) -> Result<ConnectedQuoteClient, RuntimeError> {
     let rpc = lunarbase_source_evm::rpc::client::RpcHttpClient::new(config.http_rpc_url.clone())
         .map_err(lunarbase_client::model::SourceError::from)
@@ -89,23 +71,13 @@ async fn connect_base(
         config.realtime_url.clone(),
         config.client.deployment.chain_id,
     ));
-    Ok(ConnectedQuoteClient::connect_with_event_sink_policy(
-        config.client.clone(),
-        source,
-        checkpoint,
-        core_event_sink,
-        CoreEventSinkPolicy {
-            minimum_commitment: config.event_log_min_commitment,
-        },
-    )
-    .await?)
+    Ok(ConnectedQuoteClient::connect(config.client.clone(), source, checkpoint).await?)
 }
 
 #[cfg(not(feature = "base"))]
 async fn connect_base(
     _config: &Config,
     _checkpoint: Option<Checkpoint>,
-    _core_event_sink: mpsc::Sender<ContractLog>,
 ) -> Result<ConnectedQuoteClient, RuntimeError> {
     Err(RuntimeError::UnsupportedNetwork(Network::Base))
 }
@@ -114,7 +86,6 @@ async fn connect_base(
 async fn connect_monad(
     config: &Config,
     checkpoint: Option<Checkpoint>,
-    core_event_sink: mpsc::Sender<ContractLog>,
 ) -> Result<ConnectedQuoteClient, RuntimeError> {
     #[cfg(all(feature = "monad-native", target_os = "linux"))]
     {
@@ -131,16 +102,7 @@ async fn connect_monad(
             )
             .map_err(IndexerError::from)?,
         );
-        Ok(ConnectedQuoteClient::connect_with_event_sink_policy(
-            config.client.clone(),
-            source,
-            checkpoint,
-            core_event_sink,
-            CoreEventSinkPolicy {
-                minimum_commitment: config.event_log_min_commitment,
-            },
-        )
-        .await?)
+        Ok(ConnectedQuoteClient::connect(config.client.clone(), source, checkpoint).await?)
     }
     #[cfg(not(all(feature = "monad-native", target_os = "linux")))]
     {
@@ -156,16 +118,7 @@ async fn connect_monad(
             )
             .map_err(IndexerError::from)?,
         );
-        Ok(ConnectedQuoteClient::connect_with_event_sink_policy(
-            config.client.clone(),
-            source,
-            checkpoint,
-            core_event_sink,
-            CoreEventSinkPolicy {
-                minimum_commitment: config.event_log_min_commitment,
-            },
-        )
-        .await?)
+        Ok(ConnectedQuoteClient::connect(config.client.clone(), source, checkpoint).await?)
     }
 }
 
@@ -173,7 +126,6 @@ async fn connect_monad(
 async fn connect_monad(
     _config: &Config,
     _checkpoint: Option<Checkpoint>,
-    _core_event_sink: mpsc::Sender<ContractLog>,
 ) -> Result<ConnectedQuoteClient, RuntimeError> {
     Err(RuntimeError::UnsupportedNetwork(Network::Monad))
 }
@@ -182,7 +134,6 @@ async fn connect_monad(
 async fn connect_arbitrum(
     config: &Config,
     checkpoint: Option<Checkpoint>,
-    core_event_sink: mpsc::Sender<ContractLog>,
 ) -> Result<ConnectedQuoteClient, RuntimeError> {
     let source = Arc::new(
         lunarbase_source_arbitrum::source::ArbitrumNitroSource::from_urls(
@@ -192,23 +143,13 @@ async fn connect_arbitrum(
         )
         .map_err(IndexerError::from)?,
     );
-    Ok(ConnectedQuoteClient::connect_with_event_sink_policy(
-        config.client.clone(),
-        source,
-        checkpoint,
-        core_event_sink,
-        CoreEventSinkPolicy {
-            minimum_commitment: config.event_log_min_commitment,
-        },
-    )
-    .await?)
+    Ok(ConnectedQuoteClient::connect(config.client.clone(), source, checkpoint).await?)
 }
 
 #[cfg(not(feature = "arbitrum"))]
 async fn connect_arbitrum(
     _config: &Config,
     _checkpoint: Option<Checkpoint>,
-    _core_event_sink: mpsc::Sender<ContractLog>,
 ) -> Result<ConnectedQuoteClient, RuntimeError> {
     Err(RuntimeError::UnsupportedNetwork(Network::Arbitrum))
 }

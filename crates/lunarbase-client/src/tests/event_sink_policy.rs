@@ -1,9 +1,9 @@
-//! Event-sink policy and reducer-priority acceptance tests.
+//! Optional observer policy and reducer-priority acceptance tests.
 
 use super::*;
 
 #[tokio::test]
-async fn reducer_publishes_update_before_waiting_for_full_event_sink() {
+async fn full_event_observer_never_blocks_reducer_or_retries_dropped_log() {
     let source = Arc::new(MockSource::new(None));
     let (event_sender, mut event_receiver) = mpsc::channel(1);
     let client = ConnectedQuoteClient::connect_with_event_sink(
@@ -17,21 +17,18 @@ async fn reducer_publishes_update_before_waiting_for_full_event_sink() {
     let filler = unknown_log(90);
     event_sender.send(filler.clone()).await.unwrap();
 
-    let log = lane_added_log(101);
-    source.publish(ChainUpdate::Log(log.clone()));
+    source.publish(ChainUpdate::Log(lane_added_log(101)));
     wait_until(|| client.health().unwrap().cursor.unwrap().block_number == 101).await;
+    wait_until(|| client.runtime_stats().event_observer_drops == 1).await;
 
     assert_eq!(event_receiver.recv().await.unwrap(), filler);
-    let delivered = tokio::time::timeout(Duration::from_secs(1), event_receiver.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(delivered, log);
+    assert!(event_receiver.try_recv().is_err());
+    assert!(client.is_ready());
     client.shutdown().await;
 }
 
 #[tokio::test]
-async fn event_sink_filters_logs_below_the_minimum_commitment() {
+async fn event_observer_filters_logs_below_the_minimum_commitment() {
     let source = Arc::new(MockSource::new(None));
     let (event_sender, mut event_receiver) = mpsc::channel(2);
     let client = ConnectedQuoteClient::connect_with_event_sink_policy(

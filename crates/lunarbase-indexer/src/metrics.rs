@@ -23,10 +23,6 @@ pub struct Metrics {
     checkpoint_success: AtomicU64,
     /// Redis checkpoint load or write attempts that failed.
     checkpoint_failure: AtomicU64,
-    /// Unique Core events written by the required logger task.
-    core_events: AtomicU64,
-    /// Replayed Core events suppressed by the bounded in-process deduplicator.
-    core_event_duplicates: AtomicU64,
 }
 
 impl Metrics {
@@ -51,16 +47,6 @@ impl Metrics {
     /// Records Redis load/write failure without changing readiness.
     pub fn checkpoint_failure(&self) {
         self.checkpoint_failure.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Records one Core event after its structured log was written.
-    pub fn core_event_logged(&self) {
-        self.core_events.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Records one exact Core event replay suppressed before logging.
-    pub fn core_event_duplicate(&self) {
-        self.core_event_duplicates.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Renders current gauges and counters in Prometheus text format.
@@ -123,16 +109,6 @@ impl Metrics {
             &mut output,
             "lunarbase_recovery_failures_total",
             stats.recovery_failures,
-        );
-        counter(
-            &mut output,
-            "lunarbase_core_events_total",
-            self.core_events.load(Ordering::Relaxed),
-        );
-        counter(
-            &mut output,
-            "lunarbase_core_event_duplicates_total",
-            self.core_event_duplicates.load(Ordering::Relaxed),
         );
         counter(&mut output, "lunarbase_quotes_total", quote_count);
         counter(

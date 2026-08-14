@@ -60,11 +60,12 @@ impl ConnectedQuoteClient {
         Self::connect_inner(config, source, optional_checkpoint, None).await
     }
 
-    /// Connects while forwarding every ordered Core log into a required sink.
+    /// Connects with an explicitly enabled, best-effort Core event observer.
     ///
-    /// Each live update is applied before the reducer awaits sink capacity.
-    /// Closing the sink remains fatal, so accepted logs are never silently
-    /// discarded.
+    /// Delivery never waits for channel capacity and never affects quote
+    /// readiness. Full or closed channels increment
+    /// [`ClientRuntimeStatsSnapshot::event_observer_drops`]. Use the standalone
+    /// durable event worker when logs must not be lost.
     pub async fn connect_with_event_sink<S>(
         config: ClientConnectConfig,
         source: Arc<S>,
@@ -84,11 +85,12 @@ impl ConnectedQuoteClient {
         .await
     }
 
-    /// Connects with an explicit minimum commitment for required event output.
+    /// Connects with a minimum commitment for the best-effort observer.
     ///
     /// Source logs below `policy.minimum_commitment` are not sent to the sink.
     /// A source must actually emit logs at the requested level; the client does
     /// not promote realtime cursors into canonical or finalized cursors.
+    /// Observer delivery is nonblocking and is not a durability mechanism.
     pub async fn connect_with_event_sink_policy<S>(
         config: ClientConnectConfig,
         source: Arc<S>,
@@ -172,15 +174,13 @@ impl ConnectedQuoteClient {
                             source.as_ref(),
                             &config.filter,
                             recovery_event_sink.as_ref(),
+                            &stats,
                         )
                         .await
                         {
                             Ok(()) => {
                                 checkpoint_recovered = true;
                                 indexer
-                            }
-                            Err(IndexerError::EventSinkClosed) => {
-                                return Err(IndexerError::EventSinkClosed);
                             }
                             Err(_) => snapshot_indexer(source.as_ref(), &config).await?,
                         }
@@ -205,8 +205,8 @@ impl ConnectedQuoteClient {
             &buffered,
             recovery_event_sink.as_ref(),
             checkpoint_recovered,
-        )
-        .await?;
+            &stats,
+        )?;
         initial.apply_handoff(buffered)?;
         if !wait_for_source_active(&mut source_active_rx, &mut bootstrap_cancel).await {
             return Err(SourceError::Unavailable(

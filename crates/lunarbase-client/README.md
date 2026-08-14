@@ -30,3 +30,6 @@ client.shutdown().await;
 - Quote calls read one coherent in-memory state snapshot.
 - `ChainDataSource` covers bootstrap, backfill, ordered updates, and checkpoint validation.
 - Gaps and canonical mismatches suspend readiness until recovery completes.
+- `connect` creates no event-delivery queue. The explicitly enabled event
+  observer is best-effort and nonblocking; use `lunarbase-event-worker` for
+  durable logs.

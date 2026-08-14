@@ -1,15 +1,17 @@
-//! Ownership-preserving delivery helpers for the optional Core event sink.
+//! Ownership-preserving delivery helpers for the optional Core event observer.
 
-use crate::indexer::client_types::CoreEventSink;
+use crate::indexer::client_types::{ClientRuntimeStats, CoreEventSink};
 use crate::indexer::engine::{QuoteIndexer, validate_core_log_identity};
 use crate::indexer::errors::IndexerError;
 use crate::model::{ChainUpdate, ContractLog};
+use std::sync::atomic::Ordering;
 
-pub(super) async fn emit_handoff_events(
+pub(super) fn emit_handoff_events(
     indexer: &mut QuoteIndexer,
     buffered: &[ChainUpdate],
     core_event_sink: Option<&CoreEventSink>,
     skip_canonical_covered: bool,
+    stats: &ClientRuntimeStats,
 ) -> Result<(), IndexerError> {
     let Some(core_event_sink) = core_event_sink else {
         return Ok(());
@@ -38,7 +40,7 @@ pub(super) async fn emit_handoff_events(
         if skip_canonical_covered && indexer.canonical_floor_covers_core_log(&log)? {
             continue;
         }
-        send_required_core_event(Some(core_event_sink), log).await?;
+        try_observe_core_event(Some(core_event_sink), log, stats);
     }
     Ok(())
 }
@@ -54,17 +56,15 @@ pub(super) fn same_core_event_identity(left: &ContractLog, right: &ContractLog) 
         && left.cursor.event_order() == right.cursor.event_order()
 }
 
-pub(super) async fn send_required_core_event(
+pub(super) fn try_observe_core_event(
     sink: Option<&CoreEventSink>,
     log: ContractLog,
-) -> Result<(), IndexerError> {
+    stats: &ClientRuntimeStats,
+) {
     if let Some(sink) = sink
         && sink.accepts(log.cursor.commitment)
+        && sink.sender.try_send(log).is_err()
     {
-        sink.sender
-            .send(log)
-            .await
-            .map_err(|_| IndexerError::EventSinkClosed)?;
+        stats.event_observer_drops.fetch_add(1, Ordering::Relaxed);
     }
-    Ok(())
 }

@@ -38,7 +38,10 @@ pub enum IndexerError {
     /// A thread panicked while holding the synchronous quote-state lock.
     #[error("runtime state lock was poisoned")]
     LockPoisoned,
-    /// The required Core event sink closed before accepting a recovery log.
+    /// Compatibility variant retained for callers matching the former required sink failure.
+    ///
+    /// The optional observer is now best-effort, so current client runtimes do
+    /// not return this error.
     #[error("required Core event sink closed")]
     EventSinkClosed,
 }

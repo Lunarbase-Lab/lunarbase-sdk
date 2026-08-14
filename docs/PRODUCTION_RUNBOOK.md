@@ -47,6 +47,9 @@ docker compose --env-file examples/indexer/.env -f examples/indexer/docker-compo
 curl -fsS http://127.0.0.1:8080/healthz
 curl -fsS http://127.0.0.1:8080/readyz
 curl -fsS http://127.0.0.1:8080/metrics
+curl -fsS http://127.0.0.1:9091/livez
+curl -fsS http://127.0.0.1:9091/readyz
+curl -fsS http://127.0.0.1:9091/metrics
 ```
 
 ## Monitoring

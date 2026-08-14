@@ -16,7 +16,6 @@ LUNARBASE_EXPECTED_IMPLEMENTATION=0x... \
 LUNARBASE_EXPECTED_IMPLEMENTATION_CODE_HASH=0x... \
 LUNARBASE_HTTP_RPC_URL=https://... \
 LUNARBASE_REALTIME_URL=wss://... \
-LUNARBASE_EVENT_LOG_MIN_COMMITMENT=realtime \
 make run
 ```
 
@@ -42,19 +41,18 @@ identity is uncertain, readiness is revoked until canonical recovery succeeds.
 selected fee class and skip router whitelist/partner RPCs. Set it only when the
 API must include a chain-verified partner/treasury allocation.
 
-## Event logging
+## Event delivery
 
-`event_log_min_commitment` (or
-`LUNARBASE_EVENT_LOG_MIN_COMMITMENT`/`--event-log-min-commitment`) accepts
-`realtime`, `canonical`, or `finalized` and defaults to `realtime`. The reducer
-applies an accepted source update and releases the state lock before awaiting
-the bounded event logger, so the current quote-state update has priority.
+The quote service does not create an event queue, format protocol logs, write
+stdout events, or wait for an event consumer. Run the standalone
+[`lunarbase-event-worker`](../lunarbase-event-worker/README.md) for durable
+Redis Stream delivery. It owns independent source connections, resource
+limits, health, and metrics, so event backpressure cannot delay quotes.
 
-Commitment is never synthesized. EVM, Base, and Arbitrum live subscriptions
-normally emit realtime logs, so selecting `canonical` or `finalized` filters
-those live logs; canonical recovery/backfill logs can still pass a `canonical`
-threshold. Startup output reports the selected threshold and warns when a
-higher threshold suppresses the selected network's normal live logs.
+Applications embedding `ConnectedQuoteClient` may explicitly enable its
+embedded best-effort observer. That observer uses nonblocking delivery and drops
+when its channel is full or closed; `event_observer_drops` records those drops.
+It is intended for diagnostics, never for required event processing.
 
 ## Checkpoints
 

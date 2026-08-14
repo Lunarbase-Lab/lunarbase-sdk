@@ -3,8 +3,9 @@
 use clap::{Args, Parser};
 use lunarbase_client::indexer::client_types::ClientConnectConfig;
 use lunarbase_client::model::{
-    Commitment, ContractFilter, DeploymentConfig, MATH_COMPATIBILITY_VERSION, Network,
+    ContractFilter, DeploymentConfig, MATH_COMPATIBILITY_VERSION, Network,
 };
+use lunarbase_client::protocol::abi::quote_critical_topics;
 use lunarbase_math::{Address, B256, FeeClass};
 use serde::Deserialize;
 use std::{net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
@@ -83,9 +84,6 @@ pub struct ConfigValues {
     /// Optional Redis URL used solely to accelerate restarts.
     #[arg(long, env = "LUNARBASE_REDIS_URL")]
     pub redis_url: Option<String>,
-    /// Lowest source-provided commitment written by the Core event logger.
-    #[arg(long, env = "LUNARBASE_EVENT_LOG_MIN_COMMITMENT")]
-    pub event_log_min_commitment: Option<String>,
     /// Period between best-effort full checkpoint writes.
     #[arg(long, env = "LUNARBASE_CHECKPOINT_INTERVAL_SECONDS")]
     pub checkpoint_interval_seconds: Option<u64>,
@@ -107,8 +105,6 @@ pub struct Config {
     pub bind: SocketAddr,
     /// Optional Redis checkpoint endpoint.
     pub redis_url: Option<String>,
-    /// Lowest source-provided commitment written by the Core event logger.
-    pub event_log_min_commitment: Commitment,
     /// Period between background checkpoint attempts.
     pub checkpoint_interval: Duration,
     /// Deadline shared by client shutdown and final checkpoint handling.
@@ -182,9 +178,6 @@ impl ConfigValues {
             .source_stall_timeout_milliseconds
             .or(self.source_stall_timeout_milliseconds);
         self.redis_url = overrides.redis_url.or(self.redis_url);
-        self.event_log_min_commitment = overrides
-            .event_log_min_commitment
-            .or(self.event_log_min_commitment);
         self.checkpoint_interval_seconds = overrides
             .checkpoint_interval_seconds
             .or(self.checkpoint_interval_seconds);
@@ -266,23 +259,6 @@ impl ConfigValues {
         if self.redis_url.as_deref().is_some_and(str::is_empty) {
             return invalid("redis_url", "empty URL is not valid");
         }
-        let event_log_min_commitment = match self
-            .event_log_min_commitment
-            .as_deref()
-            .unwrap_or("realtime")
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "realtime" => Commitment::Realtime,
-            "canonical" => Commitment::Canonical,
-            "finalized" => Commitment::Finalized,
-            _ => {
-                return invalid(
-                    "event_log_min_commitment",
-                    "expected realtime, canonical, or finalized",
-                );
-            }
-        };
         let http_rpc_url = required(self.http_rpc_url, "http_rpc_url")?;
         let realtime_url = required(self.realtime_url, "realtime_url")?;
         if http_rpc_url.is_empty() || realtime_url.is_empty() {
@@ -305,7 +281,7 @@ impl ConfigValues {
         let client = ClientConnectConfig {
             filter: ContractFilter {
                 address: core,
-                topics: Vec::new(),
+                topics: quote_critical_topics().to_vec(),
             },
             deployment,
             buffer_capacity: queue_bound,
@@ -322,7 +298,6 @@ impl ConfigValues {
             realtime_url,
             bind,
             redis_url: self.redis_url,
-            event_log_min_commitment,
             checkpoint_interval: Duration::from_secs(checkpoint_interval_seconds),
             shutdown_timeout: Duration::from_secs(shutdown_timeout_seconds),
         })
@@ -380,7 +355,7 @@ fn default_shutdown_seconds() -> u64 {
 mod tests {
     use super::{Cli, ConfigError, ConfigValues};
     use clap::Parser;
-    use lunarbase_client::model::Commitment;
+    use lunarbase_client::protocol::abi::quote_critical_topics;
 
     const CORE: &str = "0x0000000000000000000000000000000000000001";
     const ROUTER: &str = "0x0000000000000000000000000000000000000002";
@@ -411,10 +386,10 @@ mod tests {
             config.client.deployment.fee_class,
             lunarbase_math::FeeClass::Whitelisted
         );
-        assert_eq!(config.event_log_min_commitment, Commitment::Realtime);
-        assert!(
-            config.client.filter.topics.is_empty(),
-            "the runnable indexer must receive every Core event"
+        assert_eq!(
+            config.client.filter.topics,
+            quote_critical_topics(),
+            "the runnable indexer subscribes only to quote-critical events"
         );
     }
 
@@ -446,27 +421,6 @@ mod tests {
         assert!(matches!(
             ConfigValues::default().validate(),
             Err(ConfigError::Missing("network"))
-        ));
-    }
-
-    #[test]
-    fn parses_event_log_minimum_commitment() {
-        let mut values = complete_values();
-        values.event_log_min_commitment = Some("CaNoNiCaL".into());
-        let config = values.validate().unwrap();
-        assert_eq!(config.event_log_min_commitment, Commitment::Canonical);
-    }
-
-    #[test]
-    fn rejects_unknown_event_log_commitment() {
-        let mut values = complete_values();
-        values.event_log_min_commitment = Some("safe".into());
-        assert!(matches!(
-            values.validate(),
-            Err(ConfigError::Invalid {
-                field: "event_log_min_commitment",
-                ..
-            })
         ));
     }
 }

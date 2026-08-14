@@ -64,10 +64,10 @@ impl ClientConnectConfig {
     }
 }
 
-/// Selects which ordered Core logs are forwarded to a required event sink.
+/// Selects which ordered Core logs are offered to the optional observer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CoreEventSinkPolicy {
-    /// Lowest source-provided commitment accepted by the event sink.
+    /// Lowest source-provided commitment accepted by the observer.
     pub minimum_commitment: Commitment,
 }
 
@@ -220,6 +220,8 @@ pub(super) struct ClientRuntimeStats {
     pub(super) recoveries: AtomicU64,
     /// Number of canonical recovery attempts that failed.
     pub(super) recovery_failures: AtomicU64,
+    /// Logs dropped because the optional observer queue was full or closed.
+    pub(super) event_observer_drops: AtomicU64,
     /// Unix milliseconds when the pump last delivered a normalized update.
     pub(super) last_source_update_unix_millis: AtomicU64,
 }
@@ -234,6 +236,7 @@ impl ClientRuntimeStats {
             gaps: AtomicU64::new(0),
             recoveries: AtomicU64::new(0),
             recovery_failures: AtomicU64::new(0),
+            event_observer_drops: AtomicU64::new(0),
             last_source_update_unix_millis: AtomicU64::new(0),
         }
     }
@@ -247,6 +250,7 @@ impl ClientRuntimeStats {
             gaps: self.gaps.load(Ordering::Relaxed),
             recoveries: self.recoveries.load(Ordering::Relaxed),
             recovery_failures: self.recovery_failures.load(Ordering::Relaxed),
+            event_observer_drops: self.event_observer_drops.load(Ordering::Relaxed),
             last_source_update_unix_millis: self
                 .last_source_update_unix_millis
                 .load(Ordering::Relaxed),
@@ -269,6 +273,8 @@ pub struct ClientRuntimeStatsSnapshot {
     pub recoveries: u64,
     /// Number of canonical recovery attempts that failed.
     pub recovery_failures: u64,
+    /// Logs dropped by the explicitly enabled best-effort event observer.
+    pub event_observer_drops: u64,
     /// Unix milliseconds when a normalized source update was last queued.
     pub last_source_update_unix_millis: u64,
 }

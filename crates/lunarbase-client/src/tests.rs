@@ -4,7 +4,7 @@ use crate::bootstrap::BootstrapSnapshot;
 use crate::indexer::client::ConnectedQuoteClient;
 use crate::indexer::client_types::{ClientConnectConfig, CoreEventSinkPolicy};
 use crate::indexer::engine::QuoteIndexer;
-use crate::indexer::errors::{ClientRuntimeEvent, IndexerError};
+use crate::indexer::errors::IndexerError;
 use crate::model::{
     BackfillRequest, ChainCursor, ChainUpdate, Checkpoint, Commitment, ContractFilter, ContractLog,
     DeploymentConfig, MATH_COMPATIBILITY_VERSION, Network, SourceError,
@@ -218,28 +218,31 @@ async fn checkpoint_recovery_delivers_each_backfill_log_once() {
 }
 
 #[tokio::test]
-async fn closed_event_sink_is_fatal_during_checkpoint_recovery() {
+async fn closed_event_observer_does_not_block_checkpoint_recovery() {
     let checkpoint = checkpoint_before_recovery().await;
     let source = Arc::new(MockSource::new(None));
     source.set_backfill_logs(vec![unknown_log(100)]);
     let (event_sender, event_receiver) = mpsc::channel(1);
     drop(event_receiver);
 
-    let result = ConnectedQuoteClient::connect_with_event_sink(
+    let client = ConnectedQuoteClient::connect_with_event_sink(
         config(),
         source.clone(),
         Some(checkpoint),
         event_sender,
     )
-    .await;
+    .await
+    .unwrap();
 
-    assert!(matches!(result, Err(IndexerError::EventSinkClosed)));
+    assert_eq!(client.runtime_stats().event_observer_drops, 1);
+    assert!(client.is_ready());
     assert_eq!(source.backfill_calls.load(Ordering::Relaxed), 1);
     assert_eq!(
         source.snapshot_calls.load(Ordering::Relaxed),
         0,
-        "fatal sink closure must not fall back to a snapshot"
+        "observer closure must not fall back to a snapshot"
     );
+    client.shutdown().await;
 }
 
 async fn checkpoint_before_recovery() -> Checkpoint {
@@ -289,7 +292,7 @@ async fn subscription_event_during_snapshot_is_applied_after_handoff() {
 }
 
 #[tokio::test]
-async fn closed_required_event_sink_aborts_bootstrap() {
+async fn closed_event_observer_does_not_abort_bootstrap() {
     let gate = Arc::new(Notify::new());
     let source = Arc::new(MockSource::new(Some(gate.clone())));
     let (event_sender, event_receiver) = mpsc::channel(1);
@@ -304,14 +307,10 @@ async fn closed_required_event_sink_aborts_bootstrap() {
     source.publish(ChainUpdate::Log(unknown_log(101)));
     gate.notify_waiters();
 
-    let error = match task.await.unwrap() {
-        Ok(client) => {
-            client.shutdown().await;
-            panic!("closed required event sink unexpectedly connected")
-        }
-        Err(error) => error,
-    };
-    assert!(matches!(error, IndexerError::EventSinkClosed));
+    let client = task.await.unwrap().unwrap();
+    assert_eq!(client.runtime_stats().event_observer_drops, 1);
+    assert!(client.is_ready());
+    client.shutdown().await;
 }
 
 #[tokio::test]
@@ -407,14 +406,13 @@ async fn recovery_emits_backfill_before_buffered_live_logs_once() {
 }
 
 #[tokio::test]
-async fn closed_event_sink_is_fatal_during_live_gap_recovery() {
+async fn closed_event_observer_does_not_block_live_gap_recovery() {
     let source = Arc::new(MockSource::new(None));
     let (event_sender, event_receiver) = mpsc::channel(1);
     let client =
         ConnectedQuoteClient::connect_with_event_sink(config(), source.clone(), None, event_sender)
             .await
             .unwrap();
-    let mut runtime_events = client.subscribe_runtime_events();
     source.set_snapshot_block(101);
     source.set_backfill_logs(vec![unknown_log(101)]);
     drop(event_receiver);
@@ -422,23 +420,13 @@ async fn closed_event_sink_is_fatal_during_live_gap_recovery() {
 
     source.publish(ChainUpdate::Gap {
         cursor: None,
-        reason: "intentional fatal event replay gap".into(),
+        reason: "intentional event replay gap".into(),
     });
 
-    tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            if matches!(
-                runtime_events.recv().await.unwrap(),
-                ClientRuntimeEvent::BackgroundTaskStopped { task: "reducer" }
-            ) {
-                break;
-            }
-        }
-    })
-    .await
-    .unwrap();
-    assert!(!client.is_ready());
-    assert_eq!(client.runtime_stats().recovery_failures, 1);
+    wait_until(|| client.runtime_stats().recoveries >= 1).await;
+    assert!(client.is_ready());
+    assert_eq!(client.runtime_stats().recovery_failures, 0);
+    assert_eq!(client.runtime_stats().event_observer_drops, 1);
     client.shutdown().await;
 }
 

@@ -25,7 +25,6 @@ LUNARBASE_EXPECTED_IMPLEMENTATION=0x... \
 LUNARBASE_EXPECTED_IMPLEMENTATION_CODE_HASH=0x... \
 LUNARBASE_HTTP_RPC_URL=https://... \
 LUNARBASE_REALTIME_URL=wss://... \
-LUNARBASE_EVENT_LOG_MIN_COMMITMENT=realtime \
 lunarbase-indexer
 ```
 
@@ -37,14 +36,17 @@ endpoints are always explicit.
 `fee_class` is mandatory. `verified_router` is optional and enables the exact
 partner/treasury allocation; class-only deployments avoid its snapshot RPCs.
 
-The Core event logger accepts `realtime`, `canonical`, or `finalized` through
-`LUNARBASE_EVENT_LOG_MIN_COMMITMENT`. Commitment comes from the source; choosing
-`canonical` on Base therefore suppresses normal realtime live logs.
+The quote indexer intentionally has no event-delivery configuration or logger
+queue. Durable protocol events are handled by the separate
+`lunarbase-event-worker`, whose commitment policy uses
+`LUNARBASE_EVENT_MIN_COMMITMENT`.
 
 The adjacent [`prometheus-alerts.yml`](prometheus-alerts.yml) is an example for
 external monitoring and is not loaded by the indexer.
 
 For the Compose topology, copy [`.env.example`](.env.example) to `.env`,
-fill its required deployment values, and pass it with `--env-file`. The mounted
-TOML supplies Base runtime defaults; the environment supplies deployment
-identity and source endpoints.
+fill its required deployment values, and pass it with `--env-file`. Compose
+runs the quote indexer and durable event worker as separate processes with
+independent source connections, queues, health endpoints, and Redis resources.
+The mounted TOML supplies Base quote runtime defaults; the environment supplies
+deployment identity and both services' source endpoints.

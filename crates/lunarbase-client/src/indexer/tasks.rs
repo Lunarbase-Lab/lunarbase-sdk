@@ -8,7 +8,7 @@ use crate::indexer::engine::{
     QuoteIndexer, validate_core_log_identity, validate_core_recovery_log,
 };
 use crate::indexer::errors::{ClientRuntimeEvent, IndexerError};
-use crate::indexer::event_delivery::{same_core_event_identity, send_required_core_event};
+use crate::indexer::event_delivery::{same_core_event_identity, try_observe_core_event};
 use crate::model::{BackfillRequest, ChainUpdate, Commitment, ContractFilter, ContractLog};
 use crate::source::{ChainDataSource, SourceStream};
 use crate::state::reducer::ReducerError;
@@ -25,7 +25,7 @@ pub(super) struct ReducerRuntime {
     pub events: broadcast::Sender<ClientRuntimeEvent>,
     /// Lock-free runtime counters updated by the single reducer task.
     pub stats: Arc<ClientRuntimeStats>,
-    /// Optional required, commitment-filtered Core event sink.
+    /// Optional nonblocking, commitment-filtered Core event observer.
     pub core_event_sink: Option<CoreEventSink>,
 }
 
@@ -254,17 +254,8 @@ pub(super) async fn reducer_loop<S>(
             return;
         };
         runtime.stats.queue_depth.fetch_sub(1, Ordering::Relaxed);
-        let result = apply_live_update(shared.as_ref(), update, &runtime).await;
+        let result = apply_live_update(shared.as_ref(), update, &runtime);
         if let Err(error) = result {
-            if matches!(error, IndexerError::EventSinkClosed) {
-                shared.available.store(false, Ordering::Release);
-                shared.ready.notify_waiters();
-                publish(
-                    &runtime.events,
-                    ClientRuntimeEvent::BackgroundTaskStopped { task: "reducer" },
-                );
-                return;
-            }
             shared.available.store(false, Ordering::Release);
             runtime.stats.gaps.fetch_add(1, Ordering::Relaxed);
             publish(
@@ -290,7 +281,7 @@ pub(super) async fn reducer_loop<S>(
     }
 }
 
-async fn apply_live_update(
+fn apply_live_update(
     shared: &SharedQuoteState,
     update: ChainUpdate,
     runtime: &ReducerRuntime,
@@ -316,7 +307,7 @@ async fn apply_live_update(
         }
     };
     if let Some(log) = event_log {
-        send_required_core_event(runtime.core_event_sink.as_ref(), log).await?;
+        try_observe_core_event(runtime.core_event_sink.as_ref(), log, &runtime.stats);
     }
     Ok(())
 }
@@ -382,8 +373,8 @@ async fn recover_until_ready<S: ChainDataSource>(
                     buffered,
                     backfill_logs,
                     runtime.core_event_sink.as_ref(),
-                )
-                .await;
+                    &runtime.stats,
+                );
                 match result {
                     Ok(()) => {
                         runtime.stats.recoveries.fetch_add(1, Ordering::Relaxed);
@@ -393,11 +384,7 @@ async fn recover_until_ready<S: ChainDataSource>(
                         return true;
                     }
                     Err(error) => {
-                        let terminal = matches!(error, IndexerError::EventSinkClosed);
                         record_recovery_failure(error, &runtime.events, &runtime.stats);
-                        if terminal {
-                            return false;
-                        }
                     }
                 }
             }
@@ -446,17 +433,18 @@ async fn load_recovery_events<S: ChainDataSource>(
     Ok(logs)
 }
 
-async fn install_recovered_state(
+fn install_recovered_state(
     shared: &SharedQuoteState,
     snapshot: crate::bootstrap::BootstrapSnapshot,
     mut buffered: Vec<ChainUpdate>,
     backfill_logs: Vec<ContractLog>,
     core_event_sink: Option<&CoreEventSink>,
+    stats: &ClientRuntimeStats,
 ) -> Result<(), IndexerError> {
     crate::indexer::engine::sort_chain_updates(&mut buffered);
 
-    // Validate the complete transition privately. Shared quote state remains
-    // unavailable until every policy-accepted event crosses the bounded sink.
+    // Validate the complete transition privately before publishing it. The
+    // optional observer is offered logs without delaying state publication.
     let mut candidate = shared
         .indexer
         .read()
@@ -478,7 +466,7 @@ async fn install_recovered_state(
             candidate.deployment().core,
             candidate.deployment().chain_id,
         )?;
-        send_required_core_event(core_event_sink, log).await?;
+        try_observe_core_event(core_event_sink, log, stats);
     }
 
     *shared
@@ -507,6 +495,7 @@ pub(super) async fn recover_checkpoint<S: ChainDataSource>(
     source: &S,
     filter: &ContractFilter,
     core_event_sink: Option<&CoreEventSink>,
+    stats: &ClientRuntimeStats,
 ) -> Result<(), IndexerError> {
     let checkpoint_cursor = indexer
         .reducer
@@ -550,7 +539,7 @@ pub(super) async fn recover_checkpoint<S: ChainDataSource>(
             }
             if core_event_sink.is_some_and(|sink| sink.accepts(log.cursor.commitment)) {
                 if let Some(log) = indexer.apply_core_log_for_delivery(log)? {
-                    send_required_core_event(core_event_sink, log).await?;
+                    try_observe_core_event(core_event_sink, log, stats);
                 }
             } else {
                 indexer.apply_core_update(ChainUpdate::Log(log))?;
