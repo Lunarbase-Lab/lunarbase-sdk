@@ -8,6 +8,7 @@ use crate::indexer::engine::{
     QuoteIndexer, validate_core_log_identity, validate_core_recovery_log,
 };
 use crate::indexer::errors::{ClientRuntimeEvent, IndexerError};
+use crate::indexer::event_delivery::{same_core_event_identity, send_required_core_event};
 use crate::model::{BackfillRequest, ChainUpdate, Commitment, ContractFilter, ContractLog};
 use crate::source::{ChainDataSource, SourceStream};
 use crate::state::reducer::ReducerError;
@@ -294,28 +295,30 @@ async fn apply_live_update(
     update: ChainUpdate,
     runtime: &ReducerRuntime,
 ) -> Result<(), IndexerError> {
-    let (apply_result, event_log) = {
+    let event_log = {
         let mut indexer = shared
             .indexer
             .write()
             .map_err(|_| IndexerError::LockPoisoned)?;
-        let event_log = if let ChainUpdate::Log(log) = &update {
-            let covered = indexer.canonical_floor_covers_core_log(log)?;
-            (!covered
-                && runtime
+        match update {
+            ChainUpdate::Log(log)
+                if runtime
                     .core_event_sink
                     .as_ref()
-                    .is_some_and(|sink| sink.accepts(log.cursor.commitment)))
-            .then(|| log.clone())
-        } else {
-            None
-        };
-        (indexer.apply_core_update(update), event_log)
+                    .is_some_and(|sink| sink.accepts(log.cursor.commitment)) =>
+            {
+                indexer.apply_core_log_for_delivery(log)?
+            }
+            update => {
+                indexer.apply_core_update(update)?;
+                None
+            }
+        }
     };
     if let Some(log) = event_log {
         send_required_core_event(runtime.core_event_sink.as_ref(), log).await?;
     }
-    apply_result
+    Ok(())
 }
 
 async fn recover_until_ready<S: ChainDataSource>(
@@ -459,13 +462,14 @@ async fn install_recovered_state(
         .read()
         .map_err(|_| IndexerError::LockPoisoned)?
         .clone();
-    candidate.bootstrap_normalized(snapshot, buffered.clone())?;
-
     let mut ordered_logs = backfill_logs;
-    ordered_logs.extend(buffered.iter().filter_map(|update| match update {
-        ChainUpdate::Log(log) => Some(log.clone()),
-        _ => None,
-    }));
+    if let Some(sink) = core_event_sink {
+        ordered_logs.extend(buffered.iter().filter_map(|update| match update {
+            ChainUpdate::Log(log) if sink.accepts(log.cursor.commitment) => Some(log.clone()),
+            _ => None,
+        }));
+    }
+    candidate.bootstrap_normalized(snapshot, buffered)?;
     ordered_logs.sort_by_key(|log| log.cursor.event_order());
     ordered_logs.dedup_by(|right, left| same_core_event_identity(left, right));
     for log in ordered_logs {
@@ -481,65 +485,6 @@ async fn install_recovered_state(
         .indexer
         .write()
         .map_err(|_| IndexerError::LockPoisoned)? = candidate;
-    Ok(())
-}
-
-pub(super) async fn emit_handoff_events(
-    indexer: &mut QuoteIndexer,
-    buffered: &[ChainUpdate],
-    core_event_sink: Option<&CoreEventSink>,
-    skip_canonical_covered: bool,
-) -> Result<(), IndexerError> {
-    for update in buffered {
-        if let ChainUpdate::Log(log) = update {
-            validate_core_log_identity(
-                log,
-                indexer.deployment().core,
-                indexer.deployment().chain_id,
-            )?;
-        }
-    }
-    let mut logs = buffered
-        .iter()
-        .filter_map(|update| match update {
-            ChainUpdate::Log(log) => Some(log.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    logs.sort_by_key(|log| log.cursor.event_order());
-    logs.dedup_by(|right, left| same_core_event_identity(left, right));
-    for log in logs {
-        if skip_canonical_covered && indexer.canonical_floor_covers_core_log(&log)? {
-            continue;
-        }
-        send_required_core_event(core_event_sink, log).await?;
-    }
-    Ok(())
-}
-
-fn same_core_event_identity(left: &ContractLog, right: &ContractLog) -> bool {
-    left.address == right.address
-        && left.transaction_hash == right.transaction_hash
-        && left.topics == right.topics
-        && left.data == right.data
-        && left.removed == right.removed
-        && left.cursor.chain_id == right.cursor.chain_id
-        && left.cursor.block_hash == right.cursor.block_hash
-        && left.cursor.event_order() == right.cursor.event_order()
-}
-
-async fn send_required_core_event(
-    sink: Option<&CoreEventSink>,
-    log: ContractLog,
-) -> Result<(), IndexerError> {
-    if let Some(sink) = sink
-        && sink.accepts(log.cursor.commitment)
-    {
-        sink.sender
-            .send(log)
-            .await
-            .map_err(|_| IndexerError::EventSinkClosed)?;
-    }
     Ok(())
 }
 
@@ -603,8 +548,13 @@ pub(super) async fn recover_checkpoint<S: ChainDataSource>(
             if log.cursor.event_order() <= checkpoint_cursor.event_order() {
                 continue;
             }
-            send_required_core_event(core_event_sink, log.clone()).await?;
-            indexer.apply_core_update(ChainUpdate::Log(log))?;
+            if core_event_sink.is_some_and(|sink| sink.accepts(log.cursor.commitment)) {
+                if let Some(log) = indexer.apply_core_log_for_delivery(log)? {
+                    send_required_core_event(core_event_sink, log).await?;
+                }
+            } else {
+                indexer.apply_core_update(ChainUpdate::Log(log))?;
+            }
         }
     }
     indexer.apply_core_update(ChainUpdate::Head(head.clone()))?;

@@ -6,10 +6,11 @@ use crate::indexer::client_types::{
 };
 use crate::indexer::engine::QuoteIndexer;
 use crate::indexer::errors::{ClientRuntimeEvent, IndexerError};
+use crate::indexer::event_delivery::emit_handoff_events;
 use crate::indexer::quote_types::{ClientBatchQuote, ClientQuote, IndexerHealth};
 use crate::indexer::tasks::{
-    ReducerRuntime, SourcePumpRuntime, emit_handoff_events, recover_checkpoint, reducer_loop,
-    source_pump, wait_for_source_active,
+    ReducerRuntime, SourcePumpRuntime, recover_checkpoint, reducer_loop, source_pump,
+    wait_for_source_active,
 };
 use crate::model::{Checkpoint, Commitment, ContractLog, SourceError};
 use crate::source::ChainDataSource;

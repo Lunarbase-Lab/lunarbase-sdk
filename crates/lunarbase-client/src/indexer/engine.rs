@@ -10,9 +10,8 @@ use crate::model::{
 use crate::protocol::abi::decode_core_event;
 use crate::state::reducer::{QuoteReducer, ReducerError};
 use lunarbase_math::arithmetic::BPS;
-use lunarbase_math::quote;
 use lunarbase_math::{
-    Address, B256, FeeClass, QuoteMode, QuoteOutcome, QuotePolicy, QuoteRequest, QuoteState, U256,
+    Address, B256, FeeClass, QuoteMode, QuotePolicy, QuoteRequest, QuoteState, U256, quote,
 };
 use std::ops::RangeInclusive;
 use std::sync::Arc;
@@ -86,17 +85,15 @@ impl PreparedQuoteSnapshot {
         requests: &[QuoteRequest],
     ) -> Result<ClientBatchQuote, IndexerError> {
         let execution_block_number = self.cursor.execution_block_number;
-        let outcomes = requests
-            .iter()
-            .map(|request| {
-                quote(
-                    request,
-                    execution_block_number,
-                    self.state.as_ref(),
-                    self.policy_for(request),
-                )
-            })
-            .collect::<Result<Vec<QuoteOutcome>, _>>()?;
+        let mut outcomes = Vec::with_capacity(requests.len());
+        for request in requests {
+            outcomes.push(quote(
+                request,
+                execution_block_number,
+                self.state.as_ref(),
+                self.policy_for(request),
+            )?);
+        }
         Ok(ClientBatchQuote {
             outcomes,
             cursor: self.cursor,
@@ -299,6 +296,35 @@ impl QuoteIndexer {
     pub fn apply_core_update(&mut self, update: ChainUpdate) -> Result<(), IndexerError> {
         self.validate_core_update_identity(&update)?;
         self.apply_validated_core_update(update)
+    }
+
+    /// Applies a log and retains its payload allocation for event delivery.
+    pub(crate) fn apply_core_log_for_delivery(
+        &mut self,
+        log: ContractLog,
+    ) -> Result<Option<ContractLog>, IndexerError> {
+        if let Err(error) =
+            validate_core_log_identity(&log, self.deployment.core, self.deployment.chain_id)
+        {
+            self.reducer.mark_not_ready();
+            return Err(error);
+        }
+        if log.removed {
+            self.reducer.mark_not_ready();
+            return Err(ReducerError::RemovedLog.into());
+        }
+        if let Some(floor) = self.canonical_floor.as_ref()
+            && canonical_floor_covers_log(&log.cursor, floor)?
+        {
+            return Ok(None);
+        }
+        if let Some(event) = decode_core_event(&log)?
+            && let Err(error) = self.reducer.apply(log.cursor.clone(), event)
+        {
+            self.reducer.mark_not_ready();
+            return Err(error.into());
+        }
+        Ok(Some(log))
     }
 
     fn apply_validated_core_update(&mut self, update: ChainUpdate) -> Result<(), IndexerError> {
