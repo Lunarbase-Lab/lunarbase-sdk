@@ -202,19 +202,29 @@ async fn recover<S: ChainDataSource>(
             head.block_number
         )));
     }
-    let mut logs = source
-        .backfill(BackfillRequest {
-            from_block,
-            to_block: head.block_number,
-            filter: filter.clone(),
-        })
-        .await?;
-    logs.sort_by_key(|log| log.cursor.event_order());
-    for log in logs {
-        validate_recovery_log(&log, config, from_block, head.block_number)?;
-        if persist_log(log, config, store, metrics, shutdown).await? == Transition::Shutdown {
-            return Ok(Transition::Shutdown);
+    let mut page_start = from_block;
+    loop {
+        let page_end = page_start
+            .saturating_add(config.backfill_page_blocks.saturating_sub(1))
+            .min(head.block_number);
+        let mut logs = source
+            .backfill(BackfillRequest {
+                from_block: page_start,
+                to_block: page_end,
+                filter: filter.clone(),
+            })
+            .await?;
+        logs.sort_by_key(|log| log.cursor.event_order());
+        for log in logs {
+            validate_recovery_log(&log, config, page_start, page_end)?;
+            if persist_log(log, config, store, metrics, shutdown).await? == Transition::Shutdown {
+                return Ok(Transition::Shutdown);
+            }
         }
+        if page_end == head.block_number {
+            break;
+        }
+        page_start = page_end.saturating_add(1);
     }
 
     while let Ok(queued) = receiver.try_recv() {

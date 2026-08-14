@@ -59,11 +59,15 @@ Operational endpoints are independent of the quote indexer:
 - `GET /readyz` — source/recovery/Redis continuity;
 - `GET /metrics` — Prometheus counters and gauges.
 
-`realtime`, `block-ordered`, and `finalized` select the minimum source
-commitment accepted by the worker. A source cannot promote an already emitted
-log retroactively. Until a network adapter implements the corresponding
-delivery mode, a higher threshold may receive events only during canonical
-recovery.
+For EVM, Base, and Arbitrum, `realtime`, `block-ordered`, and `finalized`
+select the source delivery mode rather than filtering one realtime stream.
+Realtime preserves provider receive order, block-ordered closes and sorts an
+executed block before publishing it, and finalized follows the HTTP finalized
+watermark with bounded backfill pages. `LUNARBASE_EVENT_BACKFILL_PAGE_BLOCKS`
+bounds both recovery and finalized catch-up requests (default `1000`).
+
+Provider retractions are persisted as `operation=removed` before the worker
+enters canonical recovery, so consumers can observe both lifecycle edges.
 
 ## Redis schema v1
 

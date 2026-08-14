@@ -1,11 +1,12 @@
 use super::protocol::WsHead;
 use crate::rpc::backend::RpcHttpBackend;
 use lunarbase_client::{
-    model::{ChainCursor, ChainUpdate, Commitment, Network, SourceError},
+    model::{ChainCursor, ChainUpdate, Commitment, ContractLog, Network, SourceError},
     state::ordering::CursorReorderBuffer,
 };
 use std::{
     collections::{BTreeMap, VecDeque},
+    ops::RangeInclusive,
     time::{Duration, Instant},
 };
 
@@ -40,6 +41,83 @@ pub(super) fn take_ready_standard_head(
         return None;
     }
     open_heads.pop_front().map(|(_, head)| head)
+}
+
+pub(super) fn promote_updates(updates: &mut [ChainUpdate], commitment: Commitment) {
+    for update in updates {
+        match update {
+            ChainUpdate::Head(cursor) => cursor.commitment = commitment,
+            ChainUpdate::Log(log) => log.cursor.commitment = commitment,
+            ChainUpdate::Reorg { .. } | ChainUpdate::Gap { .. } => {}
+        }
+    }
+}
+
+pub(super) fn retraction_updates(log: ContractLog) -> [ChainUpdate; 2] {
+    let cursor = log.cursor.clone();
+    [
+        ChainUpdate::Log(log),
+        ChainUpdate::Gap {
+            cursor: Some(cursor),
+            reason: "RPC retracted a subscription log; canonical recovery required".into(),
+        },
+    ]
+}
+
+pub(super) fn validate_finalized_advance(
+    previous: &ChainCursor,
+    next: &ChainCursor,
+) -> Result<bool, SourceError> {
+    if next.commitment != Commitment::Finalized {
+        return Err(SourceError::Gap(
+            "finalized RPC watermark has weaker commitment".into(),
+        ));
+    }
+    if next.block_number < previous.block_number
+        || (next.block_number == previous.block_number && next.block_hash != previous.block_hash)
+    {
+        return Err(SourceError::Gap(
+            "finalized RPC watermark regressed or changed branch".into(),
+        ));
+    }
+    Ok(next.block_number > previous.block_number)
+}
+
+pub(super) fn backfill_pages(
+    from_block: u64,
+    to_block: u64,
+    page_blocks: u64,
+) -> impl Iterator<Item = RangeInclusive<u64>> {
+    debug_assert!(page_blocks > 0);
+    let mut next = Some(from_block);
+    std::iter::from_fn(move || {
+        let start = next?;
+        if start > to_block {
+            return None;
+        }
+        let end = start
+            .saturating_add(page_blocks.saturating_sub(1))
+            .min(to_block);
+        next = (end < to_block).then(|| end + 1);
+        Some(start..=end)
+    })
+}
+
+pub(super) fn validate_finalized_page(
+    mut logs: Vec<ContractLog>,
+    page: &RangeInclusive<u64>,
+) -> Result<Vec<ContractLog>, SourceError> {
+    if logs.iter().any(|log| {
+        log.removed
+            || log.cursor.commitment != Commitment::Finalized
+            || !page.contains(&log.cursor.block_number)
+    }) {
+        return Err(SourceError::Gap(
+            "finalized RPC backfill returned an invalid page".into(),
+        ));
+    }
+    logs.sort_by_key(|log| log.cursor.event_order());
+    Ok(logs)
 }
 
 pub(super) fn drain_completed_block(

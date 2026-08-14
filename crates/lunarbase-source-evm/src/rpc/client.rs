@@ -229,6 +229,58 @@ impl RpcHttpClient {
         normalize_block_cursor(result, chain_id, commitment, true)
     }
 
+    /// Resolves an execution-aware cursor by exact block hash, including provisional branches.
+    pub async fn block_cursor_by_hash_with_execution_context(
+        &self,
+        block_hash: B256,
+        chain_id: u64,
+        commitment: Commitment,
+    ) -> Result<ChainCursor, RpcError> {
+        let hash = format!("{block_hash:#x}");
+        let request_id = format!("execution-context:{hash}");
+        let response = self
+            .http
+            .post(self.endpoint())
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": &request_id,
+                "method": "eth_getBlockByHash",
+                "params": [&hash, false],
+            }))
+            .send()
+            .await
+            .map_err(|error| RpcError::Transport(error.to_string()))?
+            .error_for_status()
+            .map_err(|error| RpcError::Transport(error.to_string()))?
+            .json::<Value>()
+            .await
+            .map_err(|error| RpcError::Invalid(format!("invalid JSON-RPC response: {error}")))?;
+        if response.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+            || response.get("id").and_then(Value::as_str) != Some(request_id.as_str())
+        {
+            return Err(RpcError::Invalid(
+                "JSON-RPC execution-context response identity mismatch".into(),
+            ));
+        }
+        if let Some(error) = response.get("error").filter(|error| !error.is_null()) {
+            return Err(RpcError::Transport(format!(
+                "JSON-RPC returned an error: {error}"
+            )));
+        }
+        let result = response
+            .get("result")
+            .ok_or_else(|| RpcError::Invalid("JSON-RPC response has no result".into()))?;
+        validate_canonical_hex_u64(result.get("number"), "block.number")?;
+        validate_canonical_hex_u64(result.get("l1BlockNumber"), "block.l1BlockNumber")?;
+        let cursor = normalize_block_cursor(result, chain_id, commitment, true)?;
+        if cursor.block_hash != Some(block_hash) {
+            return Err(RpcError::Invalid(
+                "execution-context block hash mismatch".into(),
+            ));
+        }
+        Ok(cursor)
+    }
+
     async fn block_cursor_inner(
         &self,
         block_tag: &str,

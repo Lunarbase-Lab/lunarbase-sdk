@@ -16,6 +16,7 @@ name = "lunarbase_source_arbitrum"
 workspace = true
 
 [dependencies]
+alloy-primitives.workspace = true
 futures-util.workspace = true
 lunarbase-client.workspace = true
 lunarbase-source-evm.workspace = true

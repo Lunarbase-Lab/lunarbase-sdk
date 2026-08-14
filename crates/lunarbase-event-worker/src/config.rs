@@ -61,6 +61,13 @@ pub(crate) struct Cli {
         default_value_t = 4096
     )]
     source_queue_bound: usize,
+    /// Maximum inclusive block span requested by one recovery page.
+    #[arg(
+        long,
+        env = "LUNARBASE_EVENT_BACKFILL_PAGE_BLOCKS",
+        default_value_t = 1_000
+    )]
+    backfill_page_blocks: u64,
     /// Maximum commands waiting for the dedicated blocking Redis connection.
     #[arg(long, env = "LUNARBASE_EVENT_REDIS_QUEUE_BOUND", default_value_t = 8)]
     redis_queue_bound: usize,
@@ -115,6 +122,7 @@ pub(crate) struct Config {
     pub minimum_commitment: Commitment,
     pub bind: SocketAddr,
     pub source_queue_bound: usize,
+    pub backfill_page_blocks: u64,
     pub redis_queue_bound: usize,
     pub reconnect_delay: Duration,
     pub source_stall_timeout: Duration,
@@ -186,6 +194,7 @@ impl Cli {
         }
         if self.chain_id == 0
             || self.source_queue_bound == 0
+            || self.backfill_page_blocks == 0
             || self.redis_queue_bound == 0
             || self.reconnect_delay_milliseconds == 0
             || self.source_stall_timeout_milliseconds == 0
@@ -211,6 +220,7 @@ impl Cli {
             minimum_commitment,
             bind: self.bind,
             source_queue_bound: self.source_queue_bound,
+            backfill_page_blocks: self.backfill_page_blocks,
             redis_queue_bound: self.redis_queue_bound,
             reconnect_delay: Duration::from_millis(self.reconnect_delay_milliseconds),
             source_stall_timeout: Duration::from_millis(self.source_stall_timeout_milliseconds),
@@ -243,8 +253,17 @@ mod tests {
             .validate()
             .unwrap();
         assert_eq!(valid.minimum_commitment, Commitment::Canonical);
+        assert_eq!(valid.backfill_page_blocks, 1_000);
 
         let error = Cli::try_parse_from(arguments("realtime", "0"))
+            .unwrap()
+            .validate()
+            .unwrap_err();
+        assert!(error.to_string().contains("resource_bounds"));
+
+        let mut zero_page = arguments("finalized", "8");
+        zero_page.extend(["--backfill-page-blocks", "0"]);
+        let error = Cli::try_parse_from(zero_page)
             .unwrap()
             .validate()
             .unwrap_err();

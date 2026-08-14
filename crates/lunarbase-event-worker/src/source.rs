@@ -35,13 +35,16 @@ async fn run_evm(
 ) -> Result<(), RuntimeError> {
     let rpc = lunarbase_source_evm::rpc::client::RpcHttpClient::new(config.http_rpc_url.clone())
         .map_err(SourceError::from)?;
-    let source = Arc::new(lunarbase_source_evm::ws::EvmRpcSource::new(
-        rpc,
-        config.realtime_url.clone(),
-        Network::Evm,
-        config.chain_id,
-        "latest",
-    ));
+    let source = Arc::new(
+        lunarbase_source_evm::ws::EvmRpcSource::with_delivery_mode(
+            rpc,
+            config.realtime_url.clone(),
+            Network::Evm,
+            config.chain_id,
+            delivery_mode(config.minimum_commitment),
+        )
+        .with_backfill_page_blocks(config.backfill_page_blocks),
+    );
     runtime::run(source, config, store, metrics, shutdown).await
 }
 
@@ -64,11 +67,24 @@ async fn run_base(
 ) -> Result<(), RuntimeError> {
     let rpc = lunarbase_source_evm::rpc::client::RpcHttpClient::new(config.http_rpc_url.clone())
         .map_err(SourceError::from)?;
-    let source = Arc::new(lunarbase_source_evm::ws::EvmRpcSource::base_flashblocks(
-        rpc,
-        config.realtime_url.clone(),
-        config.chain_id,
-    ));
+    let source = match config.minimum_commitment {
+        lunarbase_client::model::Commitment::Realtime => {
+            lunarbase_source_evm::ws::EvmRpcSource::base_flashblocks(
+                rpc,
+                config.realtime_url.clone(),
+                config.chain_id,
+            )
+        }
+        commitment => lunarbase_source_evm::ws::EvmRpcSource::with_delivery_mode(
+            rpc,
+            config.realtime_url.clone(),
+            Network::Base,
+            config.chain_id,
+            delivery_mode(commitment),
+        ),
+    }
+    .with_backfill_page_blocks(config.backfill_page_blocks);
+    let source = Arc::new(source);
     runtime::run(source, config, store, metrics, shutdown).await
 }
 
@@ -130,12 +146,28 @@ async fn run_arbitrum(
     metrics: Arc<Metrics>,
     shutdown: watch::Receiver<bool>,
 ) -> Result<(), RuntimeError> {
-    let source = lunarbase_source_arbitrum::source::ArbitrumNitroSource::from_urls(
-        config.http_rpc_url.clone(),
-        config.realtime_url.clone(),
-        config.chain_id,
-    )?;
+    let source =
+        lunarbase_source_arbitrum::source::ArbitrumNitroSource::from_urls_with_delivery_mode(
+            config.http_rpc_url.clone(),
+            config.realtime_url.clone(),
+            config.chain_id,
+            delivery_mode(config.minimum_commitment),
+        )?
+        .with_backfill_page_blocks(config.backfill_page_blocks);
     runtime::run(Arc::new(source), config, store, metrics, shutdown).await
+}
+
+#[cfg(any(feature = "evm", feature = "base", feature = "arbitrum"))]
+fn delivery_mode(
+    commitment: lunarbase_client::model::Commitment,
+) -> lunarbase_source_evm::ws::EvmDeliveryMode {
+    use lunarbase_client::model::Commitment;
+    use lunarbase_source_evm::ws::EvmDeliveryMode;
+    match commitment {
+        Commitment::Realtime => EvmDeliveryMode::Realtime,
+        Commitment::Canonical => EvmDeliveryMode::BlockOrdered,
+        Commitment::Finalized => EvmDeliveryMode::Finalized,
+    }
 }
 
 #[cfg(not(feature = "arbitrum"))]

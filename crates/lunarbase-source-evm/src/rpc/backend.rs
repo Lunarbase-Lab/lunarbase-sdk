@@ -213,8 +213,13 @@ impl RpcHttpBackend {
         request: BackfillRequest,
     ) -> Result<Vec<ContractLog>, SourceError> {
         self.ensure_chain_id().await?;
+        let commitment = if self.snapshot_tag.as_ref() == "finalized" {
+            Commitment::Finalized
+        } else {
+            Commitment::Canonical
+        };
         self.rpc
-            .get_logs(&request, self.chain_id, Commitment::Canonical)
+            .get_logs(&request, self.chain_id, commitment)
             .await
             .map_err(Into::into)
     }

@@ -99,6 +99,21 @@ async fn backfill_rejects_a_foreign_contract_address() {
 }
 
 #[tokio::test]
+async fn finalized_backend_marks_recovery_logs_finalized() {
+    let asserter = Asserter::new();
+    let client = RpcHttpClient::from_client(RpcClient::mocked(asserter.clone()));
+    let backend = RpcHttpBackend::new(client, Network::Evm, 97, "finalized");
+    asserter.push_success(&serde_json::json!("0x61"));
+    asserter.push_success(&vec![rpc_log_value()]);
+
+    let logs = backend.backfill(request()).await.unwrap();
+
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].cursor.commitment, Commitment::Finalized);
+    assert!(asserter.read_q().is_empty());
+}
+
+#[tokio::test]
 async fn standalone_canonical_boundaries_reject_a_foreign_http_chain() {
     let (backend, asserter) = backend_with_chain_response(98);
     let error = backend.snapshot_cursor(Network::Evm).await.unwrap_err();

@@ -1,7 +1,9 @@
 use crate::source::ArbitrumNitroSource;
+use alloy_primitives::B256;
 use axum::{Json, Router, extract::State, routing::post};
-use lunarbase_client::model::{BackfillRequest, ContractFilter, SourceError};
+use lunarbase_client::model::{BackfillRequest, Commitment, ContractFilter, SourceError};
 use lunarbase_client::source::ChainDataSource;
+use lunarbase_source_evm::rpc::client::RpcHttpClient;
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -93,6 +95,13 @@ async fn rpc(State(state): State<RpcState>, Json(request): Json<Value>) -> Json<
             .as_ref()
             .and_then(|tag| state.contexts.get(tag))
             .cloned(),
+        "eth_getBlockByHash" => block_tag.as_ref().and_then(|hash| {
+            state
+                .contexts
+                .values()
+                .find(|context| context.get("hash").and_then(Value::as_str) == Some(hash))
+                .cloned()
+        }),
         _ => None,
     };
     let request_id = request.get("id").cloned().unwrap_or(Value::Null);
@@ -166,10 +175,19 @@ async fn backfill_maps_nitro_context_once_per_distinct_l2_block() {
     )
     .await;
 
-    let logs = source(&mock).backfill(request()).await.unwrap();
+    let source = source(&mock);
+    let logs = source.backfill(request()).await.unwrap();
+    let replay = source.backfill(request()).await.unwrap();
 
     assert_eq!(
         logs.iter()
+            .map(|log| log.cursor.execution_block_number)
+            .collect::<Vec<_>>(),
+        vec![7, 7, 8]
+    );
+    assert_eq!(
+        replay
+            .iter()
             .map(|log| log.cursor.execution_block_number)
             .collect::<Vec<_>>(),
         vec![7, 7, 8]
@@ -180,7 +198,7 @@ async fn backfill_maps_nitro_context_once_per_distinct_l2_block() {
             .iter()
             .filter(|call| call.method == "eth_getLogs")
             .count(),
-        1
+        2
     );
     let mut block_tags = calls
         .iter()
@@ -216,6 +234,38 @@ async fn canonical_head_is_pinned_to_explicit_nitro_context() {
             .filter_map(|call| call.block_tag.clone())
             .collect::<Vec<_>>(),
         vec!["latest", "0x2a"]
+    );
+}
+
+#[tokio::test]
+async fn realtime_context_is_resolved_by_exact_branch_hash() {
+    let hash = B256::new([0x11; 32]);
+    let mock = MockRpc::start(
+        Vec::new(),
+        HashMap::from([(
+            "0x2a".into(),
+            json!({
+                "number": "0x2a",
+                "hash": format!("{hash:#x}"),
+                "l1BlockNumber": "0x7"
+            }),
+        )]),
+    )
+    .await;
+    let client = RpcHttpClient::new(&mock.url).unwrap();
+
+    let cursor = client
+        .block_cursor_by_hash_with_execution_context(hash, 42161, Commitment::Realtime)
+        .await
+        .unwrap();
+
+    assert_eq!(cursor.execution_block_number, 7);
+    assert_eq!(
+        mock.calls()
+            .iter()
+            .filter(|call| call.method == "eth_getBlockByHash")
+            .count(),
+        1
     );
 }
 

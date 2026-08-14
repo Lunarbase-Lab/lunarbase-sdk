@@ -2151,6 +2151,7 @@ dependencies = [
 name = "lunarbase-pmm-v2-source-arbitrum"
 version = "0.3.1"
 dependencies = [
+ "alloy-primitives",
  "axum",
  "futures-util",
  "lunarbase-pmm-v2-client",

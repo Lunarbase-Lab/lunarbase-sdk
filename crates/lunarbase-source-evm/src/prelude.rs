@@ -3,4 +3,4 @@
 pub use crate::rpc::backend::RpcHttpBackend;
 pub use crate::rpc::client::{RpcError, RpcHttpClient};
 pub use crate::rpc::snapshot::RpcSnapshotProvider;
-pub use crate::ws::{EvmRpcSource, WsRpcConfig};
+pub use crate::ws::{EvmDeliveryMode, EvmRpcSource, WsRpcConfig};
