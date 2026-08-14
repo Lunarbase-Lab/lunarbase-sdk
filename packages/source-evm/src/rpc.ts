@@ -390,7 +390,7 @@ export class RpcSnapshotProvider {
     readonly snapshotTag = "latest",
   ) {}
 
-  /** Reads code, lanes, reserves, router policy, and the snapshot cursor. */
+  /** Reads chain-wide quote state and optional verified-router accounting. */
   async snapshot(config: DeploymentConfig): Promise<BootstrapSnapshot> {
     const rpcChainId = await this.rpc.chainId();
     if (rpcChainId !== config.chainId)
@@ -413,7 +413,7 @@ export class RpcSnapshotProvider {
 
     const assets = await this.resolveLaneAssets(config, cursor.blockNumber);
     const at = { blockHash: cursor.blockHash } as const;
-    const [cash, whitelisted, blacklistFeeMultiplier] = await Promise.all([
+    const [cash, blacklistFeeMultiplier] = await Promise.all([
       this.rpc.client.readContract({
         abi: CORE_ABI,
         address: config.core,
@@ -423,33 +423,16 @@ export class RpcSnapshotProvider {
       this.rpc.client.readContract({
         abi: CORE_ABI,
         address: config.core,
-        functionName: "whitelist",
-        args: [config.router],
-        ...at,
-      }),
-      this.rpc.client.readContract({
-        abi: CORE_ABI,
-        address: config.core,
         functionName: "blacklistFeeMultiplier",
         ...at,
       }),
     ]);
-    if (whitelisted !== config.expectWhitelisted)
-      throw new RpcError(
-        "INVALID",
-        `configured router whitelist mismatch: expected ${config.expectWhitelisted}, got ${whitelisted}`,
-      );
     const lanes = new Map<Address, ReturnType<typeof createLaneState>>();
-    const partnerFeeBps = new Map<Address, number>();
     const state: QuoteState = {
       cash,
       cashReserve: 0n,
       lanes,
-      feeProfile: {
-        whitelisted,
-        blacklistFeeMultiplier,
-        partnerFeeBps,
-      },
+      blacklistFeeMultiplier,
     };
 
     for (let offset = 0; offset < assets.length; offset += SNAPSHOT_CONCURRENCY) {
@@ -487,27 +470,50 @@ export class RpcSnapshotProvider {
     if (config.explicitLaneAssets.length > 0 && [...lanes.values()].some((lane) => !laneExists(lane)))
       throw new RpcError("INVALID", "explicit lane asset is not active at the snapshot block");
 
-    const partnerAssets = [...new Set([...assets, cash])];
-    for (let offset = 0; offset < partnerAssets.length; offset += SNAPSHOT_CONCURRENCY) {
-      const entries = await Promise.all(
-        partnerAssets.slice(offset, offset + SNAPSHOT_CONCURRENCY).map(async (asset) => {
-          const partner = await this.rpc.client.readContract({
-            abi: CORE_ABI,
-            address: config.core,
-            functionName: "partners",
-            args: [config.router, asset],
-            ...at,
-          });
-          if (BigInt(partner[1]) > BPS) throw new RpcError("INVALID", "partner fee exceeds BPS");
-          return [asset, partner[1]] as const;
-        }),
-      );
-      for (const [asset, fee] of entries) partnerFeeBps.set(addressKey(asset), fee);
+    let verifiedRouter: BootstrapSnapshot["verifiedRouter"];
+    if (config.verifiedRouter !== undefined) {
+      const whitelisted = await this.rpc.client.readContract({
+        abi: CORE_ABI,
+        address: config.core,
+        functionName: "whitelist",
+        args: [config.verifiedRouter],
+        ...at,
+      });
+      if (whitelisted !== (config.feeClass === "Whitelisted"))
+        throw new RpcError(
+          "INVALID",
+          `verified router fee class mismatch: expected ${config.feeClass}, got whitelisted=${whitelisted}`,
+        );
+      const partnerFeeBps = new Map<Address, number>();
+      const partnerAssets = [...new Set([...assets, cash].map(addressKey))];
+      for (let offset = 0; offset < partnerAssets.length; offset += SNAPSHOT_CONCURRENCY) {
+        const entries = await Promise.all(
+          partnerAssets.slice(offset, offset + SNAPSHOT_CONCURRENCY).map(async (asset) => {
+            const partner = await this.rpc.client.readContract({
+              abi: CORE_ABI,
+              address: config.core,
+              functionName: "partners",
+              args: [config.verifiedRouter!, asset],
+              ...at,
+            });
+            if (BigInt(partner[1]) > BPS) throw new RpcError("INVALID", "partner fee exceeds BPS");
+            return [asset, partner[1]] as const;
+          }),
+        );
+        for (const [asset, fee] of entries) partnerFeeBps.set(addressKey(asset), fee);
+      }
+      verifiedRouter = { router: config.verifiedRouter, partnerFeeBps };
     }
     const verified = await this.rpc.blockCursor(pinnedBlock, config.chainId, commitment);
     if (verified.blockHash?.toLowerCase() !== cursor.blockHash.toLowerCase())
       throw new RpcError("TRANSPORT", "snapshot block changed while state was reconstructed");
-    return { state, cursor, implementation, implementationCodeHash };
+    return {
+      state,
+      cursor,
+      implementation,
+      implementationCodeHash,
+      ...(verifiedRouter === undefined ? {} : { verifiedRouter }),
+    };
   }
 
   private async resolveLaneAssets(config: DeploymentConfig, snapshotBlock: bigint): Promise<Address[]> {

@@ -9,15 +9,14 @@ use lunarbase_client::prelude::{
 };
 use lunarbase_client::protocol::abi::quote_critical_topics;
 use lunarbase_client::protocol::proxy::{ERC1967_IMPLEMENTATION_SLOT, decode_implementation};
-use lunarbase_math::prelude::{Address, QuoteMode, QuoteOutcome, QuoteRequest, U256};
+use lunarbase_math::prelude::{Address, FeeClass, QuoteMode, QuoteOutcome, QuoteRequest, U256};
 use lunarbase_source_evm::prelude::{EvmRpcSource, RpcHttpClient};
-use std::{error::Error, io, num::NonZeroU64, path::Path, str::FromStr, sync::Arc, time::Duration};
+use std::{error::Error, io, num::NonZeroU64, path::Path, sync::Arc, time::Duration};
 use tokio::{sync::broadcast, time::MissedTickBehavior};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use url::Url;
 
-const DEMO_ROUTER: &str = "0x000000000000000000000000000000000000dead";
 type AnyError = Box<dyn Error + Send + Sync>;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -26,6 +25,21 @@ enum SourceProfile {
     Evm,
     /// Base `pendingLogs + newHeads` Flashblocks subscriptions.
     BaseFlashblocks,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum FeeClassArg {
+    Whitelisted,
+    NonWhitelisted,
+}
+
+impl From<FeeClassArg> for FeeClass {
+    fn from(value: FeeClassArg) -> Self {
+        match value {
+            FeeClassArg::Whitelisted => Self::Whitelisted,
+            FeeClassArg::NonWhitelisted => Self::NonWhitelisted,
+        }
+    }
 }
 
 impl SourceProfile {
@@ -52,11 +66,12 @@ struct Args {
     /// Realtime subscription profile.
     #[arg(long, env = "SOURCE_PROFILE", value_enum, default_value = "evm")]
     source_profile: SourceProfile,
-    /// Router whose whitelist and partner fee profile is quoted.
-    #[arg(long, env = "ROUTER_ADDRESS")]
-    router: Option<Address>,
-    #[arg(long, env = "EXPECT_WHITELISTED", default_value_t = false)]
-    expect_whitelisted: bool,
+    /// Economic fee class used for every quote.
+    #[arg(long, env = "FEE_CLASS", value_enum)]
+    fee_class: FeeClassArg,
+    /// Optional router whose partner/treasury allocation is chain-verified.
+    #[arg(long, env = "VERIFIED_ROUTER_ADDRESS")]
+    verified_router: Option<Address>,
     #[arg(long, env = "DEPLOYMENT_BLOCK", default_value_t = 0)]
     deployment_block: u64,
     /// Explicit active lanes, comma-separated; avoids deployment log discovery.
@@ -94,25 +109,14 @@ async fn main() -> Result<(), AnyError> {
     let implementation_code_hash = rpc
         .runtime_code_hash_at_hash(implementation, block_hash)
         .await?;
-    let uses_demo_router = args.router.is_none();
-    let router = args
-        .router
-        .unwrap_or(Address::from_str(DEMO_ROUTER).expect("valid demo router"));
     let quote_interval = Duration::from_secs(args.quote_interval_seconds.get());
-
-    if uses_demo_router {
-        warn!(
-            router = %format!("{router:#x}"),
-            "ROUTER_ADDRESS is unset; using a non-whitelisted demonstration fee profile"
-        );
-    }
 
     let deployment = DeploymentConfig {
         network: args.source_profile.network(),
         chain_id,
         core: args.core,
-        router,
-        expect_whitelisted: args.expect_whitelisted,
+        fee_class: args.fee_class.into(),
+        verified_router: args.verified_router,
         deployment_block: args.deployment_block,
         expected_implementation: implementation,
         expected_implementation_code_hash: implementation_code_hash,
@@ -132,7 +136,8 @@ async fn main() -> Result<(), AnyError> {
     info!(
         chain_id,
         core = %format!("{:#x}", args.core),
-        router = %format!("{router:#x}"),
+        fee_class = ?args.fee_class,
+        verified_router = ?args.verified_router,
         source_profile = ?args.source_profile,
         rpc_ws = %ws_url,
         "connecting LunarBase EVM client"
@@ -247,8 +252,8 @@ fn log_quote_batch(client: &ConnectedQuoteClient, requests: &[QuoteRequest]) {
                 amount_out = %result.amount_out,
                 fee_asset = %format!("{:#x}", result.fee_asset),
                 fee_amount = %result.fee_amount,
-                partner_fee = %result.partner_fee,
-                treasury_fee = %result.treasury_fee,
+                partner_fee = ?result.fee_allocation.as_ref().map(|fee| fee.partner_fee),
+                treasury_fee = ?result.fee_allocation.as_ref().map(|fee| fee.treasury_fee),
                 "quote"
             ),
             QuoteOutcome::Unavailable(reason) => warn!(
@@ -323,9 +328,8 @@ fn validate_ws_url(url: Url) -> Result<Url, AnyError> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{DEMO_ROUTER, derive_ws_url, quote_requests};
+    use crate::{derive_ws_url, quote_requests};
     use lunarbase_math::prelude::{Address, QuoteMode, U256};
-    use std::str::FromStr;
     use url::Url;
 
     #[test]
@@ -342,11 +346,6 @@ mod tests {
                 .as_str(),
             "ws://127.0.0.1:8545/"
         );
-    }
-
-    #[test]
-    fn demonstration_router_is_a_valid_address() {
-        assert!(Address::from_str(DEMO_ROUTER).is_ok());
     }
 
     #[test]

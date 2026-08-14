@@ -1,17 +1,17 @@
 //! Provider-independent runtime model shared by every network source.
 
-use lunarbase_math::QuoteState;
 use lunarbase_math::arithmetic::BPS;
 use lunarbase_math::slot0::{
     lane_slot0_ask_fee_bps, lane_slot0_bid_fee_bps, lane_slot0_slippage_k_bps,
 };
 use lunarbase_math::{Address, B256, Bytes, U256};
+use lunarbase_math::{FeeClass, QuoteState};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use thiserror::Error;
 
 /// Current durable checkpoint schema.
-pub const SCHEMA_VERSION: u16 = 5;
+pub const SCHEMA_VERSION: u16 = 6;
 
 /// Quote-math compatibility profile implemented by both SDKs.
 pub const MATH_COMPATIBILITY_VERSION: &str = "lunarbase-pmm-v2";
@@ -240,10 +240,10 @@ pub struct DeploymentConfig {
     pub chain_id: u64,
     /// LunarBase Core contract whose quote-critical state is indexed.
     pub core: Address,
-    /// Single router whose whitelist and partner-fee profile is tracked.
-    pub router: Address,
-    /// Whether bootstrap must reject a router that is not whitelisted.
-    pub expect_whitelisted: bool,
+    /// Mandatory economic fee class used by every quote from this runtime.
+    pub fee_class: FeeClass,
+    /// Optional execution caller whose accounting allocation is verified.
+    pub verified_router: Option<Address>,
     /// First block that can contain relevant deployment logs.
     pub deployment_block: u64,
     /// Pinned ERC-1967 implementation behind the Core proxy.
@@ -262,9 +262,12 @@ impl DeploymentConfig {
         if self.chain_id == 0 {
             return Err(SourceError::Unavailable("invalid chain id".into()));
         }
-        if self.core == Address::ZERO || self.router == Address::ZERO {
+        if self.core == Address::ZERO {
+            return Err(SourceError::Unavailable("Core must be non-zero".into()));
+        }
+        if self.verified_router == Some(Address::ZERO) {
             return Err(SourceError::Unavailable(
-                "Core and configured router must be non-zero".into(),
+                "verified router must be non-zero".into(),
             ));
         }
         if self.expected_implementation == Address::ZERO {
@@ -316,12 +319,8 @@ pub struct Checkpoint {
     pub network: Network,
     /// Core contract whose state is serialized.
     pub core: Address,
-    /// Configured router whose fee profile is embedded in the state.
-    pub router: Address,
     /// First deployment block used for lane discovery and recovery.
     pub deployment_block: u64,
-    /// Router whitelist policy used when the state was bootstrapped.
-    pub expect_whitelisted: bool,
     /// Fixed lane policy used when the state was bootstrapped.
     pub explicit_lane_assets: Vec<Address>,
     /// Last fully applied and verified source position.
@@ -343,9 +342,7 @@ impl Checkpoint {
             && self.chain_id == deployment.chain_id
             && self.network == deployment.network
             && self.core == deployment.core
-            && self.router == deployment.router
             && self.deployment_block == deployment.deployment_block
-            && self.expect_whitelisted == deployment.expect_whitelisted
             && same_address_set(&self.explicit_lane_assets, &deployment.explicit_lane_assets)
             && self.has_valid_structure()
     }
@@ -369,13 +366,6 @@ impl Checkpoint {
                 && lane_slot0_bid_fee_bps(lane.slot0) <= BPS
                 && U256::from(lane_slot0_slippage_k_bps(lane.slot0)) <= BPS
         });
-        let partner_fees_are_valid = self
-            .state
-            .fee_profile
-            .partner_fee_bps
-            .iter()
-            .all(|(asset, fee)| *asset != Address::ZERO && U256::from(*fee) <= BPS);
-
         self.chain_id != 0
             && self.cursor.chain_id == self.chain_id
             && self.cursor.block_number >= self.deployment_block
@@ -388,13 +378,10 @@ impl Checkpoint {
             && self.expected_implementation != Address::ZERO
             && self.expected_implementation_code_hash != B256::ZERO
             && self.core != Address::ZERO
-            && self.router != Address::ZERO
             && self.state.cash != Address::ZERO
-            && self.state.fee_profile.whitelisted == self.expect_whitelisted
             && unique_explicit_lanes.len() == self.explicit_lane_assets.len()
             && !unique_explicit_lanes.contains(&Address::ZERO)
             && lanes_are_valid
-            && partner_fees_are_valid
     }
 }
 

@@ -1,5 +1,6 @@
 //! Ordered single-writer quote-state reducer.
 
+use crate::bootstrap::VerifiedRouterSnapshot;
 use crate::model::{
     ChainCursor, Checkpoint, DeploymentConfig, MATH_COMPATIBILITY_VERSION, QuoteEvent,
     SCHEMA_VERSION,
@@ -9,7 +10,7 @@ use lunarbase_math::slot0::{
     set_lane_slot0_block_delay, set_lane_slot0_exists, set_lane_slot0_paused,
     set_lane_slot0_price_push_threshold, set_lane_slot0_slippage_k_bps,
 };
-use lunarbase_math::{Address, U256};
+use lunarbase_math::{Address, FeeClass, U256};
 use lunarbase_math::{LaneState, QuoteState};
 use std::sync::Arc;
 use thiserror::Error;
@@ -44,6 +45,12 @@ pub enum ReducerError {
     /// A delta references a lane absent from the coherent bootstrap state.
     #[error("event references an unknown lane")]
     UnknownLane,
+    /// A verified router changed to a class different from the configured policy.
+    #[error("verified router fee class changed")]
+    FeeClassMismatch,
+    /// A newly active lane requires a coherent partner-fee refresh.
+    #[error("verified router allocation requires a snapshot refresh")]
+    VerifiedRouterRefreshRequired,
     /// The ERC-1967 implementation changed and must be revalidated before quoting.
     #[error("Core implementation upgraded")]
     ImplementationUpgraded,
@@ -56,8 +63,10 @@ pub enum ReducerError {
 pub struct QuoteReducer {
     /// Complete quote-critical state mutated only by the ordered reducer task.
     state: Arc<QuoteState>,
-    /// Only router whose partner fee and whitelist changes affect this instance.
-    configured_router: Address,
+    /// Runtime-selected economic fee class, independent of chain state.
+    fee_class: FeeClass,
+    /// Optional exact-router accounting data, separate from quote-critical state.
+    verified_router: Option<Arc<VerifiedRouterSnapshot>>,
     /// Last normalized head or event position accepted by the reducer.
     cursor: Option<ChainCursor>,
     /// Fail-closed publication flag cleared on gaps, reorgs, and reducer errors.
@@ -66,20 +75,26 @@ pub struct QuoteReducer {
 
 impl QuoteReducer {
     /// Creates a not-ready reducer around a block-tagged state.
-    pub fn new(state: QuoteState, configured_router: Address) -> Self {
+    pub fn new(
+        state: QuoteState,
+        fee_class: FeeClass,
+        verified_router: Option<VerifiedRouterSnapshot>,
+    ) -> Self {
         Self {
             state: Arc::new(state),
-            configured_router,
+            fee_class,
+            verified_router: verified_router.map(Arc::new),
             cursor: None,
             ready: false,
         }
     }
 
     /// Restores a ready reducer from a prevalidated checkpoint.
-    pub fn from_checkpoint(checkpoint: Checkpoint) -> Self {
+    pub fn from_checkpoint(checkpoint: Checkpoint, fee_class: FeeClass) -> Self {
         Self {
             state: Arc::new(checkpoint.state),
-            configured_router: checkpoint.router,
+            fee_class,
+            verified_router: None,
             cursor: Some(checkpoint.cursor),
             ready: true,
         }
@@ -93,6 +108,21 @@ impl QuoteReducer {
     /// Clones the immutable state handle without cloning the underlying maps.
     pub(crate) fn state_snapshot(&self) -> Arc<QuoteState> {
         Arc::clone(&self.state)
+    }
+
+    /// Returns the mandatory economic fee class selected by the runtime.
+    pub(crate) const fn fee_class(&self) -> FeeClass {
+        self.fee_class
+    }
+
+    /// Clones the optional allocation handle without cloning its asset map.
+    pub(crate) fn verified_router_snapshot(&self) -> Option<Arc<VerifiedRouterSnapshot>> {
+        self.verified_router.as_ref().map(Arc::clone)
+    }
+
+    /// Returns the router whose optional allocation is chain-verified.
+    pub fn verified_router(&self) -> Option<Address> {
+        self.verified_router.as_ref().map(|state| state.router)
     }
 
     /// Returns the last accepted cursor.
@@ -191,12 +221,18 @@ impl QuoteReducer {
     fn apply_event(&mut self, event: QuoteEvent) -> Result<(), ReducerError> {
         match event {
             QuoteEvent::LaneAdded { asset } => {
+                if self.verified_router.is_some() {
+                    return Err(ReducerError::VerifiedRouterRefreshRequired);
+                }
                 let lane = self.state_mut().lanes.entry(asset).or_default();
                 let slot0 = set_lane_slot0_exists(lane.slot0, true);
                 lane.slot0 = set_lane_slot0_paused(slot0, true);
             }
             QuoteEvent::LaneRemoved { asset } => {
                 self.state_mut().lanes.remove(&asset);
+                if let Some(verified) = self.verified_router.as_mut() {
+                    Arc::make_mut(verified).partner_fee_bps.remove(&asset);
+                }
             }
             QuoteEvent::LaneUpdated { asset, slot0 } => {
                 self.lane_mut(asset)?.slot0 = slot0;
@@ -228,27 +264,37 @@ impl QuoteReducer {
             }
             QuoteEvent::PartnerInfoSet { router, asset, fee }
             | QuoteEvent::PartnerFeeSet { router, asset, fee } => {
-                if router != self.configured_router {
+                let Some(verified) = self.verified_router.as_ref() else {
+                    return Ok(());
+                };
+                if router != verified.router {
+                    return Ok(());
+                }
+                if asset != self.state.cash && !self.state.lanes.contains_key(&asset) {
                     return Ok(());
                 }
                 if U256::from(fee) > BPS {
                     return Err(ReducerError::InvalidWidth);
                 }
-                self.state_mut()
-                    .fee_profile
-                    .partner_fee_bps
-                    .insert(asset, fee);
+                if let Some(verified) = self.verified_router.as_mut() {
+                    Arc::make_mut(verified).partner_fee_bps.insert(asset, fee);
+                }
             }
             QuoteEvent::WhitelistSet {
                 router,
                 whitelisted,
             } => {
-                if router == self.configured_router {
-                    self.state_mut().fee_profile.whitelisted = whitelisted;
+                if self
+                    .verified_router
+                    .as_ref()
+                    .is_some_and(|verified| verified.router == router)
+                    && whitelisted != self.fee_class.is_whitelisted()
+                {
+                    return Err(ReducerError::FeeClassMismatch);
                 }
             }
             QuoteEvent::BlacklistFeeMultiplierSet { multiplier } => {
-                self.state_mut().fee_profile.blacklist_fee_multiplier = multiplier;
+                self.state_mut().blacklist_fee_multiplier = multiplier;
             }
             QuoteEvent::DepositExecuted { asset, principal } => {
                 let lane = self.lane_mut(asset)?;
@@ -304,9 +350,7 @@ impl QuoteReducer {
             chain_id: deployment.chain_id,
             network: deployment.network,
             core: deployment.core,
-            router: deployment.router,
             deployment_block: deployment.deployment_block,
-            expect_whitelisted: deployment.expect_whitelisted,
             explicit_lane_assets: deployment.explicit_lane_assets.clone(),
             cursor: self.cursor.clone()?,
             state: self.state.as_ref().clone(),
@@ -329,7 +373,7 @@ mod tests {
         LaneSlot0, decode_lane_slot0, encode_lane_slot0, lane_slot0_block_delay,
         lane_slot0_slippage_k_bps,
     };
-    use lunarbase_math::{LaneState, QuoteState};
+    use lunarbase_math::{FeeClass, LaneState, QuoteState};
 
     fn address(value: u8) -> Address {
         Address::new([value; 20])
@@ -349,7 +393,7 @@ mod tests {
             ..Default::default()
         };
         state.lanes.insert(asset, LaneState::new(slot0, 0, 500));
-        let mut reducer = QuoteReducer::new(state, address(3));
+        let mut reducer = QuoteReducer::new(state, FeeClass::Whitelisted, None);
 
         reducer
             .apply_event(QuoteEvent::LaneAdded { asset })
@@ -417,7 +461,7 @@ mod tests {
 
     #[test]
     fn implementation_upgrade_fails_closed_before_mutating_state() {
-        let mut reducer = QuoteReducer::new(QuoteState::default(), address(3));
+        let mut reducer = QuoteReducer::new(QuoteState::default(), FeeClass::Whitelisted, None);
         assert_eq!(
             reducer.apply_event(QuoteEvent::ImplementationUpgraded {
                 implementation: address(4),
@@ -431,7 +475,7 @@ mod tests {
     #[test]
     fn state_delta_for_unknown_lane_fails_closed() {
         let asset = address(2);
-        let mut reducer = QuoteReducer::new(QuoteState::default(), address(3));
+        let mut reducer = QuoteReducer::new(QuoteState::default(), FeeClass::Whitelisted, None);
         assert_eq!(
             reducer.apply_event(QuoteEvent::LaneUpdated {
                 asset,
@@ -451,7 +495,8 @@ mod tests {
                 cash_reserve: 10,
                 ..Default::default()
             },
-            address(3),
+            FeeClass::Whitelisted,
+            None,
         );
         let snapshot = reducer.state_snapshot();
 

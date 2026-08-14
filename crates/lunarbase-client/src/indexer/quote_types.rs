@@ -2,7 +2,7 @@
 
 use crate::model::{ChainCursor, Commitment};
 use lunarbase_math::B256;
-use lunarbase_math::QuoteOutcome;
+use lunarbase_math::{Address, FeeClass, QuoteOutcome};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// One quote plus the exact state cursor used for evaluation.
@@ -17,6 +17,10 @@ pub struct ClientQuote {
     pub implementation_code_hash: B256,
     /// Quote-math compatibility profile used by this result.
     pub math_compatibility_version: &'static str,
+    /// Economic fee class used to evaluate this quote.
+    pub fee_class: FeeClass,
+    /// Optional execution caller whose accounting split was verified.
+    pub verified_router: Option<Address>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -32,6 +36,10 @@ pub struct ClientBatchQuote {
     pub implementation_code_hash: B256,
     /// Quote-math compatibility profile used by this batch.
     pub math_compatibility_version: &'static str,
+    /// Economic fee class shared by every result.
+    pub fee_class: FeeClass,
+    /// Optional execution caller whose accounting splits were verified.
+    pub verified_router: Option<Address>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -49,4 +57,8 @@ pub struct IndexerHealth {
     pub implementation_code_hash: B256,
     /// Quote-math compatibility profile used by this runtime.
     pub math_compatibility_version: &'static str,
+    /// Economic fee class selected for every quote.
+    pub fee_class: FeeClass,
+    /// Optional execution caller whose accounting allocation is verified.
+    pub verified_router: Option<Address>,
 }

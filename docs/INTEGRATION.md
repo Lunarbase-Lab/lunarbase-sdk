@@ -15,13 +15,14 @@ Use package version 0.3.1 consistently.
 
 ## Configure a deployment
 
-Provide the network, chain ID, Core and router addresses, expected router
-whitelist status, deployment block, implementation address, implementation
-runtime-code hash, and RPC endpoints. Use explicit lane assets when the
-deployment inventory is already known.
+Provide the network, chain ID, Core address, mandatory fee class, deployment
+block, implementation address, implementation runtime-code hash, and RPC
+endpoints. Use explicit lane assets when the deployment inventory is already
+known. A verified router is optional and only enables exact partner/treasury
+allocation.
 
 Validate these values in deployment automation. Do not accept quote-request
-overrides for deployment identity or router policy.
+overrides for deployment identity or fee policy.
 
 ## Start the client
 

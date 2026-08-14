@@ -1,5 +1,5 @@
 /** Synchronous in-memory quote engine around the ordered reducer. */
-import { parseAddress, type Address, type QuoteRequest } from "@lunarbase-lab/pmm-v2-math";
+import { BPS, parseAddress, type Address, type QuoteRequest } from "@lunarbase-lab/pmm-v2-math";
 import { checkpointMatchesDeployment } from "../bootstrap.js";
 import { decodeCoreEvent } from "../protocol/abi.js";
 import { QuoteReducer } from "../state/reducer.js";
@@ -36,9 +36,14 @@ export class QuoteIndexer {
   static fromSnapshot(snapshot: BootstrapSnapshot, deployment: DeploymentConfig): QuoteIndexer {
     if (snapshot.cursor.chainId !== deployment.chainId)
       throw new IndexerError("SOURCE", "snapshot cursor chain id mismatch");
-    const indexer = new QuoteIndexer(new QuoteReducer(snapshot.state, deployment.router), deployment, {
-      ...snapshot.cursor,
-    });
+    validateVerifiedRouterSnapshot(snapshot, deployment);
+    const indexer = new QuoteIndexer(
+      new QuoteReducer(snapshot.state, deployment.feeClass, snapshot.verifiedRouter),
+      deployment,
+      {
+        ...snapshot.cursor,
+      },
+    );
     indexer.verifyImplementation(snapshot);
     indexer.reducer.bootstrap(snapshot.cursor);
     return indexer;
@@ -48,7 +53,11 @@ export class QuoteIndexer {
   static fromCheckpoint(checkpoint: Checkpoint, deployment: DeploymentConfig): QuoteIndexer {
     if (!checkpointMatchesDeployment(checkpoint, deployment))
       throw new IndexerError("CODE_HASH_MISMATCH", "checkpoint deployment or state mismatch");
-    return new QuoteIndexer(QuoteReducer.fromCheckpoint(checkpoint), deployment, { ...checkpoint.cursor });
+    if (deployment.verifiedRouter !== undefined)
+      throw new IndexerError("INVALID_REQUEST", "verified-router mode requires a fresh chain snapshot");
+    return new QuoteIndexer(QuoteReducer.fromCheckpoint(checkpoint, deployment.feeClass), deployment, {
+      ...checkpoint.cursor,
+    });
   }
 
   /** Atomically replaces state after snapshot/recovery and replays handoff updates. */
@@ -129,6 +138,8 @@ export class QuoteIndexer {
       executionBlockNumber: cursor.executionBlockNumber,
       implementationCodeHash: this.deployment.expectedImplementationCodeHash,
       mathCompatibilityVersion: MATH_COMPATIBILITY_VERSION,
+      feeClass: this.deployment.feeClass,
+      verifiedRouter: this.reducer.verifiedRouter(),
     };
   }
 
@@ -142,6 +153,8 @@ export class QuoteIndexer {
       results: this.reducer.quoteMany(requests),
       implementationCodeHash: this.deployment.expectedImplementationCodeHash,
       mathCompatibilityVersion: MATH_COMPATIBILITY_VERSION,
+      feeClass: this.deployment.feeClass,
+      verifiedRouter: this.reducer.verifiedRouter(),
     };
   }
 
@@ -154,6 +167,8 @@ export class QuoteIndexer {
       commitment: cursor?.commitment ?? Commitment.Realtime,
       implementationCodeHash: this.deployment.expectedImplementationCodeHash,
       mathCompatibilityVersion: MATH_COMPATIBILITY_VERSION,
+      feeClass: this.deployment.feeClass,
+      verifiedRouter: this.reducer.verifiedRouter(),
     };
   }
 
@@ -190,6 +205,33 @@ export class QuoteIndexer {
     )
       throw new IndexerError("CODE_HASH_MISMATCH", "snapshot implementation identity mismatch");
   }
+}
+
+function validateVerifiedRouterSnapshot(snapshot: BootstrapSnapshot, deployment: DeploymentConfig): void {
+  const expected = deployment.verifiedRouter;
+  const actual = snapshot.verifiedRouter;
+  if (expected === undefined && actual === undefined) return;
+  try {
+    if (
+      expected !== undefined &&
+      actual !== undefined &&
+      parseAddress(expected) === parseAddress(actual.router) &&
+      actual.partnerFeeBps.size <= snapshot.state.lanes.size + 1 &&
+      [...actual.partnerFeeBps.entries()].every(([asset, fee]) => {
+        const parsedAsset = parseAddress(asset);
+        return (
+          (parsedAsset === parseAddress(snapshot.state.cash) || snapshot.state.lanes.has(parsedAsset)) &&
+          Number.isInteger(fee) &&
+          fee >= 0 &&
+          BigInt(fee) <= BPS
+        );
+      })
+    )
+      return;
+  } catch {
+    // Normalize malformed snapshot primitives to the stable source error below.
+  }
+  throw new IndexerError("SOURCE", "snapshot verified-router policy does not match deployment");
 }
 /** Validates normalized log identity before any ordering shortcut or decode. */
 export function validateCoreLogIdentity(log: ContractLog, expectedCore: Address, expectedChainId: bigint): void {

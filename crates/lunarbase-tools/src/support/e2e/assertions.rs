@@ -1,6 +1,6 @@
 use crate::support::e2e::environment::E2eError;
 use crate::support::e2e::helpers::wait_until;
-use crate::support::e2e::{ASSET, CASH, CORE, ROUTER};
+use crate::support::e2e::{ASSET, CASH, CORE};
 use lunarbase_math::Address;
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
@@ -108,11 +108,8 @@ pub(super) async fn fetch_quote(url: &str) -> Result<Value, E2eError> {
 pub(super) async fn assert_checkpoint(redis_url: &str) -> Result<(), E2eError> {
     let url = redis_url.to_owned();
     let key = format!(
-        "lunarbase:v5:8453:{}:{}",
+        "lunarbase:v6:8453:{}",
         CORE.parse::<Address>()
-            .map_err(|error| E2eError::Scenario(error.to_string()))?,
-        ROUTER
-            .parse::<Address>()
             .map_err(|error| E2eError::Scenario(error.to_string()))?,
     );
     let (exists, ttl) =

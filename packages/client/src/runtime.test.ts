@@ -120,9 +120,8 @@ test("checkpoint is deployment-bound and reusable", async () => {
   assert.equal(checkpoint?.schemaVersion, SCHEMA_VERSION);
   assert.equal(checkpoint?.network, Network.Base);
   assert.equal(checkpoint?.deploymentBlock, 1n);
-  assert.equal(checkpoint?.expectWhitelisted, true);
   assert.deepEqual(checkpoint?.explicitLaneAssets, [ASSET]);
-  assert.equal(checkpoint?.router, ROUTER);
+  assert.equal(checkpoint && "router" in checkpoint, false);
   await first.shutdown();
 
   const restoredSource = new MockSource();
@@ -147,7 +146,7 @@ test("forked or incompatible checkpoints fall back to a full snapshot", async ()
   assert.equal(forkedSource.snapshotCalls, 1);
   await forked.shutdown();
 
-  const incompatible = { ...checkpoint, router: ASSET };
+  const incompatible = { ...checkpoint, core: ASSET };
   const incompatibleSource = new MockSource();
   const rejected = await ConnectedQuoteClient.connect(connectConfig(), incompatibleSource, incompatible);
   assert.equal(incompatibleSource.validateCalls, 0);
@@ -165,10 +164,7 @@ test("checkpoint policy and structural state mismatches fail closed", () => {
     checkpointMatchesDeployment({ ...checkpoint, deploymentBlock: checkpoint.deploymentBlock + 1n }, deployment()),
     false,
   );
-  assert.equal(
-    checkpointMatchesDeployment({ ...checkpoint, expectWhitelisted: !checkpoint.expectWhitelisted }, deployment()),
-    false,
-  );
+  assert.equal(checkpointMatchesDeployment(checkpoint, { ...deployment(), feeClass: "NonWhitelisted" }), true);
   assert.equal(checkpointMatchesDeployment({ ...checkpoint, explicitLaneAssets: [CASH] }, deployment()), false);
 
   const invalidCash: Checkpoint = {
@@ -177,29 +173,25 @@ test("checkpoint policy and structural state mismatches fail closed", () => {
   };
   assert.equal(checkpointMatchesDeployment(invalidCash, deployment()), false);
 
-  const invalidFee: Checkpoint = {
+  const invalidMultiplier: Checkpoint = {
     ...checkpoint,
     state: {
       ...checkpoint.state,
-      feeProfile: {
-        ...checkpoint.state.feeProfile,
-        partnerFeeBps: new Map([[ASSET, 1_000_001]]),
-      },
+      blacklistFeeMultiplier: -1n,
     },
   };
-  assert.equal(checkpointMatchesDeployment(invalidFee, deployment()), false);
+  assert.equal(checkpointMatchesDeployment(invalidMultiplier, deployment()), false);
+});
 
-  const invalidWhitelist: Checkpoint = {
-    ...checkpoint,
-    state: {
-      ...checkpoint.state,
-      feeProfile: {
-        ...checkpoint.state.feeProfile,
-        whitelisted: !checkpoint.expectWhitelisted,
-      },
-    },
+test("snapshot verified router must match deployment policy", () => {
+  const exactDeployment = { ...deployment(), verifiedRouter: ROUTER };
+  assert.throws(() => QuoteIndexer.fromSnapshot(snapshot(), exactDeployment), { code: "SOURCE" });
+
+  const unexpected = {
+    ...snapshot(),
+    verifiedRouter: { router: ROUTER, partnerFeeBps: new Map([[ASSET, 100_000]]) },
   };
-  assert.equal(checkpointMatchesDeployment(invalidWhitelist, deployment()), false);
+  assert.throws(() => QuoteIndexer.fromSnapshot(unexpected, deployment()), { code: "SOURCE" });
 });
 
 test("deployment and checkpoint integers match Rust widths", () => {
@@ -210,7 +202,7 @@ test("deployment and checkpoint integers match Rust widths", () => {
     { ...deployment(), deploymentBlock: -1n },
     { ...deployment(), deploymentBlock: overU64 },
     { ...deployment(), network: "Unsupported" as Network },
-    { ...deployment(), expectWhitelisted: 1 as unknown as boolean },
+    { ...deployment(), feeClass: "unknown" as DeploymentConfig["feeClass"] },
     { ...deployment(), explicitLaneAssets: undefined as unknown as readonly Address[] },
   ];
   for (const invalid of invalidDeployments) assert.throws(() => validateDeploymentConfig(invalid), { code: "SOURCE" });
@@ -356,7 +348,7 @@ test("same-height handoff with another block hash fails closed", () => {
 });
 
 test("reducer applies packed controls and Sync, then rejects Upgraded", () => {
-  const reducer = new QuoteReducer(snapshot().state, ROUTER);
+  const reducer = new QuoteReducer(snapshot().state, "Whitelisted");
   reducer.bootstrap(cursor());
   const eventCursor = (logIndex: bigint): ChainCursor => ({
     ...cursor(),
@@ -410,6 +402,18 @@ test("reducer applies packed controls and Sync, then rejects Upgraded", () => {
   );
 });
 
+test("verified router requires a snapshot refresh before quoting a new lane", () => {
+  const reducer = new QuoteReducer(snapshot().state, "Whitelisted", {
+    router: ROUTER,
+    partnerFeeBps: new Map([[ASSET, 100_000]]),
+  });
+  reducer.bootstrap(cursor());
+  assert.throws(
+    () => reducer.apply({ ...cursor(), transactionIndex: 0n, logIndex: 0n }, { kind: "LaneAdded", asset: CORE }),
+    { code: "VERIFIED_ROUTER_REFRESH_REQUIRED" },
+  );
+});
+
 function connectConfig(): ClientConnectConfig {
   return {
     deployment: deployment(),
@@ -425,8 +429,8 @@ function deployment(): DeploymentConfig {
     network: Network.Base,
     chainId: 8453n,
     core: CORE,
-    router: ROUTER,
-    expectWhitelisted: true,
+    feeClass: "Whitelisted",
+    verifiedRouter: undefined,
     deploymentBlock: 1n,
     expectedImplementation: "0x8888888888888888888888888888888888888888",
     expectedImplementationCodeHash: HASH,
@@ -461,11 +465,7 @@ function snapshot(): BootstrapSnapshot {
         ),
       ],
     ]),
-    feeProfile: {
-      whitelisted: true,
-      blacklistFeeMultiplier: 1n,
-      partnerFeeBps: new Map(),
-    },
+    blacklistFeeMultiplier: 1n,
   };
   return {
     state,

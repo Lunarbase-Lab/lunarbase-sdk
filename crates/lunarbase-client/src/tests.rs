@@ -14,8 +14,7 @@ use crate::source::{ChainDataSource, SourceStream};
 use crate::state::reducer::QuoteReducer;
 use lunarbase_math::arithmetic::WAD;
 use lunarbase_math::slot0::{LaneSlot0, encode_lane_slot0};
-use lunarbase_math::{Address, B256, Bytes, U256};
-use lunarbase_math::{LaneState, QuoteMode, QuoteRequest, QuoteState};
+use lunarbase_math::{Address, B256, Bytes, LaneState, QuoteMode, QuoteRequest, QuoteState, U256};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -480,7 +479,11 @@ fn unknown_log(block: u64) -> ContractLog {
 
 #[test]
 fn realtime_source_sequence_allows_progressive_hashes_at_one_height() {
-    let mut reducer = QuoteReducer::new(QuoteState::default(), ROUTER);
+    let mut reducer = QuoteReducer::new(
+        QuoteState::default(),
+        lunarbase_math::FeeClass::Whitelisted,
+        None,
+    );
     let mut first = cursor(101, Commitment::Realtime);
     first.source_sequence = Some(1);
     reducer.bootstrap(first);
@@ -587,6 +590,8 @@ mod event_sink_policy;
 
 mod checkpoint_validation;
 
+mod fee_policy;
+
 mod source_identity;
 
 fn config() -> ClientConnectConfig {
@@ -595,8 +600,8 @@ fn config() -> ClientConnectConfig {
             network: Network::Base,
             chain_id: 8453,
             core: CORE,
-            router: ROUTER,
-            expect_whitelisted: true,
+            fee_class: lunarbase_math::FeeClass::Whitelisted,
+            verified_router: None,
             deployment_block: 1,
             expected_implementation: Address::new([8; 20]),
             expected_implementation_code_hash: B256::new([7; 32]),
@@ -632,6 +637,7 @@ fn snapshot(block: u64) -> BootstrapSnapshot {
         cursor: cursor(block, Commitment::Finalized),
         implementation: Address::new([8; 20]),
         implementation_code_hash: B256::new([7; 32]),
+        verified_router: None,
     }
 }
 

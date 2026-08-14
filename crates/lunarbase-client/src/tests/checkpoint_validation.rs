@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn checkpoint_binds_deployment_policy_and_validates_state() {
+fn checkpoint_binds_chain_state_and_is_reusable_across_fee_classes() {
     let deployment = config().deployment;
     let mut indexer = QuoteIndexer::new(QuoteState::default(), deployment.clone());
     indexer.bootstrap(snapshot(100)).unwrap();
@@ -17,9 +17,9 @@ fn checkpoint_binds_deployment_policy_and_validates_state() {
     changed.deployment_block += 1;
     assert!(!changed.is_compatible(&deployment));
 
-    let mut changed = checkpoint.clone();
-    changed.expect_whitelisted = !changed.expect_whitelisted;
-    assert!(!changed.is_compatible(&deployment));
+    let mut changed_policy = deployment.clone();
+    changed_policy.fee_class = lunarbase_math::FeeClass::NonWhitelisted;
+    assert!(checkpoint.is_compatible(&changed_policy));
 
     let mut changed = checkpoint.clone();
     changed.explicit_lane_assets = vec![CASH];
@@ -28,10 +28,6 @@ fn checkpoint_binds_deployment_policy_and_validates_state() {
     let mut invalid_state = checkpoint.clone();
     invalid_state.state.cash = Address::ZERO;
     assert!(!invalid_state.is_compatible(&deployment));
-
-    let mut invalid_whitelist = checkpoint.clone();
-    invalid_whitelist.state.fee_profile.whitelisted = !invalid_whitelist.expect_whitelisted;
-    assert!(!invalid_whitelist.is_compatible(&deployment));
 
     let mut invalid_hash = checkpoint;
     invalid_hash.cursor.block_hash = Some(B256::ZERO);

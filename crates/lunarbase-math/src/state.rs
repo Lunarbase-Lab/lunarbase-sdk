@@ -4,36 +4,51 @@ use crate::slot0::{lane_slot0_exists, lane_slot0_paused};
 use crate::types::{Address, MathError, U256};
 use std::collections::HashMap;
 
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-/// Effective fee state for the router configured by a client or indexer.
-pub struct FeeProfile {
-    /// Whether the configured router bypasses the global blacklist multiplier.
-    pub whitelisted: bool,
-    /// Global multiplier applied only when `whitelisted` is false.
-    pub blacklist_fee_multiplier: U256,
-    /// Share of the explicit fee assigned to the runtime's router, keyed by fee asset.
-    pub partner_fee_bps: HashMap<Address, u32>,
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+/// Economic fee class selected by the runtime for an execution caller.
+pub enum FeeClass {
+    /// The caller keeps each lane's raw fee and bypasses the blacklist multiplier.
+    Whitelisted,
+    /// The caller pays each raw lane fee multiplied by the global multiplier.
+    NonWhitelisted,
 }
 
-impl Default for FeeProfile {
-    fn default() -> Self {
+impl FeeClass {
+    /// Returns the boolean consumed by Solidity-compatible fee math.
+    #[inline]
+    pub const fn is_whitelisted(self) -> bool {
+        matches!(self, Self::Whitelisted)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Per-evaluation policy kept outside immutable chain state.
+pub struct QuotePolicy {
+    /// Fee class used to calculate the economic quote.
+    pub fee_class: FeeClass,
+    /// Optional chain-verified partner share for the quote's fee asset.
+    pub verified_partner_fee_bps: Option<u32>,
+}
+
+impl QuotePolicy {
+    /// Creates a base economic quote without router-specific fee allocation.
+    pub const fn base(fee_class: FeeClass) -> Self {
         Self {
-            whitelisted: true,
-            blacklist_fee_multiplier: U256::ONE,
-            partner_fee_bps: HashMap::new(),
+            fee_class,
+            verified_partner_fee_bps: None,
+        }
+    }
+
+    /// Adds a partner share that the caller has verified for one router and fee asset.
+    pub const fn with_verified_partner_fee(fee_class: FeeClass, fee_bps: u32) -> Self {
+        Self {
+            fee_class,
+            verified_partner_fee_bps: Some(fee_bps),
         }
     }
 }
 
-impl FeeProfile {
-    /// Returns the configured router's explicit-fee share for `asset`.
-    #[inline]
-    pub(crate) fn partner_fee_bps(&self, asset: Address) -> U256 {
-        U256::from(self.partner_fee_bps.get(&asset).copied().unwrap_or(0))
-    }
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 /// Immutable quote-critical snapshot held by the runtime.
 ///
 /// `HashMap` provides constant-time lane lookup on the hot path. Persistence
@@ -46,8 +61,19 @@ pub struct QuoteState {
     pub cash_reserve: u128,
     /// Quote-critical lane state keyed by non-cash asset address.
     pub lanes: HashMap<Address, LaneState>,
-    /// Effective fee configuration for the single runtime router.
-    pub fee_profile: FeeProfile,
+    /// Global multiplier applied only to non-whitelisted execution callers.
+    pub blacklist_fee_multiplier: U256,
+}
+
+impl Default for QuoteState {
+    fn default() -> Self {
+        Self {
+            cash: Address::ZERO,
+            cash_reserve: 0,
+            lanes: HashMap::new(),
+            blacklist_fee_multiplier: U256::ONE,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -110,7 +136,7 @@ pub struct QuoteRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-/// Full off-chain quote result, including the retained fee allocation details.
+/// Full off-chain quote result with optional verified accounting allocation.
 pub struct QuoteResult {
     /// Total input required or consumed by the quote.
     pub amount_in: U256,
@@ -120,9 +146,16 @@ pub struct QuoteResult {
     pub fee_asset: Address,
     /// Complete fee amount before splitting partner and treasury shares.
     pub fee_amount: U256,
-    /// Portion of `fee_amount` assigned to the configured partner.
+    /// Optional accounting split for a chain-verified router and fee asset.
+    pub fee_allocation: Option<FeeAllocation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+/// Router-specific accounting split that does not affect quote economics.
+pub struct FeeAllocation {
+    /// Portion of the complete fee assigned to the verified partner.
     pub partner_fee: U256,
-    /// Remaining portion of `fee_amount` assigned to the treasury.
+    /// Remaining portion assigned to the treasury.
     pub treasury_fee: U256,
 }
 

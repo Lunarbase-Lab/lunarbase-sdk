@@ -7,7 +7,7 @@ use lunarbase_client::prelude::{
 };
 use lunarbase_math::slot0::{LaneSlot0, encode_lane_slot0};
 use lunarbase_math::{
-    Address, B256, FeeProfile, LaneState, QuoteMode, QuoteRequest, QuoteState, U256, WAD,
+    Address, B256, FeeClass, LaneState, QuoteMode, QuoteRequest, QuoteState, U256, WAD,
 };
 use std::collections::HashMap;
 use std::time::Duration;
@@ -16,7 +16,6 @@ const CHAIN_ID: u64 = 8453;
 const EXECUTION_BLOCK: u64 = 10_000;
 const CASH_ID: u64 = 1;
 const CORE_ID: u64 = 2;
-const ROUTER_ID: u64 = 3;
 const IMPLEMENTATION_ID: u64 = 4;
 const FIRST_LANE_ID: u64 = 100;
 const RESERVE: u128 = 1_000_000_000_000_000_000_000_000_000_000;
@@ -57,11 +56,8 @@ pub fn fixture(lanes: usize, pairs: usize) -> Result<QuoteBenchmarkFixture, Stri
     let lane_assets = (0..lanes)
         .map(|index| address(FIRST_LANE_ID + index as u64))
         .collect::<Vec<_>>();
-    let mut partner_fee_bps = HashMap::with_capacity(lanes + 1);
-    partner_fee_bps.insert(cash, 100_000);
     let mut lane_states = HashMap::with_capacity(lanes);
     for (index, asset) in lane_assets.iter().copied().enumerate() {
-        partner_fee_bps.insert(asset, 100_000);
         let price = u128::try_from(WAD).map_err(|error| error.to_string())?
             + (index as u128 % 25) * 1_000_000_000_000_000;
         let slot0 = encode_lane_slot0(&LaneSlot0 {
@@ -81,11 +77,7 @@ pub fn fixture(lanes: usize, pairs: usize) -> Result<QuoteBenchmarkFixture, Stri
         cash,
         cash_reserve: RESERVE,
         lanes: lane_states,
-        fee_profile: FeeProfile {
-            whitelisted: true,
-            blacklist_fee_multiplier: U256::ONE,
-            partner_fee_bps,
-        },
+        blacklist_fee_multiplier: U256::ONE,
     };
     let implementation = address(IMPLEMENTATION_ID);
     let implementation_code_hash = B256::new([7; 32]);
@@ -101,8 +93,8 @@ pub fn fixture(lanes: usize, pairs: usize) -> Result<QuoteBenchmarkFixture, Stri
             network: Network::Base,
             chain_id: CHAIN_ID,
             core,
-            router: address(ROUTER_ID),
-            expect_whitelisted: true,
+            fee_class: FeeClass::Whitelisted,
+            verified_router: None,
             deployment_block: 1,
             expected_implementation: implementation,
             expected_implementation_code_hash: implementation_code_hash,
@@ -126,6 +118,7 @@ pub fn fixture(lanes: usize, pairs: usize) -> Result<QuoteBenchmarkFixture, Stri
             cursor,
             implementation,
             implementation_code_hash,
+            verified_router: None,
         },
         requests,
     })

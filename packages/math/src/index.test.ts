@@ -11,6 +11,7 @@ import {
   type Address,
   type LaneSlot0,
   type LaneState,
+  type QuotePolicy,
   type QuoteState,
 } from "./index.js";
 import { checkedAdd, checkedMul, checkedSub, ensureDenominator } from "./arithmetic.js";
@@ -67,6 +68,7 @@ interface GoldenVector {
 }
 
 const address = (last: string): Address => parseAddress(`0x${last.padStart(40, "0")}`);
+const WHITELISTED: QuotePolicy = { feeClass: "Whitelisted" };
 
 const EMPTY_SLOT0: LaneSlot0 = {
   price: 0n,
@@ -194,19 +196,18 @@ test("direct quote returns complete result and Solidity sentinels", () => {
         ),
       ],
     ]),
-    feeProfile: {
-      whitelisted: false,
-      blacklistFeeMultiplier: 1n,
-      partnerFeeBps: new Map([[asset, 500_000]]),
-    },
+    blacklistFeeMultiplier: 1n,
   };
-  const outcome = quote({ assetIn: cash, assetOut: asset, amount: 100n, mode: "ExactIn" }, 1n, state);
+  const policy: QuotePolicy = { feeClass: "NonWhitelisted", verifiedPartnerFeeBps: 500_000 };
+  const outcome = quote({ assetIn: cash, assetOut: asset, amount: 100n, mode: "ExactIn" }, 1n, state, policy);
   assert.equal(outcome.kind, "Available");
   if (outcome.kind === "Available") assert.equal(outcome.result.feeAsset, asset);
-  const unavailable = quote({ assetIn: cash, assetOut: asset, amount: 1n, mode: "ExactOut" }, 1n, {
-    ...state,
-    lanes: new Map(),
-  });
+  const unavailable = quote(
+    { assetIn: cash, assetOut: asset, amount: 1n, mode: "ExactOut" },
+    1n,
+    { ...state, lanes: new Map() },
+    policy,
+  );
   const exactIn = {
     assetIn: address("1"),
     assetOut: address("2"),
@@ -231,6 +232,40 @@ test("direct quote returns complete result and Solidity sentinels", () => {
   );
 });
 
+test("verified partner profiles change only accounting allocation", () => {
+  const cash = address("1");
+  const asset = address("2");
+  const state: QuoteState = {
+    cash,
+    cashReserve: (1n << 128n) - 1n,
+    lanes: new Map([
+      [
+        asset,
+        createLaneState(
+          encodeLaneSlot0({
+            ...EMPTY_SLOT0,
+            price: WAD,
+            askFeeBps: 10_000n,
+            latestUpdateBlock: 1n,
+            exists: true,
+          }),
+          (1n << 128n) - 1n,
+          1_000_000n,
+        ),
+      ],
+    ]),
+    blacklistFeeMultiplier: 1n,
+  };
+  const request = { assetIn: cash, assetOut: asset, amount: 100_000n, mode: "ExactIn" } as const;
+  const low = quote(request, 1n, state, { feeClass: "Whitelisted", verifiedPartnerFeeBps: 100_000 });
+  const high = quote(request, 1n, state, { feeClass: "Whitelisted", verifiedPartnerFeeBps: 900_000 });
+  assert.equal(low.kind, "Available");
+  assert.equal(high.kind, "Available");
+  if (low.kind !== "Available" || high.kind !== "Available") return;
+  assert.deepEqual({ ...low.result, feeAllocation: undefined }, { ...high.result, feeAllocation: undefined });
+  assert.notDeepEqual(low.result.feeAllocation, high.result.feeAllocation);
+});
+
 test("lane quote TTL includes boundary and expires next block", () => {
   const cash = address("1");
   const asset = address("2");
@@ -253,17 +288,13 @@ test("lane quote TTL includes boundary and expires next block", () => {
         ),
       ],
     ]),
-    feeProfile: {
-      whitelisted: true,
-      blacklistFeeMultiplier: 1n,
-      partnerFeeBps: new Map(),
-    },
+    blacklistFeeMultiplier: 1n,
   };
   const request = { assetIn: cash, assetOut: asset, amount: 100n, mode: "ExactIn" as const };
 
-  assert.equal(quote(request, 100n, state).kind, "Available");
-  assert.equal(quote(request, 103n, state).kind, "Available");
-  assert.deepEqual(quote(request, 104n, state), {
+  assert.equal(quote(request, 100n, state, WHITELISTED).kind, "Available");
+  assert.equal(quote(request, 103n, state, WHITELISTED).kind, "Available");
+  assert.deepEqual(quote(request, 104n, state, WHITELISTED), {
     kind: "Unavailable",
     reason: { kind: "StaleLane", asset },
   });
@@ -335,30 +366,26 @@ test("reserve boundary matches exact-in and exact-out settlement", () => {
     cash,
     cashReserve: (1n << 128n) - 1n,
     lanes: new Map([[asset, lane]]),
-    feeProfile: {
-      whitelisted: true,
-      blacklistFeeMultiplier: 1n,
-      partnerFeeBps: new Map(),
-    },
+    blacklistFeeMultiplier: 1n,
   };
   const exactIn = { assetIn: cash, assetOut: asset, amount: 100n, mode: "ExactIn" as const };
-  const reference = quote(exactIn, 1n, state);
+  const reference = quote(exactIn, 1n, state, WHITELISTED);
   assert.equal(reference.kind, "Available");
   if (reference.kind !== "Available") return;
   const required = reference.result.amountOut + reference.result.feeAmount;
   lane.assetReserve = required;
-  assert.equal(quote(exactIn, 1n, state).kind, "Available");
+  assert.equal(quote(exactIn, 1n, state, WHITELISTED).kind, "Available");
   lane.assetReserve = required - 1n;
-  assert.deepEqual(quote(exactIn, 1n, state), {
+  assert.deepEqual(quote(exactIn, 1n, state, WHITELISTED), {
     kind: "Unavailable",
     reason: { kind: "InsufficientOutputReserve", asset },
   });
 
   const exactOut = { ...exactIn, amount: 100n, mode: "ExactOut" as const };
   lane.assetReserve = 100n;
-  assert.equal(quote(exactOut, 1n, state).kind, "Available");
+  assert.equal(quote(exactOut, 1n, state, WHITELISTED).kind, "Available");
   lane.assetReserve = 99n;
-  assert.deepEqual(quote(exactOut, 1n, state), {
+  assert.deepEqual(quote(exactOut, 1n, state, WHITELISTED), {
     kind: "Unavailable",
     reason: { kind: "InsufficientOutputReserve", asset },
   });
@@ -394,15 +421,11 @@ test("route preserves contract evaluation order before zero-price sentinel", () 
         ),
       ],
     ]),
-    feeProfile: {
-      whitelisted: true,
-      blacklistFeeMultiplier: 1n,
-      partnerFeeBps: new Map(),
-    },
+    blacklistFeeMultiplier: 1n,
   };
 
   assert.throws(
-    () => quote({ assetIn, assetOut, amount: U256_MAX, mode: "ExactOut" }, 1n, state),
+    () => quote({ assetIn, assetOut, amount: U256_MAX, mode: "ExactOut" }, 1n, state, WHITELISTED),
     (error: unknown) => error instanceof Error && "code" in error && error.code === "OVERFLOW",
   );
 });
@@ -444,16 +467,15 @@ test("shared golden vectors match TypeScript engine", () => {
         ),
       );
     }
-    const feeAsset = vector.mode === "ExactIn" ? assetOut : assetIn;
     const state: QuoteState = {
       cash,
       cashReserve: (1n << 128n) - 1n,
       lanes,
-      feeProfile: {
-        whitelisted: vector.whitelisted,
-        blacklistFeeMultiplier: BigInt(vector.blacklistFeeMultiplier),
-        partnerFeeBps: new Map([[feeAsset, Number(vector.partnerFeeBps)]]),
-      },
+      blacklistFeeMultiplier: BigInt(vector.blacklistFeeMultiplier),
+    };
+    const policy: QuotePolicy = {
+      feeClass: vector.whitelisted ? "Whitelisted" : "NonWhitelisted",
+      verifiedPartnerFeeBps: Number(vector.partnerFeeBps),
     };
     const request = {
       assetIn,
@@ -463,14 +485,14 @@ test("shared golden vectors match TypeScript engine", () => {
     };
     if (vector.expectedError) {
       assert.throws(
-        () => quote(request, BigInt(vector.executionBlockNumber), state),
+        () => quote(request, BigInt(vector.executionBlockNumber), state, policy),
         (error: unknown) =>
           error instanceof Error && "code" in error && (error as { code: unknown }).code === "OVERFLOW",
         vector.name,
       );
       continue;
     }
-    const outcome = quote(request, BigInt(vector.executionBlockNumber), state);
+    const outcome = quote(request, BigInt(vector.executionBlockNumber), state, policy);
     if (vector.expected) {
       assert.equal(outcome.kind, "Available", vector.name);
       if (outcome.kind === "Available") {
@@ -478,8 +500,8 @@ test("shared golden vectors match TypeScript engine", () => {
         assert.equal(outcome.result.amountOut, BigInt(vector.expected.amountOut));
         assert.equal(outcome.result.feeAsset, parseAddress(vector.expected.feeAsset));
         assert.equal(outcome.result.feeAmount, BigInt(vector.expected.feeAmount));
-        assert.equal(outcome.result.partnerFee, BigInt(vector.expected.partnerFee));
-        assert.equal(outcome.result.treasuryFee, BigInt(vector.expected.treasuryFee));
+        assert.equal(outcome.result.feeAllocation?.partnerFee, BigInt(vector.expected.partnerFee));
+        assert.equal(outcome.result.feeAllocation?.treasuryFee, BigInt(vector.expected.treasuryFee));
       }
     } else {
       assert.equal(solidityQuoteAmount(request, outcome), BigInt(vector.expectedPublicAmount ?? "missing"));

@@ -18,13 +18,15 @@ pub use arithmetic::{BPS, WAD};
 pub use quote::{quote, solidity_quote_amount};
 pub use slot0::{LaneSlot0, decode_lane_slot0, encode_lane_slot0};
 pub use state::{
-    FeeProfile, LaneState, QuoteError, QuoteMode, QuoteOutcome, QuoteRequest, QuoteResult,
-    QuoteState, UnavailableReason,
+    FeeAllocation, FeeClass, LaneState, QuoteError, QuoteMode, QuoteOutcome, QuotePolicy,
+    QuoteRequest, QuoteResult, QuoteState, UnavailableReason,
 };
 pub use types::{Address, B256, Bytes, MathError, U256};
 
 #[cfg(test)]
 mod fee_tests;
+#[cfg(test)]
+mod policy_tests;
 #[cfg(test)]
 mod sentinel_tests;
 #[cfg(test)]

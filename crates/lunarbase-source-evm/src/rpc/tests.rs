@@ -12,7 +12,7 @@ use lunarbase_client::model::{
 };
 use lunarbase_client::protocol::abi::{core, quote_critical_topics};
 use lunarbase_client::state::reducer::QuoteReducer;
-use lunarbase_math::{Address, B256, QuoteState, U256};
+use lunarbase_math::{Address, B256, FeeClass, QuoteState, U256};
 
 #[test]
 fn generated_core_selectors_match_the_pinned_abi() {
@@ -174,15 +174,15 @@ fn checkpoint() -> Checkpoint {
         network: Network::Evm,
         chain_id: 97,
         core: Address::new([1; 20]),
-        router: Address::new([2; 20]),
-        expect_whitelisted: true,
+        fee_class: FeeClass::Whitelisted,
+        verified_router: None,
         deployment_block: 1,
         expected_implementation: Address::new([3; 20]),
         expected_implementation_code_hash: B256::new([4; 32]),
         contract_compatibility_version: MATH_COMPATIBILITY_VERSION.into(),
         explicit_lane_assets: Vec::new(),
     };
-    let mut reducer = QuoteReducer::new(QuoteState::default(), deployment.router);
+    let mut reducer = QuoteReducer::new(QuoteState::default(), deployment.fee_class, None);
     reducer.bootstrap(ChainCursor::block(
         97,
         42,
@@ -277,7 +277,7 @@ fn request() -> BackfillRequest {
     }
 }
 #[tokio::test]
-async fn snapshot_preserves_global_blacklist_multiplier_after_whitelist_removal() {
+async fn class_snapshot_skips_router_calls_and_ignores_whitelist_events() {
     let asserter = Asserter::new();
     let client = RpcHttpClient::from_client(RpcClient::mocked(asserter.clone()));
     let provider = RpcSnapshotProvider::new(client, "latest");
@@ -301,7 +301,6 @@ async fn snapshot_preserves_global_blacklist_multiplier_after_whitelist_removal(
     asserter.push_success(&runtime_code);
     asserter.push_success(&Vec::<serde_json::Value>::new());
     asserter.push_success(&Bytes::from(core::cashCall::abi_encode_returns(&cash)));
-    asserter.push_success(&Bytes::from(core::whitelistCall::abi_encode_returns(&true)));
     asserter.push_success(&Bytes::from(
         core::blacklistFeeMultiplierCall::abi_encode_returns(&U256::from(9)),
     ));
@@ -314,22 +313,14 @@ async fn snapshot_preserves_global_blacklist_multiplier_after_whitelist_removal(
             totalPrincipalAmount: 0,
         },
     )));
-    asserter.push_success(&Bytes::from(core::partnersCall::abi_encode_returns(
-        &core::partnersReturn {
-            cumFees: 0,
-            fee: 0,
-            latestWithdrawTimestamp: 0,
-            operator: Address::ZERO,
-        },
-    )));
     asserter.push_success(&head);
 
     let config = DeploymentConfig {
         network: Network::Evm,
         chain_id: 97,
         core: core_address,
-        router,
-        expect_whitelisted: true,
+        fee_class: FeeClass::Whitelisted,
+        verified_router: None,
         deployment_block: 1,
         expected_implementation: implementation,
         expected_implementation_code_hash: keccak256(&runtime_code),
@@ -338,10 +329,8 @@ async fn snapshot_preserves_global_blacklist_multiplier_after_whitelist_removal(
     };
 
     let snapshot = provider.snapshot(&config).await.unwrap();
-    assert_eq!(
-        snapshot.state.fee_profile.blacklist_fee_multiplier,
-        U256::from(9)
-    );
+    assert_eq!(snapshot.state.blacklist_fee_multiplier, U256::from(9));
+    assert!(snapshot.verified_router.is_none());
 
     let mut event_cursor = snapshot.cursor.clone();
     event_cursor.block_number = 43;
@@ -349,7 +338,7 @@ async fn snapshot_preserves_global_blacklist_multiplier_after_whitelist_removal(
     event_cursor.block_hash = Some(B256::new([0x22; 32]));
     event_cursor.transaction_index = Some(0);
     event_cursor.log_index = Some(0);
-    let mut reducer = QuoteReducer::new(snapshot.state, router);
+    let mut reducer = QuoteReducer::new(snapshot.state, config.fee_class, None);
     reducer.bootstrap(snapshot.cursor);
     reducer
         .apply(
@@ -361,10 +350,47 @@ async fn snapshot_preserves_global_blacklist_multiplier_after_whitelist_removal(
         )
         .unwrap();
 
-    assert!(!reducer.state().fee_profile.whitelisted);
-    assert_eq!(
-        reducer.state().fee_profile.blacklist_fee_multiplier,
-        U256::from(9)
-    );
+    assert_eq!(reducer.state().blacklist_fee_multiplier, U256::from(9));
+    assert!(asserter.read_q().is_empty());
+
+    asserter.push_success(&serde_json::json!("0x61"));
+    asserter.push_success(&head);
+    asserter.push_success(&implementation_word);
+    asserter.push_success(&runtime_code);
+    asserter.push_success(&Vec::<serde_json::Value>::new());
+    asserter.push_success(&Bytes::from(core::cashCall::abi_encode_returns(&cash)));
+    asserter.push_success(&Bytes::from(
+        core::blacklistFeeMultiplierCall::abi_encode_returns(&U256::from(9)),
+    ));
+    asserter.push_success(&Bytes::from(core::reservesCall::abi_encode_returns(
+        &core::reservesReturn {
+            assetReserve: 2_000,
+            treasuryFees: 0,
+            partnerFees: 0,
+            escrowedAssets: 0,
+            totalPrincipalAmount: 0,
+        },
+    )));
+    asserter.push_success(&Bytes::from(core::whitelistCall::abi_encode_returns(&true)));
+    asserter.push_success(&Bytes::from(core::partnersCall::abi_encode_returns(
+        &core::partnersReturn {
+            cumFees: 0,
+            fee: 250_000,
+            latestWithdrawTimestamp: 0,
+            operator: Address::ZERO,
+        },
+    )));
+    asserter.push_success(&head);
+
+    let exact = provider
+        .snapshot(&DeploymentConfig {
+            verified_router: Some(router),
+            ..config
+        })
+        .await
+        .unwrap();
+    let verified = exact.verified_router.expect("verified router snapshot");
+    assert_eq!(verified.router, router);
+    assert_eq!(verified.partner_fee_bps.get(&cash), Some(&250_000));
     assert!(asserter.read_q().is_empty());
 }

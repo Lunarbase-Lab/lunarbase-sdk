@@ -12,8 +12,8 @@ const normalized = (value: string): string => value.toLowerCase();
 export function validateDeploymentConfig(config: DeploymentConfig): void {
   if (!Object.values(Network).includes(config.network))
     throw new IndexerError("SOURCE", "network must be a supported source family");
-  if (typeof config.expectWhitelisted !== "boolean")
-    throw new IndexerError("SOURCE", "expectWhitelisted must be boolean");
+  if (config.feeClass !== "Whitelisted" && config.feeClass !== "NonWhitelisted")
+    throw new IndexerError("SOURCE", "feeClass must be Whitelisted or NonWhitelisted");
   if (!Array.isArray(config.explicitLaneAssets))
     throw new IndexerError("SOURCE", "explicitLaneAssets must be an array");
   if (!isUint(config.chainId, U64_MAX) || config.chainId === 0n)
@@ -22,12 +22,19 @@ export function validateDeploymentConfig(config: DeploymentConfig): void {
     throw new IndexerError("SOURCE", "deploymentBlock must be a non-negative u64");
   try {
     const core = parseAddress(config.core);
-    const router = parseAddress(config.router);
     const implementation = parseAddress(config.expectedImplementation);
-    if (Hex.toBigInt(core) === 0n || Hex.toBigInt(router) === 0n || Hex.toBigInt(implementation) === 0n)
+    const verifiedRouter = config.verifiedRouter === undefined ? undefined : parseAddress(config.verifiedRouter);
+    if (
+      Hex.toBigInt(core) === 0n ||
+      (verifiedRouter !== undefined && Hex.toBigInt(verifiedRouter) === 0n) ||
+      Hex.toBigInt(implementation) === 0n
+    )
       throw new Error("zero address");
   } catch {
-    throw new IndexerError("SOURCE", "Core, router, and implementation must be valid non-zero addresses");
+    throw new IndexerError(
+      "SOURCE",
+      "Core, optional verified router, and implementation must be valid non-zero addresses",
+    );
   }
   if (
     !Hash.validate(config.expectedImplementationCodeHash) ||
@@ -62,9 +69,7 @@ export function checkpointMatchesDeployment(checkpoint: Checkpoint, config: Depl
       checkpoint.chainId === config.chainId &&
       checkpoint.network === config.network &&
       normalized(checkpoint.core) === normalized(config.core) &&
-      normalized(checkpoint.router) === normalized(config.router) &&
       checkpoint.deploymentBlock === config.deploymentBlock &&
-      checkpoint.expectWhitelisted === config.expectWhitelisted &&
       sameAddressSet(checkpoint.explicitLaneAssets, config.explicitLaneAssets) &&
       checkpointHasValidStructure(checkpoint)
     );
@@ -78,14 +83,12 @@ export function checkpointHasValidStructure(checkpoint: Checkpoint): boolean {
   try {
     if (
       !Object.values(Network).includes(checkpoint.network) ||
-      typeof checkpoint.expectWhitelisted !== "boolean" ||
       !isUint(checkpoint.chainId, U64_MAX) ||
       checkpoint.chainId === 0n ||
       !isUint(checkpoint.deploymentBlock, U64_MAX) ||
       !isNonZeroAddress(checkpoint.expectedImplementation) ||
       !isHash(checkpoint.expectedImplementationCodeHash) ||
       !isNonZeroAddress(checkpoint.core) ||
-      !isNonZeroAddress(checkpoint.router) ||
       !Array.isArray(checkpoint.explicitLaneAssets)
     )
       return false;
@@ -120,10 +123,7 @@ export function checkpointHasValidStructure(checkpoint: Checkpoint): boolean {
       !isNonZeroAddress(state.cash) ||
       !isUint(state.cashReserve, U128_MAX) ||
       !(state.lanes instanceof Map) ||
-      typeof state.feeProfile.whitelisted !== "boolean" ||
-      state.feeProfile.whitelisted !== checkpoint.expectWhitelisted ||
-      !isUint(state.feeProfile.blacklistFeeMultiplier, U256_MAX) ||
-      !(state.feeProfile.partnerFeeBps instanceof Map)
+      !isUint(state.blacklistFeeMultiplier, U256_MAX)
     )
       return false;
 
@@ -145,13 +145,6 @@ export function checkpointHasValidStructure(checkpoint: Checkpoint): boolean {
         return false;
     }
 
-    const feeAssets = new Set<string>();
-    for (const [asset, fee] of state.feeProfile.partnerFeeBps) {
-      if (!isNonZeroAddress(asset) || !Number.isSafeInteger(fee) || fee < 0 || BigInt(fee) > BPS) return false;
-      const assetKey = addressKey(asset);
-      if (feeAssets.has(assetKey)) return false;
-      feeAssets.add(assetKey);
-    }
     return true;
   } catch {
     return false;

@@ -5,7 +5,8 @@ use crate::slot0::{
     lane_slot0_price,
 };
 use crate::state::{
-    LaneState, QuoteError, QuoteMode, QuoteOutcome, QuoteRequest, QuoteState, UnavailableReason,
+    FeeClass, LaneState, QuoteError, QuoteMode, QuoteOutcome, QuotePolicy, QuoteRequest,
+    QuoteState, UnavailableReason,
 };
 use crate::types::{Address, B256, Bytes, MathError, U256};
 use serde::Deserialize;
@@ -18,6 +19,9 @@ fn address(value: u8) -> Address {
     let mut bytes = [0u8; 20];
     bytes[19] = value;
     Address::new(bytes)
+}
+fn whitelisted() -> QuotePolicy {
+    QuotePolicy::base(FeeClass::Whitelisted)
 }
 
 #[test]
@@ -80,7 +84,6 @@ fn direct_quote_matches_fee_split() {
         cash_reserve: u128::MAX,
         ..Default::default()
     };
-    state.fee_profile.whitelisted = false;
     state.lanes.insert(
         asset,
         LaneState::new(
@@ -96,14 +99,19 @@ fn direct_quote_matches_fee_split() {
             1_000_000,
         ),
     );
-    state.fee_profile.partner_fee_bps.insert(asset, 500_000);
     let request = QuoteRequest {
         asset_in: cash,
         asset_out: asset,
         amount: n(100),
         mode: QuoteMode::ExactIn,
     };
-    let outcome = quote(&request, 1, &state).unwrap();
+    let outcome = quote(
+        &request,
+        1,
+        &state,
+        QuotePolicy::with_verified_partner_fee(FeeClass::NonWhitelisted, 500_000),
+    )
+    .unwrap();
     let QuoteOutcome::Available(result) = outcome else {
         panic!("quote unavailable")
     };
@@ -111,8 +119,9 @@ fn direct_quote_matches_fee_split() {
     assert_eq!(result.fee_asset, asset);
     assert!(result.amount_out > U256::ZERO);
     assert_eq!(result.fee_amount, n(1));
-    assert_eq!(result.partner_fee, n(0));
-    assert_eq!(result.treasury_fee, n(1));
+    let allocation = result.fee_allocation.expect("verified allocation");
+    assert_eq!(allocation.partner_fee, n(0));
+    assert_eq!(allocation.treasury_fee, n(1));
 }
 
 #[test]
@@ -124,7 +133,6 @@ fn exact_out_asset_to_cash_uses_requested_cash_value() {
         cash_reserve: u128::MAX,
         ..Default::default()
     };
-    state.fee_profile.whitelisted = false;
     state.lanes.insert(
         asset,
         LaneState::new(
@@ -146,7 +154,13 @@ fn exact_out_asset_to_cash_uses_requested_cash_value() {
         amount: n(100),
         mode: QuoteMode::ExactOut,
     };
-    let QuoteOutcome::Available(result) = quote(&request, 1, &state).unwrap() else {
+    let QuoteOutcome::Available(result) = quote(
+        &request,
+        1,
+        &state,
+        QuotePolicy::base(FeeClass::NonWhitelisted),
+    )
+    .unwrap() else {
         panic!("quote unavailable")
     };
     assert_eq!(result.amount_in, n(51));
@@ -184,15 +198,15 @@ fn lane_quote_ttl_includes_boundary_and_expires_next_block() {
     };
 
     assert!(matches!(
-        quote(&request, 100, &state).unwrap(),
+        quote(&request, 100, &state, whitelisted()).unwrap(),
         QuoteOutcome::Available(_)
     ));
     assert!(matches!(
-        quote(&request, 103, &state).unwrap(),
+        quote(&request, 103, &state, whitelisted()).unwrap(),
         QuoteOutcome::Available(_)
     ));
     assert_eq!(
-        quote(&request, 104, &state).unwrap(),
+        quote(&request, 104, &state, whitelisted()).unwrap(),
         QuoteOutcome::Unavailable(UnavailableReason::StaleLane(asset))
     );
 }
@@ -288,18 +302,19 @@ fn reserve_boundary_matches_exact_in_and_exact_out_settlement() {
         amount: n(100),
         mode: QuoteMode::ExactIn,
     };
-    let QuoteOutcome::Available(result) = quote(&exact_in, 1, &state).unwrap() else {
+    let QuoteOutcome::Available(result) = quote(&exact_in, 1, &state, whitelisted()).unwrap()
+    else {
         panic!("reference exact-in quote unavailable")
     };
     let required = u128::try_from(result.amount_out + result.fee_amount).unwrap();
     state.lanes.get_mut(&asset).unwrap().asset_reserve = required;
     assert!(matches!(
-        quote(&exact_in, 1, &state).unwrap(),
+        quote(&exact_in, 1, &state, whitelisted()).unwrap(),
         QuoteOutcome::Available(_)
     ));
     state.lanes.get_mut(&asset).unwrap().asset_reserve = required - 1;
     assert_eq!(
-        quote(&exact_in, 1, &state).unwrap(),
+        quote(&exact_in, 1, &state, whitelisted()).unwrap(),
         QuoteOutcome::Unavailable(UnavailableReason::InsufficientOutputReserve(asset))
     );
 
@@ -310,12 +325,12 @@ fn reserve_boundary_matches_exact_in_and_exact_out_settlement() {
     };
     state.lanes.get_mut(&asset).unwrap().asset_reserve = 100;
     assert!(matches!(
-        quote(&exact_out, 1, &state).unwrap(),
+        quote(&exact_out, 1, &state, whitelisted()).unwrap(),
         QuoteOutcome::Available(_)
     ));
     state.lanes.get_mut(&asset).unwrap().asset_reserve = 99;
     assert_eq!(
-        quote(&exact_out, 1, &state).unwrap(),
+        quote(&exact_out, 1, &state, whitelisted()).unwrap(),
         QuoteOutcome::Unavailable(UnavailableReason::InsufficientOutputReserve(asset))
     );
 }
@@ -350,7 +365,7 @@ fn route_preserves_contract_evaluation_order_before_zero_price_sentinel() {
     };
 
     assert_eq!(
-        quote(&request, 1, &state).unwrap_err(),
+        quote(&request, 1, &state, whitelisted()).unwrap_err(),
         QuoteError::Arithmetic(MathError::Overflow)
     );
 }
@@ -428,17 +443,15 @@ fn shared_quote_vectors_match_rust_math() {
             cash_reserve: u128::MAX,
             ..Default::default()
         };
-        state.fee_profile.whitelisted = vector.whitelisted;
-        state.fee_profile.blacklist_fee_multiplier = golden_u256(&vector.blacklist_fee_multiplier);
-        let fee_asset = if vector.mode == QuoteMode::ExactIn {
-            asset_out
-        } else {
-            asset_in
-        };
-        state
-            .fee_profile
-            .partner_fee_bps
-            .insert(fee_asset, vector.partner_fee_bps.parse().unwrap());
+        state.blacklist_fee_multiplier = golden_u256(&vector.blacklist_fee_multiplier);
+        let policy = QuotePolicy::with_verified_partner_fee(
+            if vector.whitelisted {
+                FeeClass::Whitelisted
+            } else {
+                FeeClass::NonWhitelisted
+            },
+            vector.partner_fee_bps.parse().unwrap(),
+        );
         for (asset, lane) in [(asset_in, vector.lane_in), (asset_out, vector.lane_out)] {
             if let Some(lane) = lane {
                 let slot0 = encode_lane_slot0(&LaneSlot0 {
@@ -469,6 +482,7 @@ fn shared_quote_vectors_match_rust_math() {
             &request,
             vector.execution_block_number.parse().unwrap(),
             &state,
+            policy,
         );
         if let Some(expected_error) = vector.expected_error {
             assert_eq!(expected_error, "Overflow", "{}", vector.name);
@@ -496,8 +510,9 @@ fn shared_quote_vectors_match_rust_math() {
                 Address::from_str(&expected.fee_asset).unwrap()
             );
             assert_eq!(actual.fee_amount, golden_u256(&expected.fee_amount));
-            assert_eq!(actual.partner_fee, golden_u256(&expected.partner_fee));
-            assert_eq!(actual.treasury_fee, golden_u256(&expected.treasury_fee));
+            let allocation = actual.fee_allocation.expect("golden allocation");
+            assert_eq!(allocation.partner_fee, golden_u256(&expected.partner_fee));
+            assert_eq!(allocation.treasury_fee, golden_u256(&expected.treasury_fee));
         }
     }
 }

@@ -1,5 +1,5 @@
 use crate::support::e2e::environment::{E2eError, MockChain};
-use crate::support::e2e::{ASSET, CORE, EMPTY_CODE_HASH, IMPLEMENTATION, ROUTER};
+use crate::support::e2e::{ASSET, CORE, EMPTY_CODE_HASH, IMPLEMENTATION};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -19,8 +19,7 @@ pub(super) fn write_config(
         r#"network = "base"
 chain_id = 8453
 core = "{CORE}"
-router = "{ROUTER}"
-expect_whitelisted = true
+fee_class = "whitelisted"
 deployment_block = 0
 expected_implementation = "{IMPLEMENTATION}"
 expected_implementation_code_hash = "{EMPTY_CODE_HASH}"

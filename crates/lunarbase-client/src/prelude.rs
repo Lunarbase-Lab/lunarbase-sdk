@@ -2,7 +2,7 @@
 //!
 //! The prelude keeps common client types and constructors in one import.
 
-pub use crate::bootstrap::BootstrapSnapshot;
+pub use crate::bootstrap::{BootstrapSnapshot, VerifiedRouterSnapshot};
 pub use crate::indexer::client::ConnectedQuoteClient;
 pub use crate::indexer::client_types::{
     ClientConnectConfig, ClientRuntimeStatsSnapshot, CoreEventSinkPolicy,
@@ -16,3 +16,4 @@ pub use crate::model::{
 };
 pub use crate::source::{ChainDataSource, SourceStream};
 pub use crate::state::reducer::{QuoteReducer, ReducerError};
+pub use lunarbase_math::FeeClass;

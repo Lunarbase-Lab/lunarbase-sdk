@@ -1,7 +1,7 @@
 # Base runtime profile for the Docker Compose example.
 network = "base"
 chain_id = 8453
-expect_whitelisted = true
+fee_class = "whitelisted"
 contract_compatibility_version = "lunarbase-pmm-v2"
 explicit_lane_assets = []
 bind = "0.0.0.0:8080"

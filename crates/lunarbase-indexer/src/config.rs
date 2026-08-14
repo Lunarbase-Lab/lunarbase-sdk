@@ -1,11 +1,11 @@
-//! Layered production configuration for one Core/router deployment.
+//! Layered production configuration for one Core deployment and fee policy.
 
 use clap::{Args, Parser};
 use lunarbase_client::indexer::client_types::ClientConnectConfig;
 use lunarbase_client::model::{
     Commitment, ContractFilter, DeploymentConfig, MATH_COMPATIBILITY_VERSION, Network,
 };
-use lunarbase_math::{Address, B256};
+use lunarbase_math::{Address, B256, FeeClass};
 use serde::Deserialize;
 use std::{net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
 use thiserror::Error;
@@ -35,12 +35,12 @@ pub struct ConfigValues {
     /// LunarBase Core contract address encoded as an EVM hex string.
     #[arg(long, env = "LUNARBASE_CORE")]
     pub core: Option<String>,
-    /// Single configured router whose fee profile is tracked.
-    #[arg(long, env = "LUNARBASE_ROUTER")]
-    pub router: Option<String>,
-    /// Required bootstrap whitelist status for the configured router.
-    #[arg(long, env = "LUNARBASE_EXPECT_WHITELISTED", value_name = "BOOL")]
-    pub expect_whitelisted: Option<bool>,
+    /// Economic quote class: `whitelisted` or `non-whitelisted`.
+    #[arg(long, env = "LUNARBASE_FEE_CLASS")]
+    pub fee_class: Option<String>,
+    /// Optional router whose partner/treasury allocation is chain-verified.
+    #[arg(long, env = "LUNARBASE_VERIFIED_ROUTER")]
+    pub verified_router: Option<String>,
     /// First deployment block included in lane discovery.
     #[arg(long, env = "LUNARBASE_DEPLOYMENT_BLOCK")]
     pub deployment_block: Option<u64>,
@@ -156,8 +156,8 @@ impl ConfigValues {
         self.network = overrides.network.or(self.network);
         self.chain_id = overrides.chain_id.or(self.chain_id);
         self.core = overrides.core.or(self.core);
-        self.router = overrides.router.or(self.router);
-        self.expect_whitelisted = overrides.expect_whitelisted.or(self.expect_whitelisted);
+        self.fee_class = overrides.fee_class.or(self.fee_class);
+        self.verified_router = overrides.verified_router.or(self.verified_router);
         self.deployment_block = overrides.deployment_block.or(self.deployment_block);
         self.expected_implementation = overrides
             .expected_implementation
@@ -205,7 +205,19 @@ impl ConfigValues {
         };
         let chain_id = required(self.chain_id, "chain_id")?;
         let core = parse_address(&required(self.core, "core")?, "core")?;
-        let router = parse_address(&required(self.router, "router")?, "router")?;
+        let fee_class = match required(self.fee_class, "fee_class")?
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "whitelisted" => FeeClass::Whitelisted,
+            "non-whitelisted" | "non_whitelisted" => FeeClass::NonWhitelisted,
+            _ => return invalid("fee_class", "expected whitelisted or non-whitelisted"),
+        };
+        let verified_router = self
+            .verified_router
+            .as_deref()
+            .map(|value| parse_address(value, "verified_router"))
+            .transpose()?;
         let explicit_lane_assets = self
             .explicit_lane_assets
             .iter()
@@ -280,8 +292,8 @@ impl ConfigValues {
             network,
             chain_id,
             core,
-            router,
-            expect_whitelisted: self.expect_whitelisted.unwrap_or(true),
+            fee_class,
+            verified_router,
             deployment_block: self.deployment_block.unwrap_or(0),
             expected_implementation,
             expected_implementation_code_hash,
@@ -380,7 +392,8 @@ mod tests {
             network: Some("base".into()),
             chain_id: Some(8453),
             core: Some(CORE.into()),
-            router: Some(ROUTER.into()),
+            fee_class: Some("whitelisted".into()),
+            verified_router: Some(ROUTER.into()),
             expected_implementation: Some(IMPLEMENTATION.into()),
             expected_implementation_code_hash: Some(CODE_HASH.into()),
             http_rpc_url: Some("http://localhost:8545".into()),
@@ -394,7 +407,10 @@ mod tests {
         let config = complete_values().validate().unwrap();
         assert_eq!(config.client.deployment.chain_id, 8453);
         assert_eq!(config.client.buffer_capacity, 4096);
-        assert!(config.client.deployment.expect_whitelisted);
+        assert_eq!(
+            config.client.deployment.fee_class,
+            lunarbase_math::FeeClass::Whitelisted
+        );
         assert_eq!(config.event_log_min_commitment, Commitment::Realtime);
         assert!(
             config.client.filter.topics.is_empty(),

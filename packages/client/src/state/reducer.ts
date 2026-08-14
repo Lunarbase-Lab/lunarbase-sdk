@@ -3,8 +3,10 @@ import {
   BPS,
   quote as computeQuote,
   type Address,
+  type FeeClass,
   type LaneState,
   type QuoteOutcome,
+  type QuotePolicy,
   type QuoteRequest,
   type QuoteState,
 } from "@lunarbase-lab/pmm-v2-math";
@@ -23,7 +25,7 @@ import {
   ReducerError,
   SCHEMA_VERSION,
 } from "../model.js";
-import type { ChainCursor, Checkpoint, DeploymentConfig, QuoteEvent } from "../model.js";
+import type { ChainCursor, Checkpoint, DeploymentConfig, QuoteEvent, VerifiedRouterSnapshot } from "../model.js";
 import { compareCursor } from "../source.js";
 
 const U128_MAX = (1n << 128n) - 1n;
@@ -42,12 +44,17 @@ function cloneState(state: QuoteState): QuoteState {
     cash: state.cash,
     cashReserve: state.cashReserve,
     lanes: new Map([...state.lanes].map(([asset, lane]) => [key(asset), { ...lane }])),
-    feeProfile: {
-      whitelisted: state.feeProfile.whitelisted,
-      blacklistFeeMultiplier: state.feeProfile.blacklistFeeMultiplier,
-      partnerFeeBps: new Map([...state.feeProfile.partnerFeeBps].map(([asset, fee]) => [key(asset), fee])),
-    },
+    blacklistFeeMultiplier: state.blacklistFeeMultiplier,
   };
+}
+
+function cloneVerifiedRouter(state: VerifiedRouterSnapshot | undefined): VerifiedRouterSnapshot | undefined {
+  return state
+    ? {
+        router: key(state.router),
+        partnerFeeBps: new Map([...state.partnerFeeBps].map(([asset, fee]) => [key(asset), fee])),
+      }
+    : undefined;
 }
 
 /** In-memory reducer whose maps never escape the client API. */
@@ -59,18 +66,19 @@ export class QuoteReducer {
   /** Fail-closed publication flag cleared by gaps and reducer failures. */
   private ready = false;
 
-  /** Creates a not-ready reducer for one configured router. */
+  /** Creates a not-ready reducer for one fee class and optional verified router. */
   constructor(
     state: QuoteState,
-    /** Only router whose fee and whitelist updates affect this instance. */
-    private readonly configuredRouter: Address,
+    private readonly feeClass: FeeClass,
+    private readonly verifiedRouterState?: VerifiedRouterSnapshot,
   ) {
     this.state = cloneState(state);
+    this.verifiedRouterState = cloneVerifiedRouter(verifiedRouterState);
   }
 
   /** Restores a prevalidated checkpoint. */
-  static fromCheckpoint(checkpoint: Checkpoint): QuoteReducer {
-    const reducer = new QuoteReducer(checkpoint.state, checkpoint.router);
+  static fromCheckpoint(checkpoint: Checkpoint, feeClass: FeeClass): QuoteReducer {
+    const reducer = new QuoteReducer(checkpoint.state, feeClass);
     reducer.cursorValue = { ...checkpoint.cursor };
     reducer.ready = true;
     return reducer;
@@ -152,13 +160,20 @@ export class QuoteReducer {
   /** Computes one quote synchronously from the current event-loop snapshot. */
   quote(request: QuoteRequest): QuoteOutcome {
     const cursor = this.requireReadyCursor();
-    return computeQuote(request, cursor.executionBlockNumber, this.state);
+    return computeQuote(request, cursor.executionBlockNumber, this.state, this.policyFor(request));
   }
 
   /** Computes a batch without yielding, so every result uses one cursor/state. */
   quoteMany(requests: readonly QuoteRequest[]): readonly QuoteOutcome[] {
     const cursor = this.requireReadyCursor();
-    return requests.map((request) => computeQuote(request, cursor.executionBlockNumber, this.state));
+    return requests.map((request) =>
+      computeQuote(request, cursor.executionBlockNumber, this.state, this.policyFor(request)),
+    );
+  }
+
+  /** Returns the optional execution caller whose allocation is verified. */
+  verifiedRouter(): Address | undefined {
+    return this.verifiedRouterState?.router;
   }
 
   /** Creates a deep-cloned restart checkpoint outside the quote path. */
@@ -172,9 +187,7 @@ export class QuoteReducer {
       chainId: config.chainId,
       network: config.network,
       core: config.core,
-      router: config.router,
       deploymentBlock: config.deploymentBlock,
-      expectWhitelisted: config.expectWhitelisted,
       explicitLaneAssets: [...config.explicitLaneAssets],
       cursor: { ...this.cursorValue },
       state: cloneState(this.state),
@@ -214,6 +227,8 @@ export class QuoteReducer {
       throw new ReducerError("INVALID_WIDTH", "price-push threshold does not fit uint7");
     if (
       (event.kind === "PartnerInfoSet" || event.kind === "PartnerFeeSet") &&
+      this.verifiedRouterState !== undefined &&
+      key(event.router) === key(this.verifiedRouterState.router) &&
       (!Number.isSafeInteger(event.fee) || event.fee < 0 || BigInt(event.fee) > BPS)
     )
       throw new ReducerError("INVALID_WIDTH", "partner fee exceeds BPS");
@@ -227,6 +242,11 @@ export class QuoteReducer {
   private applyEvent(event: QuoteEvent): void {
     switch (event.kind) {
       case "LaneAdded": {
+        if (this.verifiedRouterState)
+          throw new ReducerError(
+            "VERIFIED_ROUTER_REFRESH_REQUIRED",
+            "verified router allocation requires a snapshot refresh",
+          );
         const lane = this.lane(event.asset);
         const slot0 = setLaneSlot0Exists(lane.slot0, true);
         lane.slot0 = setLaneSlot0Paused(slot0, true);
@@ -235,6 +255,8 @@ export class QuoteReducer {
       }
       case "LaneRemoved":
         (this.state.lanes as Map<Address, LaneState>).delete(key(event.asset));
+        if (this.verifiedRouterState)
+          (this.verifiedRouterState.partnerFeeBps as Map<Address, number>).delete(key(event.asset));
         break;
       case "LaneUpdated": {
         const lane = this.existingLane(event.asset);
@@ -268,14 +290,23 @@ export class QuoteReducer {
       }
       case "PartnerInfoSet":
       case "PartnerFeeSet":
-        if (key(event.router) === key(this.configuredRouter))
-          (this.state.feeProfile.partnerFeeBps as Map<Address, number>).set(key(event.asset), event.fee);
+        if (
+          this.verifiedRouterState &&
+          key(event.router) === key(this.verifiedRouterState.router) &&
+          (key(event.asset) === key(this.state.cash) || this.state.lanes.has(key(event.asset)))
+        )
+          (this.verifiedRouterState.partnerFeeBps as Map<Address, number>).set(key(event.asset), event.fee);
         break;
       case "WhitelistSet":
-        if (key(event.router) === key(this.configuredRouter)) this.state.feeProfile.whitelisted = event.whitelisted;
+        if (
+          this.verifiedRouterState &&
+          key(event.router) === key(this.verifiedRouterState.router) &&
+          event.whitelisted !== (this.feeClass === "Whitelisted")
+        )
+          throw new ReducerError("FEE_CLASS_MISMATCH", "verified router fee class changed");
         break;
       case "BlacklistFeeMultiplierSet":
-        this.state.feeProfile.blacklistFeeMultiplier = event.multiplier;
+        this.state.blacklistFeeMultiplier = event.multiplier;
         break;
       case "DepositExecuted": {
         const lane = this.existingLane(event.asset);
@@ -318,6 +349,15 @@ export class QuoteReducer {
 
   private setLane(asset: Address, lane: LaneState): void {
     (this.state.lanes as Map<Address, LaneState>).set(key(asset), lane);
+  }
+
+  private policyFor(request: QuoteRequest): QuotePolicy {
+    if (!this.verifiedRouterState) return { feeClass: this.feeClass };
+    const feeAsset = request.mode === "ExactIn" ? request.assetOut : request.assetIn;
+    return {
+      feeClass: this.feeClass,
+      verifiedPartnerFeeBps: this.verifiedRouterState.partnerFeeBps.get(key(feeAsset)) ?? 0,
+    };
   }
 }
 

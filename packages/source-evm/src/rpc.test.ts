@@ -282,8 +282,8 @@ test("source rejects a deployment chainId mismatch before snapshot RPC", async (
     network: Network.Evm,
     chainId: 98n,
     core: parseAddress("0x0000000000000000000000000000000000000001"),
-    router: parseAddress("0x0000000000000000000000000000000000000002"),
-    expectWhitelisted: true,
+    feeClass: "Whitelisted",
+    verifiedRouter: undefined,
     deploymentBlock: 1n,
     expectedImplementation: parseAddress("0x0000000000000000000000000000000000000003"),
     expectedImplementationCodeHash: `0x${"11".repeat(32)}`,
@@ -297,7 +297,7 @@ test("source rejects a deployment chainId mismatch before snapshot RPC", async (
   assert.equal(requests.length, 0);
 });
 
-test("snapshot canonicalizes lane and partner address keys", async () => {
+test("snapshot keeps verified-router allocation outside quote state", async () => {
   const blockHash = `0x${"11".repeat(32)}` as `0x${string}`;
   const implementation = parseAddress("0x00000000000000000000000000000000000000aa");
   const implementationWord = `0x${"0".repeat(24)}${implementation.slice(2)}` as `0x${string}`;
@@ -337,8 +337,8 @@ test("snapshot canonicalizes lane and partner address keys", async () => {
     network: Network.Evm,
     chainId: 97n,
     core,
-    router,
-    expectWhitelisted: false,
+    feeClass: "NonWhitelisted",
+    verifiedRouter: router,
     deploymentBlock: 0n,
     expectedImplementation: implementation,
     expectedImplementationCodeHash: keccak256Hex(runtimeCode),
@@ -349,8 +349,9 @@ test("snapshot canonicalizes lane and partner address keys", async () => {
   const snapshot = await new RpcSnapshotProvider(rpc).snapshot(config);
 
   assert.deepEqual([...snapshot.state.lanes.keys()], [laneAsset.toLowerCase()]);
+  assert.equal("feeProfile" in snapshot.state, false);
   assert.deepEqual(
-    [...snapshot.state.feeProfile.partnerFeeBps.keys()].sort(),
+    [...(snapshot.verifiedRouter?.partnerFeeBps.keys() ?? [])].sort(),
     [laneAsset.toLowerCase(), cash.toLowerCase()].sort(),
   );
 });
@@ -371,6 +372,7 @@ test("snapshot preserves the global blacklist multiplier after whitelist removal
     blockHash,
     commitment: Commitment.Canonical,
   };
+  const contractCalls: string[] = [];
   const rpc = {
     chainId: async () => 97n,
     blockCursor: async () => cursor,
@@ -378,6 +380,7 @@ test("snapshot preserves the global blacklist multiplier after whitelist removal
     getCodeAtHash: async () => runtimeCode,
     client: {
       readContract: async (request: { functionName: string; args?: readonly unknown[] }) => {
+        contractCalls.push(request.functionName);
         if (request.functionName === "cash") return cash;
         if (request.functionName === "whitelist") return true;
         if (request.functionName === "blacklistFeeMultiplier") return 9n;
@@ -395,8 +398,8 @@ test("snapshot preserves the global blacklist multiplier after whitelist removal
     network: Network.Evm,
     chainId: 97n,
     core,
-    router,
-    expectWhitelisted: true,
+    feeClass: "Whitelisted",
+    verifiedRouter: undefined,
     deploymentBlock: 0n,
     expectedImplementation: implementation,
     expectedImplementationCodeHash: keccak256Hex(runtimeCode),
@@ -405,9 +408,12 @@ test("snapshot preserves the global blacklist multiplier after whitelist removal
   };
 
   const snapshot = await new RpcSnapshotProvider(rpc).snapshot(config);
-  assert.equal(snapshot.state.feeProfile.blacklistFeeMultiplier, 9n);
+  assert.equal(snapshot.state.blacklistFeeMultiplier, 9n);
+  assert.equal(snapshot.verifiedRouter, undefined);
+  assert.equal(contractCalls.includes("whitelist"), false);
+  assert.equal(contractCalls.includes("partners"), false);
 
-  const reducer = new QuoteReducer(snapshot.state, router);
+  const reducer = new QuoteReducer(snapshot.state, config.feeClass);
   reducer.bootstrap(snapshot.cursor);
   reducer.apply(
     {
@@ -422,6 +428,5 @@ test("snapshot preserves the global blacklist multiplier after whitelist removal
   );
 
   const checkpoint = reducer.checkpoint(config);
-  assert.equal(checkpoint?.state.feeProfile.whitelisted, false);
-  assert.equal(checkpoint?.state.feeProfile.blacklistFeeMultiplier, 9n);
+  assert.equal(checkpoint?.state.blacklistFeeMultiplier, 9n);
 });

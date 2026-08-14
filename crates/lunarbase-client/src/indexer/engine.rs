@@ -1,16 +1,19 @@
 //! Synchronous quote state machine shared by the connected runtime.
 
-use crate::bootstrap::BootstrapSnapshot;
+use crate::bootstrap::{BootstrapSnapshot, VerifiedRouterSnapshot};
 use crate::indexer::errors::IndexerError;
 use crate::indexer::quote_types::{ClientBatchQuote, ClientQuote, IndexerHealth};
 use crate::model::{
     ChainCursor, ChainUpdate, Checkpoint, Commitment, ContractLog, DeploymentConfig,
-    MATH_COMPATIBILITY_VERSION, QuoteEvent,
+    MATH_COMPATIBILITY_VERSION, QuoteEvent, SourceError,
 };
 use crate::protocol::abi::decode_core_event;
 use crate::state::reducer::{QuoteReducer, ReducerError};
+use lunarbase_math::arithmetic::BPS;
 use lunarbase_math::quote;
-use lunarbase_math::{Address, B256, QuoteOutcome, QuoteRequest, QuoteState};
+use lunarbase_math::{
+    Address, B256, FeeClass, QuoteMode, QuoteOutcome, QuotePolicy, QuoteRequest, QuoteState, U256,
+};
 use std::ops::RangeInclusive;
 use std::sync::Arc;
 
@@ -33,15 +36,38 @@ pub(crate) struct PreparedQuoteSnapshot {
     state: Arc<QuoteState>,
     cursor: ChainCursor,
     implementation_code_hash: B256,
+    fee_class: FeeClass,
+    verified_router: Option<Arc<VerifiedRouterSnapshot>>,
 }
 
 impl PreparedQuoteSnapshot {
+    fn policy_for(&self, request: &QuoteRequest) -> QuotePolicy {
+        let fee_asset = match request.mode {
+            QuoteMode::ExactIn => request.asset_out,
+            QuoteMode::ExactOut => request.asset_in,
+        };
+        self.verified_router.as_ref().map_or_else(
+            || QuotePolicy::base(self.fee_class),
+            |verified| {
+                QuotePolicy::with_verified_partner_fee(
+                    self.fee_class,
+                    verified
+                        .partner_fee_bps
+                        .get(&fee_asset)
+                        .copied()
+                        .unwrap_or(0),
+                )
+            },
+        )
+    }
+
     /// Evaluates one request against the captured immutable state.
     pub(crate) fn evaluate(self, request: &QuoteRequest) -> Result<ClientQuote, IndexerError> {
         let outcome = quote(
             request,
             self.cursor.execution_block_number,
             self.state.as_ref(),
+            self.policy_for(request),
         )?;
         Ok(ClientQuote {
             outcome,
@@ -49,6 +75,8 @@ impl PreparedQuoteSnapshot {
             cursor: self.cursor,
             implementation_code_hash: self.implementation_code_hash,
             math_compatibility_version: MATH_COMPATIBILITY_VERSION,
+            fee_class: self.fee_class,
+            verified_router: self.verified_router.as_ref().map(|state| state.router),
         })
     }
 
@@ -60,7 +88,14 @@ impl PreparedQuoteSnapshot {
         let execution_block_number = self.cursor.execution_block_number;
         let outcomes = requests
             .iter()
-            .map(|request| quote(request, execution_block_number, self.state.as_ref()))
+            .map(|request| {
+                quote(
+                    request,
+                    execution_block_number,
+                    self.state.as_ref(),
+                    self.policy_for(request),
+                )
+            })
             .collect::<Result<Vec<QuoteOutcome>, _>>()?;
         Ok(ClientBatchQuote {
             outcomes,
@@ -68,6 +103,8 @@ impl PreparedQuoteSnapshot {
             execution_block_number,
             implementation_code_hash: self.implementation_code_hash,
             math_compatibility_version: MATH_COMPATIBILITY_VERSION,
+            fee_class: self.fee_class,
+            verified_router: self.verified_router.as_ref().map(|state| state.router),
         })
     }
 }
@@ -94,7 +131,7 @@ impl QuoteIndexer {
     /// Creates a not-ready indexer around an empty or preloaded state.
     pub fn new(state: QuoteState, deployment: DeploymentConfig) -> Self {
         Self {
-            reducer: QuoteReducer::new(state, deployment.router),
+            reducer: QuoteReducer::new(state, deployment.fee_class, None),
             deployment,
             canonical_floor: None,
         }
@@ -108,9 +145,14 @@ impl QuoteIndexer {
         if !checkpoint.is_compatible(&deployment) {
             return Err(IndexerError::CodeHashMismatch);
         }
+        if deployment.verified_router.is_some() {
+            return Err(IndexerError::InvalidRequest(
+                "verified-router mode requires a fresh chain snapshot".into(),
+            ));
+        }
         let canonical_floor = checkpoint.cursor.clone();
         Ok(Self {
-            reducer: QuoteReducer::from_checkpoint(checkpoint),
+            reducer: QuoteReducer::from_checkpoint(checkpoint, deployment.fee_class),
             deployment,
             canonical_floor: Some(canonical_floor),
         })
@@ -131,10 +173,15 @@ impl QuoteIndexer {
         {
             return Err(IndexerError::CodeHashMismatch);
         }
+        validate_verified_router_snapshot(&snapshot, &self.deployment)?;
         let snapshot_cursor = snapshot.cursor.clone();
         let snapshot_chain = snapshot.cursor.chain_id;
         buffered.sort_by_key(update_order);
-        self.reducer = QuoteReducer::new(snapshot.state, self.deployment.router);
+        self.reducer = QuoteReducer::new(
+            snapshot.state,
+            self.deployment.fee_class,
+            snapshot.verified_router,
+        );
         self.reducer.bootstrap(snapshot.cursor);
         self.canonical_floor = Some(snapshot_cursor.clone());
         for update in buffered {
@@ -297,6 +344,8 @@ impl QuoteIndexer {
             state,
             cursor,
             implementation_code_hash: self.deployment.expected_implementation_code_hash,
+            fee_class: self.reducer.fee_class(),
+            verified_router: self.reducer.verified_router_snapshot(),
         })
     }
 
@@ -340,6 +389,8 @@ impl QuoteIndexer {
             cursor,
             implementation_code_hash: self.deployment.expected_implementation_code_hash,
             math_compatibility_version: MATH_COMPATIBILITY_VERSION,
+            fee_class: self.deployment.fee_class,
+            verified_router: self.reducer.verified_router(),
         }
     }
 
@@ -356,6 +407,32 @@ impl QuoteIndexer {
     /// Returns the deployment identity used by recovery.
     pub fn deployment(&self) -> &DeploymentConfig {
         &self.deployment
+    }
+}
+
+fn validate_verified_router_snapshot(
+    snapshot: &BootstrapSnapshot,
+    deployment: &DeploymentConfig,
+) -> Result<(), IndexerError> {
+    match (
+        deployment.verified_router,
+        snapshot.verified_router.as_ref(),
+    ) {
+        (None, None) => Ok(()),
+        (Some(expected), Some(actual))
+            if actual.router == expected
+                && actual.partner_fee_bps.len() <= snapshot.state.lanes.len().saturating_add(1)
+                && actual.partner_fee_bps.iter().all(|(asset, fee)| {
+                    (*asset == snapshot.state.cash || snapshot.state.lanes.contains_key(asset))
+                        && U256::from(*fee) <= BPS
+                }) =>
+        {
+            Ok(())
+        }
+        _ => Err(SourceError::Unavailable(
+            "snapshot verified-router policy does not match deployment".into(),
+        )
+        .into()),
     }
 }
 
@@ -464,56 +541,5 @@ pub(crate) fn sort_chain_updates(updates: &mut [ChainUpdate]) {
 }
 
 #[cfg(test)]
-mod canonical_floor_tests {
-    use super::{canonical_floor_covers_log, snapshot_covers};
-    use crate::model::{ChainCursor, Commitment};
-    use lunarbase_math::B256;
-
-    #[test]
-    fn handoff_never_covers_an_update_from_another_chain() {
-        let snapshot = cursor_at(B256::new([1; 32]), 2, 3);
-        let mut foreign = cursor_at(B256::new([1; 32]), 2, 2);
-        foreign.chain_id = 1;
-        foreign.block_number -= 1;
-
-        assert!(matches!(
-            snapshot_covers(&foreign, &snapshot),
-            Err(crate::indexer::errors::IndexerError::Reducer(
-                crate::state::reducer::ReducerError::ChainIdMismatch
-            ))
-        ));
-    }
-
-    #[test]
-    fn event_level_checkpoint_covers_only_events_through_its_cursor() {
-        let floor = cursor_at(B256::new([1; 32]), 2, 3);
-        let covered = cursor_at(B256::new([1; 32]), 2, 2);
-        let later = cursor_at(B256::new([1; 32]), 2, 4);
-
-        assert!(canonical_floor_covers_log(&covered, &floor).unwrap());
-        assert!(!canonical_floor_covers_log(&later, &floor).unwrap());
-    }
-
-    fn cursor(block_hash: B256, source_sequence: Option<u64>) -> ChainCursor {
-        ChainCursor {
-            chain_id: 8453,
-            block_number: 100,
-            execution_block_number: 100,
-            block_hash: Some(block_hash),
-            transaction_index: Some(2),
-            log_index: Some(3),
-            source_sequence,
-            source_sub_index: None,
-            commitment: Commitment::Realtime,
-        }
-    }
-
-    fn cursor_at(block_hash: B256, transaction_index: u32, log_index: u32) -> ChainCursor {
-        ChainCursor {
-            transaction_index: Some(transaction_index),
-            log_index: Some(log_index),
-            commitment: Commitment::Canonical,
-            ..cursor(block_hash, None)
-        }
-    }
-}
+#[path = "engine_tests.rs"]
+mod canonical_floor_tests;

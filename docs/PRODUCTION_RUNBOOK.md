@@ -2,8 +2,8 @@
 
 ## Deployment
 
-Run at least two independently indexing replicas for each chain, Core, and
-router profile. Route traffic only to replicas whose /readyz endpoint returns 200.
+Run at least two independently indexing replicas for each chain, Core, and fee
+class. Route traffic only to replicas whose /readyz endpoint returns 200.
 
 Supply deployment identity, implementation address and code hash, RPC
 endpoints, and source settings through command-line arguments, LUNARBASE_*
@@ -18,8 +18,8 @@ available, and include it in backup and credential-rotation policy.
 
 Before rollout:
 
-1. Verify chain ID, Core, router, deployment block, whitelist expectation,
-   implementation address, and runtime-code hash.
+1. Verify chain ID, Core, fee class, deployment block, implementation address,
+   runtime-code hash, and any optional verified router.
 2. Verify RPC archive range and realtime subscription limits.
 3. Size queues and timeouts for the provider and expected event rate.
 4. Start replicas independently and wait for readiness.

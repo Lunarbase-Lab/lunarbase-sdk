@@ -190,8 +190,8 @@ function deployment(): DeploymentConfig {
     network: Network.Base,
     chainId: 8453n,
     core: CORE,
-    router: ROUTER,
-    expectWhitelisted: true,
+    feeClass: "Whitelisted",
+    verifiedRouter: undefined,
     deploymentBlock: 1n,
     expectedImplementation: "0x8888888888888888888888888888888888888888",
     expectedImplementationCodeHash: HASH,
@@ -205,11 +205,7 @@ function snapshot(): BootstrapSnapshot {
     cash: CASH,
     cashReserve: 1_000_000n,
     lanes: new Map([[ASSET, createLaneState(laneSlot0(), 1_000_000n, 0n)]]),
-    feeProfile: {
-      whitelisted: true,
-      blacklistFeeMultiplier: 1n,
-      partnerFeeBps: new Map(),
-    },
+    blacklistFeeMultiplier: 1n,
   };
   return {
     state,

@@ -1,9 +1,17 @@
 /** Provider-independent model shared by every TypeScript network client. */
-import type { Address, LaneState, QuoteOutcome, QuoteRequest, QuoteState, Word } from "@lunarbase-lab/pmm-v2-math";
+import type {
+  Address,
+  FeeClass,
+  LaneState,
+  QuoteOutcome,
+  QuoteRequest,
+  QuoteState,
+  Word,
+} from "@lunarbase-lab/pmm-v2-math";
 import type { Hex } from "ox/Hex";
 
 /** Current checkpoint schema. */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 /** Quote-math compatibility profile implemented by this SDK. */
 export const MATH_COMPATIBILITY_VERSION = "lunarbase-pmm-v2";
 
@@ -99,7 +107,7 @@ export type ChainUpdate =
   | { kind: "Reorg"; oldHead: ChainCursor; newHead: ChainCursor }
   | { kind: "Gap"; cursor?: ChainCursor; reason: string };
 
-/** Identity and endpoints for one Core/router deployment. */
+/** Identity and runtime policy for one Core deployment. */
 export interface DeploymentConfig {
   /** Network source family required by this deployment. */
   network: Network;
@@ -107,10 +115,10 @@ export interface DeploymentConfig {
   chainId: bigint;
   /** LunarBase Core contract whose quote-critical state is indexed. */
   core: Address;
-  /** Single router whose whitelist and partner fees are tracked. */
-  router: Address;
-  /** Required whitelist status checked during bootstrap. */
-  expectWhitelisted: boolean;
+  /** Mandatory economic fee class used by every quote. */
+  feeClass: FeeClass;
+  /** Optional execution caller whose fee allocation is chain-verified. */
+  verifiedRouter: Address | undefined;
   /** First block that can contain deployment lane events. */
   deploymentBlock: bigint;
   /** Pinned ERC-1967 implementation behind the Core proxy. */
@@ -133,9 +141,19 @@ export interface BootstrapSnapshot {
   implementation: Address;
   /** Keccak-256 runtime bytecode hash of `implementation`. */
   implementationCodeHash: Hex;
+  /** Optional router-specific accounting state verified at the same block. */
+  verifiedRouter?: VerifiedRouterSnapshot;
 }
 
-/** Versioned restart state bound to one deployment and configured router. */
+/** Router-specific accounting state kept outside quote-critical chain state. */
+export interface VerifiedRouterSnapshot {
+  /** Execution caller whose whitelist class and partner shares were verified. */
+  router: Address;
+  /** Partner share keyed by fee asset. */
+  partnerFeeBps: ReadonlyMap<Address, number>;
+}
+
+/** Versioned restart state bound only to chain-wide deployment state. */
 export interface Checkpoint {
   /** Persistence schema version; incompatible versions are discarded. */
   schemaVersion: number;
@@ -151,12 +169,8 @@ export interface Checkpoint {
   network: Network;
   /** Core contract whose state is serialized. */
   core: Address;
-  /** Configured router whose fee profile is embedded in the state. */
-  router: Address;
   /** First deployment block used for lane discovery and recovery. */
   deploymentBlock: bigint;
-  /** Router whitelist policy used when the state was bootstrapped. */
-  expectWhitelisted: boolean;
   /** Fixed lane policy used when the state was bootstrapped. */
   explicitLaneAssets: readonly Address[];
   /** Last fully applied and verified source position. */
@@ -228,6 +242,8 @@ export class ReducerError extends Error {
       | "INVALID_SLIPPAGE_K"
       | "INVALID_WIDTH"
       | "UNKNOWN_LANE"
+      | "FEE_CLASS_MISMATCH"
+      | "VERIFIED_ROUTER_REFRESH_REQUIRED"
       | "ARITHMETIC"
       | "IMPLEMENTATION_UPGRADED",
     message: string,
@@ -263,6 +279,10 @@ export interface ClientQuote {
   implementationCodeHash: Hex;
   /** Quote-math compatibility profile used by this result. */
   mathCompatibilityVersion: string;
+  /** Economic fee class used for this quote. */
+  feeClass: FeeClass;
+  /** Optional router whose accounting split was verified. */
+  verifiedRouter: Address | undefined;
 }
 
 /** Batch results calculated synchronously from one state cursor. */
@@ -277,6 +297,10 @@ export interface ClientBatchQuote {
   implementationCodeHash: Hex;
   /** Quote-math compatibility profile used by this batch. */
   mathCompatibilityVersion: string;
+  /** Economic fee class shared by every result. */
+  feeClass: FeeClass;
+  /** Optional router whose accounting splits were verified. */
+  verifiedRouter: Address | undefined;
 }
 
 /** Observable runtime state. */
@@ -291,6 +315,10 @@ export interface IndexerHealth {
   implementationCodeHash: string;
   /** Quote-math compatibility profile used by this runtime. */
   mathCompatibilityVersion: string;
+  /** Economic fee class selected for every quote. */
+  feeClass: FeeClass;
+  /** Optional router whose accounting allocation is verified. */
+  verifiedRouter: Address | undefined;
 }
 
-export type { Address, LaneState, QuoteOutcome, QuoteRequest, QuoteState, Word };
+export type { Address, FeeClass, LaneState, QuoteOutcome, QuoteRequest, QuoteState, Word };

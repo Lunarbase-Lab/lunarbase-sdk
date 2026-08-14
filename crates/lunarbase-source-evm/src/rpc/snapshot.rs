@@ -4,7 +4,7 @@ use crate::rpc::client::RpcHttpClient;
 use alloy_primitives::Bytes;
 use alloy_sol_types::SolCall;
 use futures_util::{StreamExt, TryStreamExt, stream};
-use lunarbase_client::bootstrap::BootstrapSnapshot;
+use lunarbase_client::bootstrap::{BootstrapSnapshot, VerifiedRouterSnapshot};
 use lunarbase_client::model::{
     BackfillRequest, Commitment, ContractFilter, DeploymentConfig, QuoteEvent, SourceError,
 };
@@ -40,7 +40,7 @@ impl RpcSnapshotProvider {
         &self.rpc
     }
 
-    /// Reads a coherent quote snapshot for the configured router profile.
+    /// Reads chain-wide quote state and optional verified-router accounting.
     pub async fn snapshot(
         &self,
         config: &DeploymentConfig,
@@ -96,29 +96,15 @@ impl RpcSnapshotProvider {
         let assets = self
             .resolve_lane_assets(config, cursor.block_number)
             .await?;
-        let (cash, whitelist, blacklist_fee_multiplier) = tokio::try_join!(
+        let (cash, blacklist_fee_multiplier) = tokio::try_join!(
             self.read(config.core, core::cashCall {}, block_hash),
-            self.read(
-                config.core,
-                core::whitelistCall {
-                    account: config.router,
-                },
-                block_hash,
-            ),
             self.read(config.core, core::blacklistFeeMultiplierCall {}, block_hash,),
         )?;
-        if whitelist != config.expect_whitelisted {
-            return Err(SourceError::Unavailable(format!(
-                "configured router whitelist status mismatch: expected {}, got {}",
-                config.expect_whitelisted, whitelist
-            )));
-        }
         let mut state = QuoteState {
             cash,
+            blacklist_fee_multiplier,
             ..Default::default()
         };
-        state.fee_profile.whitelisted = whitelist;
-        state.fee_profile.blacklist_fee_multiplier = blacklist_fee_multiplier;
 
         let lane_states = stream::iter(assets.iter().copied())
             .map(|asset| async move {
@@ -151,31 +137,48 @@ impl RpcSnapshotProvider {
             .await?
             .assetReserve;
 
-        let mut partner_assets = assets.clone();
-        if !partner_assets.contains(&cash) {
-            partner_assets.push(cash);
-        }
-        let partner_fees = stream::iter(partner_assets)
-            .map(|asset| async move {
-                let partner = self
-                    .read(
-                        config.core,
-                        core::partnersCall {
-                            router: config.router,
-                            asset,
-                        },
-                        block_hash,
-                    )
-                    .await?;
-                if U256::from(partner.fee) > BPS {
-                    return Err(SourceError::Unavailable("partner fee exceeds BPS".into()));
-                }
-                Ok((asset, partner.fee))
+        let verified_router = if let Some(router) = config.verified_router {
+            let whitelisted = self
+                .read(
+                    config.core,
+                    core::whitelistCall { account: router },
+                    block_hash,
+                )
+                .await?;
+            if whitelisted != config.fee_class.is_whitelisted() {
+                return Err(SourceError::Unavailable(format!(
+                    "verified router fee class mismatch: expected {}, got {whitelisted}",
+                    config.fee_class.is_whitelisted()
+                )));
+            }
+            let mut partner_assets = assets;
+            if !partner_assets.contains(&cash) {
+                partner_assets.push(cash);
+            }
+            let partner_fees = stream::iter(partner_assets)
+                .map(|asset| async move {
+                    let partner = self
+                        .read(
+                            config.core,
+                            core::partnersCall { router, asset },
+                            block_hash,
+                        )
+                        .await?;
+                    if U256::from(partner.fee) > BPS {
+                        return Err(SourceError::Unavailable("partner fee exceeds BPS".into()));
+                    }
+                    Ok((asset, partner.fee))
+                })
+                .buffer_unordered(SNAPSHOT_CONCURRENCY)
+                .try_collect()
+                .await?;
+            Some(VerifiedRouterSnapshot {
+                router,
+                partner_fee_bps: partner_fees,
             })
-            .buffer_unordered(SNAPSHOT_CONCURRENCY)
-            .try_collect::<Vec<_>>()
-            .await?;
-        state.fee_profile.partner_fee_bps.extend(partner_fees);
+        } else {
+            None
+        };
         let verified = self
             .rpc
             .block_cursor(&block_tag, config.chain_id, commitment)
@@ -190,6 +193,7 @@ impl RpcSnapshotProvider {
             cursor,
             implementation,
             implementation_code_hash,
+            verified_router,
         })
     }
 

@@ -13,8 +13,9 @@ Set `RPC_URL` and `CORE_ADDRESS`. Set `WS_URL` when it cannot be derived from
 
 Use `SOURCE_PROFILE=evm` for standard `logs` and `newHeads`, or
 `SOURCE_PROFILE=base-flashblocks` for Base Flashblocks. Optional settings
-include `ROUTER_ADDRESS`, `EXPECT_WHITELISTED`, `DEPLOYMENT_BLOCK`, and
-`LANE_ASSETS`.
+include `VERIFIED_ROUTER_ADDRESS`, `DEPLOYMENT_BLOCK`, and `LANE_ASSETS`.
+`FEE_CLASS` is required; the verified router is needed only for an exact
+partner/treasury allocation.
 
 ## Run
 

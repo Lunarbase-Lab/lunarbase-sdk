@@ -11,7 +11,7 @@ flags, or an operator-owned TOML file:
 LUNARBASE_NETWORK=base \
 LUNARBASE_CHAIN_ID=8453 \
 LUNARBASE_CORE=0x... \
-LUNARBASE_ROUTER=0x... \
+LUNARBASE_FEE_CLASS=whitelisted \
 LUNARBASE_EXPECTED_IMPLEMENTATION=0x... \
 LUNARBASE_EXPECTED_IMPLEMENTATION_CODE_HASH=0x... \
 LUNARBASE_HTTP_RPC_URL=https://... \
@@ -34,9 +34,13 @@ Base is the default feature. Select evm, monad, monad-native, or arbitrum with
 - GET /readyz reports quote readiness and the current cursor.
 - GET /metrics exposes Prometheus metrics.
 
-Deployment identity, router policy, execution context, and freshness policy
+Deployment identity, fee policy, execution context, and freshness policy
 cannot be overridden by HTTP requests. When source continuity or deployment
 identity is uncertain, readiness is revoked until canonical recovery succeeds.
+
+`LUNARBASE_VERIFIED_ROUTER` is optional. Without it, quotes use only the
+selected fee class and skip router whitelist/partner RPCs. Set it only when the
+API must include a chain-verified partner/treasury allocation.
 
 ## Event logging
 

@@ -20,7 +20,7 @@ the same values directly:
 LUNARBASE_NETWORK=base \
 LUNARBASE_CHAIN_ID=8453 \
 LUNARBASE_CORE=0x... \
-LUNARBASE_ROUTER=0x... \
+LUNARBASE_FEE_CLASS=whitelisted \
 LUNARBASE_EXPECTED_IMPLEMENTATION=0x... \
 LUNARBASE_EXPECTED_IMPLEMENTATION_CODE_HASH=0x... \
 LUNARBASE_HTTP_RPC_URL=https://... \
@@ -33,6 +33,9 @@ Explicit CLI flags override environment values, which override the optional
 TOML. Operational defaults cover bind address, queue bounds, reconnect timing,
 checkpoint cadence, and shutdown timeout; deployment identity and source
 endpoints are always explicit.
+
+`fee_class` is mandatory. `verified_router` is optional and enables the exact
+partner/treasury allocation; class-only deployments avoid its snapshot RPCs.
 
 The Core event logger accepts `realtime`, `canonical`, or `finalized` through
 `LUNARBASE_EVENT_LOG_MIN_COMMITMENT`. Commitment comes from the source; choosing
