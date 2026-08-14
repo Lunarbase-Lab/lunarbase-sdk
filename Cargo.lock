@@ -2079,6 +2079,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
+name = "lunarbase-event-worker"
+version = "0.3.1"
+dependencies = [
+ "alloy-primitives",
+ "axum",
+ "clap",
+ "futures-util",
+ "lunarbase-pmm-v2-client",
+ "lunarbase-pmm-v2-source-arbitrum",
+ "lunarbase-pmm-v2-source-evm",
+ "lunarbase-pmm-v2-source-monad",
+ "lunarbase-source-monad-native",
+ "redis",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "lunarbase-indexer"
 version = "0.3.1"
 dependencies = [

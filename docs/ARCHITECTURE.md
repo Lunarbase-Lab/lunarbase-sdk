@@ -2,7 +2,7 @@
 
 ## Components
 
-The SDK is divided into four public capabilities:
+The SDK is divided into four public capabilities and one workspace service:
 
 1. Quote math evaluates exact-input and exact-output requests without network
    access.
@@ -12,6 +12,8 @@ The SDK is divided into four public capabilities:
    canonicality checks.
 4. lunarbase-indexer packages the client as an HTTP service with health,
    readiness, and metrics endpoints.
+5. lunarbase-event-worker independently persists raw Core logs to a durable
+   Redis Stream for at-least-once downstream processing.
 
 Rust and TypeScript implement the same compatibility profile and share the
 same deterministic quote vectors.
@@ -33,6 +35,23 @@ code hash, and math compatibility profile used for evaluation.
 
 quoteMany accepts at most 256 requests and evaluates the batch against one
 state position.
+
+Durable event delivery is a separate data plane:
+
+```text
+dedicated HTTP recovery + dedicated realtime source
+                         |
+                         v
+             bounded event worker -> atomic Redis Stream + cursor
+                                             |
+                                             v
+                                      consumer groups
+```
+
+Redis commands, event formatting, consumer backpressure, and event-worker
+queues do not share quote request execution. A slow Redis instance makes the
+event worker unready and eventually backpressures its own source instead of
+discarding accepted events.
 
 ## Consistency and recovery
 
@@ -66,6 +85,11 @@ are supplied by the operator.
 
 Graceful shutdown stops quote traffic, joins background work, and writes a
 final checkpoint when checkpointing is configured.
+
+The event worker has its own readiness and resource limits. Its Redis Stream,
+stable event-ID registry, and monotonic cursor are updated atomically. Redis
+must use AOF with `appendfsync always`; downstream processors acknowledge
+consumer-group entries only after idempotent side effects commit.
 
 ## Verification
 

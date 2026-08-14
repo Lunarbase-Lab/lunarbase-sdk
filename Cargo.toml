@@ -7,6 +7,7 @@ members = [
     "crates/lunarbase-source-monad-native",
     "crates/lunarbase-source-arbitrum",
     "crates/lunarbase-indexer",
+    "crates/lunarbase-event-worker",
     "crates/lunarbase-tools",
     "examples/rust/quote-logger",
 ]

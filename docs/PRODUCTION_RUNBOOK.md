@@ -14,6 +14,13 @@ Redis is optional restart acceleration. When enabled, keep it on an
 access-controlled network, require authentication, encrypt transport where
 available, and include it in backup and credential-rotation policy.
 
+Durable event delivery uses the separate `lunarbase-event-worker`. Give it
+independent HTTP/WebSocket connections, queue limits, and preferably a
+dedicated Redis resource so event I/O cannot contend with quote replicas.
+Unlike optional quote checkpoints, event Redis is required and startup fails
+unless `appendonly=yes` and `appendfsync=always`. Use persistent storage,
+`maxmemory-policy=noeviction`, capacity alerts, and tested restore procedures.
+
 ## Start
 
 Before rollout:
@@ -23,6 +30,8 @@ Before rollout:
 2. Verify RPC archive range and realtime subscription limits.
 3. Size queues and timeouts for the provider and expected event rate.
 4. Start replicas independently and wait for readiness.
+5. If event delivery is enabled, verify worker Redis durability with
+   `CONFIG GET appendonly appendfsync` and wait for the worker `/readyz`.
 
 Local production-shaped topology:
 
@@ -50,6 +59,11 @@ Alert on sustained non-readiness, repeated recovery, queue saturation, source
 disconnects, quote errors, and checkpoint failures. A checkpoint failure
 affects restart speed; it does not invalidate a running ready replica.
 
+For the event worker, also alert on Redis write failures, source gaps,
+duplicate retries, consumer-group pending growth, Redis memory/disk headroom,
+and lag between source head and last persisted block. Worker non-readiness
+does not stop quote serving because the two processes do not share resources.
+
 ## Recovery
 
 A gap, reorganization, disconnect, queue overflow, or identity mismatch
@@ -63,6 +77,12 @@ revokes readiness. If a replica does not recover:
 
 An invalid checkpoint is ignored automatically in favor of a canonical
 snapshot. Delete checkpoint data only after preserving it for diagnosis.
+
+The event worker resumes from its deployment-bound Redis cursor and backfills
+the cursor block inclusively. Stable event IDs make an ambiguous write or
+inclusive replay idempotent inside the worker. Downstream consumers must also
+deduplicate by `eventId`, reclaim abandoned pending entries with `XAUTOCLAIM`,
+and `XACK` only after their own side effect commits.
 
 ## Graceful shutdown
 

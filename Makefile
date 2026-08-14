@@ -21,6 +21,7 @@ RUSTDOCFLAGS ?= -D warnings
 NETWORK ?= base
 CONFIG ?=
 INDEXER_ARGS ?=
+EVENT_WORKER_ARGS ?=
 INDEXER_FEATURES ?= $(NETWORK)
 COMPOSE ?= docker compose -f examples/indexer/docker-compose.yml
 CARGO_PUBLISH_PACKAGES := lunarbase-pmm-v2-math lunarbase-pmm-v2-client lunarbase-pmm-v2-source-evm lunarbase-pmm-v2-source-monad lunarbase-pmm-v2-source-arbitrum
@@ -38,7 +39,7 @@ PNPM_CMD := $(shell if command -v corepack >/dev/null 2>&1; then printf '%s' "co
 
 .DEFAULT_GOAL := build
 
-.PHONY: help install hooks-install build build-rust build-ts build-math-ts build-release build-indexer run run-indexer \
+.PHONY: help install hooks-install build build-rust build-ts build-math-ts build-release build-indexer build-event-worker run run-indexer run-event-worker \
 	check check-rust check-ts check-network-feature check-network-features check-monad-native \
 	fmt fmt-rust fmt-ts fmt-check fmt-check-rust fmt-check-ts lint lint-rust lint-ts \
 	test test-rust test-ts test-runtime test-process-e2e audit audit-rust audit-rust-ci audit-ts load performance-baseline quote-benchmark quote-allocation-benchmark monad-live-validate docs docs-rust ffi \
@@ -49,7 +50,9 @@ help:
 	@echo "  make build          Build all Rust crates and TypeScript packages"
 	@echo "  make build-release  Build all Rust targets in release mode plus TypeScript"
 	@echo "  make build-indexer  Build the selected indexer network in release mode"
+	@echo "  make build-event-worker  Build the durable event worker"
 	@echo "  make run            Run lunarbase-indexer from CLI/LUNARBASE_* values"
+	@echo "  make run-event-worker  Run from CLI/LUNARBASE_EVENT_* values"
 	@echo "                      Select source features with NETWORK=evm|monad|arbitrum"
 	@echo "                      Optional example: CONFIG=examples/indexer/config/bsc-testnet.toml"
 	@echo "  make check          Run Rust and TypeScript compile checks"
@@ -114,10 +117,16 @@ build-release: check-pnpm
 build-indexer:
 	$(CARGO) build -p lunarbase-indexer --no-default-features --features "$(INDEXER_FEATURES)" --release
 
+build-event-worker:
+	$(CARGO) build -p lunarbase-event-worker --no-default-features --features "$(INDEXER_FEATURES)" --release
+
 run: run-indexer
 
 run-indexer:
 	$(CARGO) run -p lunarbase-indexer --no-default-features --features "$(INDEXER_FEATURES)" -- $(if $(strip $(CONFIG)),--config "$(CONFIG)") $(INDEXER_ARGS)
+
+run-event-worker:
+	$(CARGO) run -p lunarbase-event-worker --no-default-features --features "$(INDEXER_FEATURES)" -- $(EVENT_WORKER_ARGS)
 
 check: check-rust check-ts
 
@@ -128,6 +137,7 @@ check-ts: build-ts
 
 check-network-feature:
 	$(CARGO) check --locked -p lunarbase-indexer --no-default-features --features "$(NETWORK)" --all-targets
+	$(CARGO) check --locked -p lunarbase-event-worker --no-default-features --features "$(NETWORK)" --all-targets
 
 check-network-features:
 	@set -eu; for network in base monad arbitrum; do \
@@ -138,6 +148,9 @@ check-monad-native:
 	$(CARGO) check --locked -p lunarbase-indexer --no-default-features --features monad-native --all-targets
 	$(CARGO) clippy --locked -p lunarbase-indexer --no-default-features --features monad-native --all-targets -- -D warnings
 	$(CARGO) build --locked -p lunarbase-indexer --no-default-features --features monad-native
+	$(CARGO) check --locked -p lunarbase-event-worker --no-default-features --features monad-native --all-targets
+	$(CARGO) clippy --locked -p lunarbase-event-worker --no-default-features --features monad-native --all-targets -- -D warnings
+	$(CARGO) build --locked -p lunarbase-event-worker --no-default-features --features monad-native
 
 fmt: fmt-rust fmt-ts
 
@@ -184,7 +197,7 @@ test-ts: build-ts
 	$(PNPM_CMD) test:compiled
 
 test-runtime: build-ts
-	$(CARGO) test -p lunarbase-pmm-v2-client -p lunarbase-pmm-v2-source-evm -p lunarbase-pmm-v2-source-monad -p lunarbase-pmm-v2-source-arbitrum
+	$(CARGO) test -p lunarbase-pmm-v2-client -p lunarbase-pmm-v2-source-evm -p lunarbase-pmm-v2-source-monad -p lunarbase-pmm-v2-source-arbitrum -p lunarbase-event-worker
 	$(NODE) --test packages/client/dist/*.test.js packages/client/dist/**/*.test.js packages/source-evm/dist/*.test.js packages/source-monad/dist/*.test.js packages/source-arbitrum/dist/*.test.js
 
 test-process-e2e:

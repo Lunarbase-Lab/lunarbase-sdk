@@ -3,6 +3,11 @@
 LunarBase SDK provides deterministic PMM v2 quote math, realtime state clients,
 network data sources, and a runnable quote indexer for Rust and TypeScript.
 
+The workspace also includes the standalone
+[`lunarbase-event-worker`](crates/lunarbase-event-worker/README.md), which
+persists Core logs to a durable Redis Stream without adding Redis, formatting,
+or consumer latency to quote requests.
+
 ## Packages
 
 | Purpose             | Rust                                                                           | npm                                                                         | Status          |
@@ -58,6 +63,11 @@ make run NETWORK=base CONFIG=/absolute/path/to/deployment.toml
 
 See the [indexer guide](crates/lunarbase-indexer/README.md) and
 [production runbook](docs/PRODUCTION_RUNBOOK.md).
+
+For loss-intolerant event delivery, run `lunarbase-event-worker` with dedicated
+RPC/WebSocket connections and Redis configured with AOF fsync-always. Its
+`/livez`, `/readyz`, and `/metrics` endpoints are served separately from the
+quote API.
 
 ## Development
 
