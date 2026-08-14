@@ -4,6 +4,18 @@ use lunarbase_client::model::{ChainCursor, ChainUpdate, Commitment, ContractLog,
 use lunarbase_client::source::SourceStream;
 use lunarbase_math::{Address, B256, Bytes};
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+/// Controls when proposal logs leave the Monad source.
+pub enum MonadDeliveryMode {
+    /// Emits matching logs as soon as their raw execution events arrive.
+    #[default]
+    Realtime,
+    /// Emits matching logs in deterministic order after successful block execution.
+    BlockOrdered,
+    /// Emits only logs belonging to the proposal selected by consensus finality.
+    Finalized,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Block lifecycle notification from an execution-event source.
 pub struct ExecutionHead {
@@ -38,6 +50,8 @@ pub struct ExecutionLog {
     pub topics: Vec<B256>,
     /// Unindexed ABI-encoded event payload.
     pub data: Bytes,
+    /// Whether this log retracts a previously published proposal log.
+    pub removed: bool,
     /// Lifecycle confidence inherited from the nearest block notification.
     pub commitment: Commitment,
 }
@@ -49,6 +63,13 @@ pub enum ExecutionEvent {
     Head(ExecutionHead),
     /// Carries one EVM log in execution order.
     Log(ExecutionLog),
+    /// Announces that a previously published proposal was abandoned.
+    Reorg {
+        /// Last head belonging to the abandoned proposal.
+        old_head: ExecutionHead,
+        /// Replacement proposal selected by the observed lifecycle.
+        new_head: ExecutionHead,
+    },
     /// Reports lost, expired, or non-monotonic execution-event data.
     Gap {
         /// Last known normalized position, when the source can identify it.
@@ -126,6 +147,10 @@ impl MonadExecutionNormalizer {
         match event {
             ExecutionEvent::Head(head) => Ok(Some(self.normalize_head(head))),
             ExecutionEvent::Log(log) => self.normalize_log(log),
+            ExecutionEvent::Reorg { old_head, new_head } => Ok(Some(ChainUpdate::Reorg {
+                old_head: self.head_cursor(old_head),
+                new_head: self.head_cursor(new_head),
+            })),
             ExecutionEvent::Gap { cursor, reason } => {
                 self.tracker.rewind();
                 Ok(Some(ChainUpdate::Gap { cursor, reason }))
@@ -146,7 +171,7 @@ impl MonadExecutionNormalizer {
             transaction_hash: None,
             topics: log.topics,
             data: log.data,
-            removed: false,
+            removed: log.removed,
             cursor: ChainCursor {
                 chain_id: self.chain_id,
                 block_number: log.block_number,
@@ -163,7 +188,11 @@ impl MonadExecutionNormalizer {
 
     /// Converts a Monad block lifecycle event into a normalized head.
     pub fn normalize_head(&self, head: ExecutionHead) -> ChainUpdate {
-        ChainUpdate::Head(ChainCursor {
+        ChainUpdate::Head(self.head_cursor(head))
+    }
+
+    fn head_cursor(&self, head: ExecutionHead) -> ChainCursor {
+        ChainCursor {
             chain_id: self.chain_id,
             block_number: head.block_number,
             execution_block_number: head.block_number,
@@ -173,7 +202,7 @@ impl MonadExecutionNormalizer {
             source_sequence: Some(head.sequence),
             source_sub_index: None,
             commitment: head.commitment,
-        })
+        }
     }
 
     /// Returns a normalized stream from raw execution events.

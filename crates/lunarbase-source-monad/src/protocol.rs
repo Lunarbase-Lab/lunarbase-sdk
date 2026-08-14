@@ -193,6 +193,7 @@ fn parse_log(value: &Value) -> Result<ExecutionLog, ParserProtocolError> {
             })?,
         topics,
         data,
+        removed: false,
         commitment: Commitment::Realtime,
     })
 }

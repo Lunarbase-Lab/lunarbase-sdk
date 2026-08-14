@@ -8,8 +8,8 @@ expected_implementation = "0x0000000000000000000000000000000000000000"
 expected_implementation_code_hash = "0x0000000000000000000000000000000000000000000000000000000000000000"
 contract_compatibility_version = "lunarbase-pmm-v2"
 http_rpc_url = "http://127.0.0.1:8545"
-# Parser WS for `--features monad`; ring path for `--features monad-native`.
-realtime_url = "ws://127.0.0.1:8080/ws/subscriptions"
+# Durable parser v2 WS for `--features monad`; ring path for `--features monad-native`.
+realtime_url = "ws://127.0.0.1:8080/ws/v2"
 explicit_lane_assets = []
 bind = "127.0.0.1:8080"
 queue_bound = 4096

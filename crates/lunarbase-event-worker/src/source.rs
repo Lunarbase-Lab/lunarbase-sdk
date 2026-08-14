@@ -113,6 +113,8 @@ async fn run_monad(
             chain_id: config.chain_id,
             queue_bound: config.source_queue_bound,
             poll_interval: config.native_poll_interval,
+            delivery_mode: monad_delivery_mode(config.minimum_commitment),
+            emit_removed_logs: true,
         },
         config.http_rpc_url.clone(),
     )?;
@@ -122,7 +124,9 @@ async fn run_monad(
             ws_url: config.realtime_url.clone(),
             core: config.core,
             chain_id: config.chain_id,
-            ..Default::default()
+            delivery_mode: monad_delivery_mode(config.minimum_commitment),
+            emit_removed_logs: true,
+            ..lunarbase_source_monad::parser::MonadParserConfig::durable_v2()
         },
         config.http_rpc_url.clone(),
     )?;
@@ -137,6 +141,19 @@ async fn run_monad(
     _shutdown: watch::Receiver<bool>,
 ) -> Result<(), RuntimeError> {
     Err(RuntimeError::UnsupportedNetwork(Network::Monad))
+}
+
+#[cfg(feature = "monad")]
+fn monad_delivery_mode(
+    commitment: lunarbase_client::model::Commitment,
+) -> lunarbase_source_monad::execution::MonadDeliveryMode {
+    use lunarbase_client::model::Commitment;
+    use lunarbase_source_monad::execution::MonadDeliveryMode;
+    match commitment {
+        Commitment::Realtime => MonadDeliveryMode::Realtime,
+        Commitment::Canonical => MonadDeliveryMode::BlockOrdered,
+        Commitment::Finalized => MonadDeliveryMode::Finalized,
+    }
 }
 
 #[cfg(feature = "arbitrum")]

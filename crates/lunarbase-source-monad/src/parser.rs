@@ -13,6 +13,8 @@ use lunarbase_source_evm::rpc::backend::RpcHttpBackend;
 use lunarbase_source_evm::rpc::client::RpcHttpClient;
 use lunarbase_source_evm::rpc::snapshot::RpcSnapshotProvider;
 use serde_json::{Value, json};
+#[cfg(all(feature = "protocol-v2", target_os = "linux"))]
+use std::sync::Arc;
 use std::{
     collections::{BTreeMap, VecDeque},
     time::Duration,
@@ -25,10 +27,16 @@ use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async_with_config,
     tungstenite::{Message, protocol::WebSocketConfig},
 };
-use url::Url;
 
 use crate::execution::{ExecutionEvent, ExecutionEventStream, MonadExecutionNormalizer};
 use crate::protocol::{ParserMessage, decode_parser_message};
+
+mod config;
+#[cfg(all(feature = "protocol-v2", target_os = "linux"))]
+mod v2;
+pub use config::{MonadParserConfig, MonadParserProtocol};
+#[cfg(all(feature = "protocol-v2", target_os = "linux"))]
+use v2::ParserV2Session;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 type ParserSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -68,63 +76,15 @@ impl ParserHandshakeState {
     }
 }
 
-/// Resource and identity settings for the local Monad parser connection.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MonadParserConfig {
-    /// Parser WebSocket subscription endpoint.
-    pub ws_url: String,
-    /// Core contract used to reject unrelated parser logs.
-    pub core: Address,
-    /// EIP-155 chain identifier attached to normalized updates.
-    pub chain_id: u64,
-    /// Maximum accepted WebSocket frame size before fail-closed recovery.
-    pub max_frame_bytes: usize,
-    /// Maximum notifications retained while subscription acknowledgements arrive.
-    pub max_prefetched_frames: usize,
-}
-
-impl Default for MonadParserConfig {
-    fn default() -> Self {
-        Self {
-            ws_url: "ws://127.0.0.1:8080/ws/subscriptions".into(),
-            core: Address::ZERO,
-            chain_id: 143,
-            max_frame_bytes: 64 * 1024,
-            max_prefetched_frames: 4096,
-        }
-    }
-}
-
-impl MonadParserConfig {
-    /// Validates parser endpoint, chain id, and frame-memory bounds.
-    pub fn validate(&self) -> Result<(), SourceError> {
-        let url = Url::parse(&self.ws_url).map_err(|error| {
-            SourceError::Unavailable(format!("invalid Monad parser URL: {error}"))
-        })?;
-        if !matches!(url.scheme(), "ws" | "wss") {
-            return Err(SourceError::Unavailable(
-                "Monad parser URL must use ws or wss".into(),
-            ));
-        }
-        if self.chain_id == 0
-            || self.core == Address::ZERO
-            || self.max_frame_bytes == 0
-            || self.max_prefetched_frames == 0
-        {
-            return Err(SourceError::Unavailable(
-                "Monad parser chain id, Core, and resource bounds must be non-zero".into(),
-            ));
-        }
-        Ok(())
-    }
-}
-
 /// Portable parser-WebSocket source with pinned latest-state RPC recovery.
 pub struct MonadParserSource {
     /// Validated identity and resource limits for the portable parser.
     config: MonadParserConfig,
     /// Latest executed HTTP source used for snapshots, backfill, and checkpoint validation.
     canonical: RpcHttpBackend,
+    #[cfg(all(feature = "protocol-v2", target_os = "linux"))]
+    /// Resume cursor and proposal lifecycle retained across reconnects.
+    session: Arc<ParserV2Session>,
 }
 
 impl MonadParserSource {
@@ -140,7 +100,12 @@ impl MonadParserSource {
             config.chain_id,
             "latest",
         );
-        Ok(Self { config, canonical })
+        Ok(Self {
+            config,
+            canonical,
+            #[cfg(all(feature = "protocol-v2", target_os = "linux"))]
+            session: Arc::new(ParserV2Session::default()),
+        })
     }
 
     /// Returns the immutable parser configuration.
@@ -176,7 +141,13 @@ impl ChainDataSource for MonadParserSource {
     }
 
     async fn subscribe(&self, filter: ContractFilter) -> Result<SourceStream, SourceError> {
-        let events = connect_parser_stream(self.config.clone(), filter).await?;
+        let events = connect_parser_stream_with_session(
+            self.config.clone(),
+            filter,
+            #[cfg(all(feature = "protocol-v2", target_os = "linux"))]
+            self.session.clone(),
+        )
+        .await?;
         Ok(MonadExecutionNormalizer::new(self.config.chain_id).normalize_stream(events))
     }
 
@@ -194,9 +165,31 @@ pub async fn connect_parser_stream(
     config: MonadParserConfig,
     filter: ContractFilter,
 ) -> Result<ExecutionEventStream, SourceError> {
+    connect_parser_stream_with_session(
+        config,
+        filter,
+        #[cfg(all(feature = "protocol-v2", target_os = "linux"))]
+        Arc::new(ParserV2Session::default()),
+    )
+    .await
+}
+
+async fn connect_parser_stream_with_session(
+    config: MonadParserConfig,
+    filter: ContractFilter,
+    #[cfg(all(feature = "protocol-v2", target_os = "linux"))] session: Arc<ParserV2Session>,
+) -> Result<ExecutionEventStream, SourceError> {
     config.validate()?;
     if filter.address != config.core {
         return Err(SourceError::NetworkMismatch);
+    }
+    if config.protocol == MonadParserProtocol::DurableV2 {
+        #[cfg(all(feature = "protocol-v2", target_os = "linux"))]
+        return v2::connect(config, filter, session).await;
+        #[cfg(not(all(feature = "protocol-v2", target_os = "linux")))]
+        return Err(SourceError::Unavailable(
+            "Monad parser protocol v2 is unavailable in this build".into(),
+        ));
     }
     let bounds = WebSocketConfig {
         max_message_size: Some(config.max_frame_bytes),

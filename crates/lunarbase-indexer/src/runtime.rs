@@ -15,6 +15,12 @@ pub enum RuntimeError {
     #[error(transparent)]
     Client(#[from] IndexerError),
     /// The binary was compiled without the source selected by configuration.
+    #[cfg(any(
+        not(feature = "evm"),
+        not(feature = "base"),
+        not(feature = "monad"),
+        not(feature = "arbitrum")
+    ))]
     #[error("network support is not compiled: {0:?}")]
     UnsupportedNetwork(Network),
 }
@@ -97,6 +103,8 @@ async fn connect_monad(
                     chain_id: config.client.deployment.chain_id,
                     queue_bound: config.client.buffer_capacity,
                     poll_interval: Duration::from_micros(100),
+                    delivery_mode: lunarbase_source_monad::execution::MonadDeliveryMode::Realtime,
+                    emit_removed_logs: false,
                 },
                 config.http_rpc_url.clone(),
             )
@@ -112,7 +120,7 @@ async fn connect_monad(
                     ws_url: config.realtime_url.clone(),
                     core: config.client.deployment.core,
                     chain_id: config.client.deployment.chain_id,
-                    ..Default::default()
+                    ..lunarbase_source_monad::parser::MonadParserConfig::durable_v2()
                 },
                 config.http_rpc_url.clone(),
             )

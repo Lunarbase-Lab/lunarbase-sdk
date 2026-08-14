@@ -14,9 +14,11 @@ use monad_event_ring::{
     DecodedEventRing, EventDescriptorInfo, EventNextResult, EventPayloadResult, EventRingPath,
 };
 use monad_exec_events::{
-    ExecEvent, ExecEventDescriptorExt, ExecEventReaderExt, ExecEventRing, ExecEventType,
+    CommitStateBlockBuilder, ExecEvent, ExecEventDescriptorExt, ExecEventReaderExt, ExecEventRing,
+    ExecEventType, ExecutedBlockBuilder,
 };
 use std::{
+    panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
     sync::{
         Arc,
@@ -28,8 +30,11 @@ use std::{
 use tokio::sync::mpsc;
 
 use lunarbase_source_monad::execution::{
-    ExecutionEvent, ExecutionEventStream, ExecutionHead, ExecutionLog, MonadExecutionNormalizer,
+    ExecutionEvent, ExecutionEventStream, ExecutionHead, ExecutionLog, MonadDeliveryMode,
+    MonadExecutionNormalizer,
 };
+
+mod lifecycle;
 
 /// Native event-ring settings for a colocated Monad execution node.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -44,6 +49,10 @@ pub struct MonadEventRingConfig {
     pub queue_bound: usize,
     /// Poll delay when the producer has not published another descriptor.
     pub poll_interval: Duration,
+    /// Point in proposal lifecycle at which matching logs are published.
+    pub delivery_mode: MonadDeliveryMode,
+    /// Emits removal logs for branches abandoned after earlier publication.
+    pub emit_removed_logs: bool,
 }
 
 impl MonadEventRingConfig {
@@ -67,7 +76,7 @@ pub struct MonadEventRingSource {
 }
 
 impl MonadEventRingSource {
-    /// Creates a native realtime source plus RPC bootstrap/recovery backend.
+    /// Creates a native lifecycle source plus RPC bootstrap/recovery backend.
     pub fn new(
         config: MonadEventRingConfig,
         rpc_endpoint: impl Into<String>,
@@ -165,6 +174,9 @@ fn read_ring(
     let mut reader = ring.create_reader();
     reader.consensus_prev(Some(ExecEventType::BlockStart));
     let mut block_log_index = 0u32;
+    let mut lifecycle = (config.delivery_mode != MonadDeliveryMode::Realtime
+        || config.emit_removed_logs)
+        .then(|| CommitStateBlockBuilder::new(ExecutedBlockBuilder::new(false, false)));
 
     loop {
         if cancelled.load(Ordering::Acquire) {
@@ -185,6 +197,52 @@ fn read_ring(
             EventNextResult::Ready(descriptor) => descriptor,
         };
         let info = descriptor.info();
+        if let Some(builder) = lifecycle.as_mut() {
+            let update = catch_unwind(AssertUnwindSafe(|| {
+                builder.process_event_descriptor(&descriptor)
+            }));
+            match update {
+                Err(_) => {
+                    send_gap(
+                        &sender,
+                        "Monad official block builder rejected the lifecycle",
+                    );
+                    return;
+                }
+                Ok(Some(Ok(update))) => {
+                    let events = match lifecycle::convert_update(
+                        update,
+                        info.seqno,
+                        config.delivery_mode,
+                        config.emit_removed_logs,
+                        config.chain_id,
+                        &filter,
+                    ) {
+                        Ok(events) => events,
+                        Err(error) => {
+                            let _ = sender.blocking_send(Err(error));
+                            return;
+                        }
+                    };
+                    for event in events {
+                        if sender.blocking_send(Ok(event)).is_err() {
+                            return;
+                        }
+                    }
+                }
+                Ok(Some(Err(_))) => {
+                    send_gap(
+                        &sender,
+                        "Monad official block builder rejected the event stream",
+                    );
+                    return;
+                }
+                Ok(None) => {}
+            }
+            if config.delivery_mode != MonadDeliveryMode::Realtime {
+                continue;
+            }
+        }
         let block_number = descriptor.get_block_number();
         let event = match descriptor.try_read() {
             EventPayloadResult::Expired => {
@@ -193,7 +251,14 @@ fn read_ring(
             }
             EventPayloadResult::Ready(event) => event,
         };
-        match convert_event(event, info, block_number, &filter, &mut block_log_index) {
+        match convert_event(
+            event,
+            info,
+            block_number,
+            config.chain_id,
+            &filter,
+            &mut block_log_index,
+        ) {
             Ok(Some(event)) => {
                 if sender.blocking_send(Ok(event)).is_err() {
                     return;
@@ -212,12 +277,20 @@ fn convert_event(
     event: ExecEvent,
     info: EventDescriptorInfo<monad_exec_events::ExecEventDecoder>,
     block_number: Option<u64>,
+    chain_id: u64,
     filter: &ContractFilter,
     block_log_index: &mut u32,
 ) -> Result<Option<ExecutionEvent>, SourceError> {
     let sequence = info.seqno;
     Ok(match event {
+        ExecEvent::RecordError(_) => Some(ExecutionEvent::Gap {
+            cursor: None,
+            reason: "Monad execution ring reported a dropped record".into(),
+        }),
         ExecEvent::BlockStart(start) => {
+            if start.chain_id.limbs != [chain_id, 0, 0, 0] {
+                return Err(SourceError::NetworkMismatch);
+            }
             *block_log_index = 0;
             Some(head(
                 sequence,
@@ -286,6 +359,7 @@ fn convert_event(
                 address,
                 topics,
                 data: data_bytes.into_vec().into(),
+                removed: false,
                 commitment: Commitment::Realtime,
             }))
         }
