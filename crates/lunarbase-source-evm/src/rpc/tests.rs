@@ -1,5 +1,5 @@
 use crate::rpc::backend::RpcHttpBackend;
-use crate::rpc::client::{RpcHttpClient, backfill_filter};
+use crate::rpc::client::{RpcHttpClient, RpcHttpLimits, backfill_filter};
 use crate::rpc::codec::{parse_filtered_rpc_log, parse_rpc_log};
 use crate::rpc::snapshot::RpcSnapshotProvider;
 use alloy_primitives::{Bytes, keccak256};
@@ -264,9 +264,14 @@ async fn backfill_consumes_exactly_one_rpc_response() {
 }
 
 #[tokio::test]
-async fn backfill_splits_ranges_larger_than_ten_thousand_blocks() {
+async fn backfill_uses_configured_block_pages() {
     let asserter = Asserter::new();
-    let client = RpcHttpClient::from_client(RpcClient::mocked(asserter.clone()));
+    let client = RpcHttpClient::from_client(RpcClient::mocked(asserter.clone()))
+        .with_limits(RpcHttpLimits {
+            max_backfill_page_blocks: 10_000,
+            ..RpcHttpLimits::default()
+        })
+        .unwrap();
     asserter.push_success(&Vec::<serde_json::Value>::new());
     asserter.push_success(&Vec::<serde_json::Value>::new());
 
@@ -278,6 +283,24 @@ async fn backfill_splits_ranges_larger_than_ten_thousand_blocks() {
         .unwrap();
 
     assert!(logs.is_empty());
+    assert!(asserter.read_q().is_empty());
+}
+
+#[tokio::test]
+async fn backfill_bisects_only_the_rejected_range() {
+    let asserter = Asserter::new();
+    let client = RpcHttpClient::from_client(RpcClient::mocked(asserter.clone()));
+    asserter.push_failure_msg("response size exceeds provider limit");
+    asserter.push_success(&Vec::<serde_json::Value>::new());
+    asserter.push_success(&Vec::<serde_json::Value>::new());
+
+    assert!(
+        client
+            .get_logs(&request(), 8453, Commitment::Canonical)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(asserter.read_q().is_empty());
 }
 

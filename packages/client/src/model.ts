@@ -10,6 +10,8 @@ import type {
 } from "@lunarbase-lab/pmm-v2-math";
 import type { Hex } from "ox/Hex";
 
+const TEXT_ENCODER = new TextEncoder();
+
 /** Current checkpoint schema. */
 export const SCHEMA_VERSION = 6;
 /** Quote-math compatibility profile implemented by this SDK. */
@@ -106,6 +108,26 @@ export type ChainUpdate =
   | { kind: "Log"; log: ContractLog }
   | { kind: "Reorg"; oldHead: ChainCursor; newHead: ChainCursor }
   | { kind: "Gap"; cursor?: ChainCursor; reason: string };
+
+/** Conservatively charges one normalized log to bounded runtime queues. */
+export function contractLogRetainedBytes(log: ContractLog): number {
+  const topicBytes = log.topics.reduce((total, topic) => total + topic.length, 0);
+  return 256 + topicBytes + log.data.length;
+}
+
+/** Conservatively charges one normalized update to bounded runtime queues. */
+export function chainUpdateRetainedBytes(update: ChainUpdate): number {
+  switch (update.kind) {
+    case "Log":
+      return 64 + contractLogRetainedBytes(update.log);
+    case "Gap":
+      return 192 + TEXT_ENCODER.encode(update.reason).byteLength;
+    case "Head":
+      return 192;
+    case "Reorg":
+      return 320;
+  }
+}
 
 /** Identity and runtime policy for one Core deployment. */
 export interface DeploymentConfig {

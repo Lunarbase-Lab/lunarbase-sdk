@@ -75,6 +75,9 @@ pub struct ConfigValues {
     /// Maximum normalized updates waiting for the single reducer.
     #[arg(long, env = "LUNARBASE_QUEUE_BOUND")]
     pub queue_bound: Option<usize>,
+    /// Maximum retained bytes waiting for the single reducer.
+    #[arg(long, env = "LUNARBASE_QUEUE_BYTE_BOUND")]
+    pub queue_byte_bound: Option<usize>,
     /// Delay before reopening a failed realtime subscription.
     #[arg(long, env = "LUNARBASE_RECONNECT_DELAY_MILLISECONDS")]
     pub reconnect_delay_milliseconds: Option<u64>,
@@ -171,6 +174,7 @@ impl ConfigValues {
         }
         self.bind = overrides.bind.or(self.bind);
         self.queue_bound = overrides.queue_bound.or(self.queue_bound);
+        self.queue_byte_bound = overrides.queue_byte_bound.or(self.queue_byte_bound);
         self.reconnect_delay_milliseconds = overrides
             .reconnect_delay_milliseconds
             .or(self.reconnect_delay_milliseconds);
@@ -236,6 +240,9 @@ impl ConfigValues {
                 detail: error.to_string(),
             })?;
         let queue_bound = self.queue_bound.unwrap_or_else(default_queue_bound);
+        let queue_byte_bound = self
+            .queue_byte_bound
+            .unwrap_or_else(default_queue_byte_bound);
         let reconnect_delay_milliseconds = self
             .reconnect_delay_milliseconds
             .unwrap_or_else(default_reconnect_milliseconds);
@@ -249,12 +256,17 @@ impl ConfigValues {
             .shutdown_timeout_seconds
             .unwrap_or_else(default_shutdown_seconds);
         if queue_bound == 0
+            || queue_byte_bound < lunarbase_client::model::MIN_UPDATE_QUEUE_BYTE_CAPACITY
+            || queue_byte_bound > u32::MAX as usize
             || reconnect_delay_milliseconds == 0
             || source_stall_timeout_milliseconds == 0
             || checkpoint_interval_seconds == 0
             || shutdown_timeout_seconds == 0
         {
-            return invalid("runtime", "all queue and timing bounds must be non-zero");
+            return invalid(
+                "runtime",
+                "all queue and timing bounds must be non-zero and the byte queue must be at least 1024 bytes",
+            );
         }
         if self.redis_url.as_deref().is_some_and(str::is_empty) {
             return invalid("redis_url", "empty URL is not valid");
@@ -285,6 +297,7 @@ impl ConfigValues {
             },
             deployment,
             buffer_capacity: queue_bound,
+            buffer_byte_capacity: queue_byte_bound,
             reconnect_delay: Duration::from_millis(reconnect_delay_milliseconds),
             source_stall_timeout: Duration::from_millis(source_stall_timeout_milliseconds),
         };
@@ -337,6 +350,9 @@ fn default_bind() -> String {
 }
 fn default_queue_bound() -> usize {
     4096
+}
+fn default_queue_byte_bound() -> usize {
+    64 * 1024 * 1024
 }
 fn default_reconnect_milliseconds() -> u64 {
     1_000

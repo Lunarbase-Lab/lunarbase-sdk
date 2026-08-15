@@ -33,3 +33,5 @@ await client.shutdown();
 - HTTP RPC provides bootstrap, backfill, and canonical recovery.
 - Parser sequence positions are retained in client updates.
 - Gaps and reconnects require canonical recovery before readiness.
+- WebSocket frame, handshake-prefetch, and pending proposal queues are bounded
+  by both count and bytes; overflow is reported as a gap, never silently dropped.

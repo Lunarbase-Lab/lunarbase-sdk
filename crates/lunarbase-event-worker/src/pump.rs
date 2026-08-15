@@ -8,7 +8,7 @@ use lunarbase_client::{
 };
 use std::{sync::Arc, time::Duration};
 use tokio::{
-    sync::{mpsc, watch},
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch},
     task::JoinHandle,
     time::{sleep, timeout},
 };
@@ -16,6 +16,7 @@ use tokio::{
 pub(crate) struct QueuedUpdate {
     update: ChainUpdate,
     _depth: SourceDepthGuard,
+    _byte_permit: OwnedSemaphorePermit,
 }
 
 impl QueuedUpdate {
@@ -24,11 +25,11 @@ impl QueuedUpdate {
     }
 }
 
-struct SourceDepthGuard(Arc<Metrics>);
+struct SourceDepthGuard(Arc<Metrics>, usize);
 
 impl Drop for SourceDepthGuard {
     fn drop(&mut self) {
-        self.0.source_dequeued();
+        self.0.source_dequeued(self.1);
     }
 }
 
@@ -38,6 +39,8 @@ pub(crate) struct PumpRuntime {
     pub active: watch::Sender<bool>,
     pub shutdown: watch::Receiver<bool>,
     pub metrics: Arc<Metrics>,
+    pub byte_budget: Arc<Semaphore>,
+    pub byte_capacity: usize,
 }
 
 pub(crate) fn spawn<S>(
@@ -144,6 +147,36 @@ async fn send(
     update: ChainUpdate,
     runtime: &mut PumpRuntime,
 ) -> bool {
+    let mut update = update;
+    let mut bytes = update.retained_bytes();
+    if bytes > runtime.byte_capacity {
+        update = ChainUpdate::Gap {
+            cursor: None,
+            reason: "source update exceeded event-worker queue byte budget".into(),
+        };
+        bytes = update.retained_bytes();
+    }
+    let byte_permit = match runtime
+        .byte_budget
+        .clone()
+        .try_acquire_many_owned(bytes.max(1) as u32)
+    {
+        Ok(permit) => permit,
+        Err(tokio::sync::TryAcquireError::NoPermits) => {
+            runtime.metrics.queue_saturated();
+            tokio::select! {
+                biased;
+                () = wait_for_cancellation(&mut runtime.shutdown) => return false,
+                result = runtime.byte_budget.clone().acquire_many_owned(bytes.max(1) as u32) => {
+                    match result {
+                        Ok(permit) => permit,
+                        Err(_) => return false,
+                    }
+                },
+            }
+        }
+        Err(tokio::sync::TryAcquireError::Closed) => return false,
+    };
     let permit = match sender.try_reserve() {
         Ok(permit) => permit,
         Err(mpsc::error::TrySendError::Full(_)) => {
@@ -159,10 +192,11 @@ async fn send(
         }
         Err(mpsc::error::TrySendError::Closed(_)) => return false,
     };
-    runtime.metrics.source_enqueued();
+    runtime.metrics.source_enqueued(bytes);
     permit.send(QueuedUpdate {
         update,
-        _depth: SourceDepthGuard(runtime.metrics.clone()),
+        _depth: SourceDepthGuard(runtime.metrics.clone(), bytes),
+        _byte_permit: byte_permit,
     });
     true
 }

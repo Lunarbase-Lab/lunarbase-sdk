@@ -2,7 +2,7 @@
 
 use alloy_primitives::Address;
 use clap::Parser;
-use lunarbase_client::model::{Commitment, Network};
+use lunarbase_client::model::{Commitment, MIN_UPDATE_QUEUE_BYTE_CAPACITY, Network};
 use std::{net::SocketAddr, str::FromStr, time::Duration};
 use thiserror::Error;
 
@@ -61,6 +61,13 @@ pub(crate) struct Cli {
         default_value_t = 4096
     )]
     source_queue_bound: usize,
+    /// Maximum retained bytes waiting while Redis is slower than ingestion.
+    #[arg(
+        long,
+        env = "LUNARBASE_EVENT_SOURCE_QUEUE_BYTE_BOUND",
+        default_value_t = 64 * 1024 * 1024
+    )]
+    source_queue_byte_bound: usize,
     /// Maximum inclusive block span requested by one recovery page.
     #[arg(
         long,
@@ -71,6 +78,13 @@ pub(crate) struct Cli {
     /// Maximum commands waiting for the dedicated blocking Redis connection.
     #[arg(long, env = "LUNARBASE_EVENT_REDIS_QUEUE_BOUND", default_value_t = 8)]
     redis_queue_bound: usize,
+    /// Maximum retained bytes queued for the dedicated Redis connection.
+    #[arg(
+        long,
+        env = "LUNARBASE_EVENT_REDIS_QUEUE_BYTE_BOUND",
+        default_value_t = 16 * 1024 * 1024
+    )]
+    redis_queue_byte_bound: usize,
     /// Source and dependency retry delay.
     #[arg(
         long,
@@ -122,8 +136,10 @@ pub(crate) struct Config {
     pub minimum_commitment: Commitment,
     pub bind: SocketAddr,
     pub source_queue_bound: usize,
+    pub source_queue_byte_bound: usize,
     pub backfill_page_blocks: u64,
     pub redis_queue_bound: usize,
+    pub redis_queue_byte_bound: usize,
     pub reconnect_delay: Duration,
     pub source_stall_timeout: Duration,
     pub redis_timeout: Duration,
@@ -194,8 +210,12 @@ impl Cli {
         }
         if self.chain_id == 0
             || self.source_queue_bound == 0
+            || self.source_queue_byte_bound < MIN_UPDATE_QUEUE_BYTE_CAPACITY
+            || self.source_queue_byte_bound > u32::MAX as usize
             || self.backfill_page_blocks == 0
             || self.redis_queue_bound == 0
+            || self.redis_queue_byte_bound == 0
+            || self.redis_queue_byte_bound > u32::MAX as usize
             || self.reconnect_delay_milliseconds == 0
             || self.source_stall_timeout_milliseconds == 0
             || self.redis_timeout_milliseconds == 0
@@ -204,7 +224,7 @@ impl Cli {
         {
             return invalid(
                 "resource_bounds",
-                "all queue and timing bounds must be non-zero",
+                "all queue and timing bounds must be non-zero and the source byte queue must be at least 1024 bytes",
             );
         }
         Ok(Config {
@@ -220,8 +240,10 @@ impl Cli {
             minimum_commitment,
             bind: self.bind,
             source_queue_bound: self.source_queue_bound,
+            source_queue_byte_bound: self.source_queue_byte_bound,
             backfill_page_blocks: self.backfill_page_blocks,
             redis_queue_bound: self.redis_queue_bound,
+            redis_queue_byte_bound: self.redis_queue_byte_bound,
             reconnect_delay: Duration::from_millis(self.reconnect_delay_milliseconds),
             source_stall_timeout: Duration::from_millis(self.source_stall_timeout_milliseconds),
             redis_timeout: Duration::from_millis(self.redis_timeout_milliseconds),

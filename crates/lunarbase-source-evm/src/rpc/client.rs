@@ -1,18 +1,67 @@
 //! Minimal read-only Alloy HTTP client without transaction fillers.
 
 use crate::rpc::codec::{parse_filtered_rpc_log, parse_rpc_head, validate_canonical_hex_u64};
+use crate::rpc::http::bounded_http_request;
 use alloy_primitives::{Bytes, U64, keccak256};
 use alloy_rpc_client::RpcClient;
 use lunarbase_client::model::{BackfillRequest, ChainCursor, Commitment, ContractLog, SourceError};
 use lunarbase_math::Address;
 use lunarbase_math::B256;
 use serde::Serialize;
-use serde_json::{Value, json};
-use std::{collections::VecDeque, str::FromStr, sync::Arc};
+use serde::de::DeserializeOwned;
+use serde_json::Value;
+use std::{
+    collections::VecDeque,
+    fmt::Debug,
+    str::FromStr,
+    sync::{Arc, atomic::AtomicU64},
+};
 use thiserror::Error;
 
 const RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
-const LOG_RANGE_CHUNK_BLOCKS: u64 = 10_000;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Strict JSON-RPC and canonical backfill memory limits.
+pub struct RpcHttpLimits {
+    /// Maximum serialized JSON-RPC request body.
+    pub max_request_bytes: usize,
+    /// Maximum HTTP response body read before JSON deserialization.
+    pub max_response_bytes: usize,
+    /// Maximum inclusive block span attempted by one `eth_getLogs` request.
+    pub max_backfill_page_blocks: u64,
+    /// Maximum normalized logs returned by one public backfill call.
+    pub max_backfill_logs: usize,
+    /// Maximum normalized log payload bytes returned by one backfill call.
+    pub max_backfill_bytes: usize,
+}
+
+impl Default for RpcHttpLimits {
+    fn default() -> Self {
+        Self {
+            max_request_bytes: 1024 * 1024,
+            max_response_bytes: 8 * 1024 * 1024,
+            max_backfill_page_blocks: 1_000,
+            max_backfill_logs: 16_384,
+            max_backfill_bytes: 32 * 1024 * 1024,
+        }
+    }
+}
+
+impl RpcHttpLimits {
+    fn validate(self) -> Result<Self, RpcError> {
+        if self.max_request_bytes == 0
+            || self.max_response_bytes == 0
+            || self.max_backfill_page_blocks == 0
+            || self.max_backfill_logs == 0
+            || self.max_backfill_bytes == 0
+        {
+            return Err(RpcError::Invalid(
+                "HTTP RPC request, response, and backfill limits must be non-zero".into(),
+            ));
+        }
+        Ok(self)
+    }
+}
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 /// Failure returned by the Alloy HTTP JSON-RPC boundary.
@@ -23,6 +72,9 @@ pub enum RpcError {
     /// Local input or a provider response could not be normalized safely.
     #[error("RPC response is invalid: {0}")]
     Invalid(String),
+    /// A local request, response, or normalized batch exceeded its hard budget.
+    #[error("RPC resource limit exceeded: {0}")]
+    Limit(String),
 }
 
 impl From<RpcError> for SourceError {
@@ -40,6 +92,12 @@ pub struct RpcHttpClient {
     http: reqwest::Client,
     /// Low-level Alloy RPC client without consensus, signing, or transaction fillers.
     client: RpcClient,
+    /// Hard request/response and normalized backfill limits.
+    limits: RpcHttpLimits,
+    /// Whether requests use the strict bounded HTTP path instead of a test transport.
+    strict_http: bool,
+    /// Monotonic JSON-RPC request identity shared across clones.
+    request_id: Arc<AtomicU64>,
 }
 
 impl RpcHttpClient {
@@ -65,7 +123,21 @@ impl RpcHttpClient {
             endpoint: Arc::from(endpoint),
             http,
             client,
+            limits: RpcHttpLimits::default(),
+            strict_http: true,
+            request_id: Arc::new(AtomicU64::new(1)),
         })
+    }
+
+    /// Replaces the default HTTP and backfill memory limits.
+    pub fn with_limits(mut self, limits: RpcHttpLimits) -> Result<Self, RpcError> {
+        self.limits = limits.validate()?;
+        Ok(self)
+    }
+
+    /// Returns immutable HTTP and canonical backfill limits.
+    pub const fn limits(&self) -> RpcHttpLimits {
+        self.limits
     }
 
     /// Returns the configured JSON-RPC endpoint.
@@ -75,11 +147,9 @@ impl RpcHttpClient {
 
     /// Reads chain ID only when explicitly requested.
     pub async fn chain_id(&self) -> Result<u64, RpcError> {
-        self.client
-            .request_noparams::<U64>("eth_chainId")
+        self.request::<_, U64>("eth_chainId", Vec::<Value>::new())
             .await
             .map(|value| value.to::<u64>())
-            .map_err(|error| RpcError::Transport(error.to_string()))
     }
 
     /// Executes one `eth_call` at an explicit block and returns ABI bytes.
@@ -90,10 +160,8 @@ impl RpcHttpClient {
         block_tag: &str,
     ) -> Result<Bytes, RpcError> {
         let transaction = serde_json::json!({ "to": to, "data": data });
-        self.client
-            .request("eth_call", (transaction, validate_block_tag(block_tag)?))
+        self.request("eth_call", (transaction, validate_block_tag(block_tag)?))
             .await
-            .map_err(|error| RpcError::Transport(error.to_string()))
     }
 
     /// Executes one `eth_call` against an EIP-1898 block-hash selector.
@@ -104,21 +172,17 @@ impl RpcHttpClient {
         block_hash: B256,
     ) -> Result<Bytes, RpcError> {
         let transaction = serde_json::json!({ "to": to, "data": data });
-        self.client
-            .request(
-                "eth_call",
-                (transaction, BlockHashSelector::new(block_hash)),
-            )
-            .await
-            .map_err(|error| RpcError::Transport(error.to_string()))
+        self.request(
+            "eth_call",
+            (transaction, BlockHashSelector::new(block_hash)),
+        )
+        .await
     }
 
     /// Fetches contract runtime bytecode at one explicit block.
     pub async fn get_code(&self, address: Address, block_tag: &str) -> Result<Bytes, RpcError> {
-        self.client
-            .request("eth_getCode", (address, validate_block_tag(block_tag)?))
+        self.request("eth_getCode", (address, validate_block_tag(block_tag)?))
             .await
-            .map_err(|error| RpcError::Transport(error.to_string()))
     }
 
     /// Fetches runtime bytecode against an EIP-1898 block-hash selector.
@@ -127,10 +191,8 @@ impl RpcHttpClient {
         address: Address,
         block_hash: B256,
     ) -> Result<Bytes, RpcError> {
-        self.client
-            .request("eth_getCode", (address, BlockHashSelector::new(block_hash)))
+        self.request("eth_getCode", (address, BlockHashSelector::new(block_hash)))
             .await
-            .map_err(|error| RpcError::Transport(error.to_string()))
     }
 
     /// Reads one storage word against an exact EIP-1898 block hash.
@@ -140,13 +202,11 @@ impl RpcHttpClient {
         slot: B256,
         block_hash: B256,
     ) -> Result<B256, RpcError> {
-        self.client
-            .request(
-                "eth_getStorageAt",
-                (address, slot, BlockHashSelector::new(block_hash)),
-            )
-            .await
-            .map_err(|error| RpcError::Transport(error.to_string()))
+        self.request(
+            "eth_getStorageAt",
+            (address, slot, BlockHashSelector::new(block_hash)),
+        )
+        .await
     }
 
     /// Reads and hashes runtime bytecode through Alloy's Keccak-256 primitive.
@@ -190,43 +250,10 @@ impl RpcHttpClient {
         commitment: Commitment,
     ) -> Result<ChainCursor, RpcError> {
         let tag = validate_block_tag(block_tag)?;
-        let request_id = format!("execution-context:{tag}");
-        let response = self
-            .http
-            .post(self.endpoint())
-            .json(&json!({
-                "jsonrpc": "2.0",
-                "id": &request_id,
-                "method": "eth_getBlockByNumber",
-                "params": [tag, false],
-            }))
-            .send()
-            .await
-            .map_err(|error| RpcError::Transport(error.to_string()))?
-            .error_for_status()
-            .map_err(|error| RpcError::Transport(error.to_string()))?
-            .json::<Value>()
-            .await
-            .map_err(|error| RpcError::Invalid(format!("invalid JSON-RPC response: {error}")))?;
-        if response.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
-            return Err(RpcError::Invalid(
-                "JSON-RPC response version is not 2.0".into(),
-            ));
-        }
-        if response.get("id").and_then(Value::as_str) != Some(request_id.as_str()) {
-            return Err(RpcError::Invalid("JSON-RPC response id mismatch".into()));
-        }
-        if let Some(error) = response.get("error").filter(|error| !error.is_null()) {
-            return Err(RpcError::Transport(format!(
-                "JSON-RPC returned an error: {error}"
-            )));
-        }
-        let result = response
-            .get("result")
-            .ok_or_else(|| RpcError::Invalid("JSON-RPC response has no result".into()))?;
+        let result: Value = self.request("eth_getBlockByNumber", (tag, false)).await?;
         validate_canonical_hex_u64(result.get("number"), "block.number")?;
         validate_canonical_hex_u64(result.get("l1BlockNumber"), "block.l1BlockNumber")?;
-        normalize_block_cursor(result, chain_id, commitment, true)
+        normalize_block_cursor(&result, chain_id, commitment, true)
     }
 
     /// Resolves an execution-aware cursor by exact block hash, including provisional branches.
@@ -237,42 +264,10 @@ impl RpcHttpClient {
         commitment: Commitment,
     ) -> Result<ChainCursor, RpcError> {
         let hash = format!("{block_hash:#x}");
-        let request_id = format!("execution-context:{hash}");
-        let response = self
-            .http
-            .post(self.endpoint())
-            .json(&json!({
-                "jsonrpc": "2.0",
-                "id": &request_id,
-                "method": "eth_getBlockByHash",
-                "params": [&hash, false],
-            }))
-            .send()
-            .await
-            .map_err(|error| RpcError::Transport(error.to_string()))?
-            .error_for_status()
-            .map_err(|error| RpcError::Transport(error.to_string()))?
-            .json::<Value>()
-            .await
-            .map_err(|error| RpcError::Invalid(format!("invalid JSON-RPC response: {error}")))?;
-        if response.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
-            || response.get("id").and_then(Value::as_str) != Some(request_id.as_str())
-        {
-            return Err(RpcError::Invalid(
-                "JSON-RPC execution-context response identity mismatch".into(),
-            ));
-        }
-        if let Some(error) = response.get("error").filter(|error| !error.is_null()) {
-            return Err(RpcError::Transport(format!(
-                "JSON-RPC returned an error: {error}"
-            )));
-        }
-        let result = response
-            .get("result")
-            .ok_or_else(|| RpcError::Invalid("JSON-RPC response has no result".into()))?;
+        let result: Value = self.request("eth_getBlockByHash", (&hash, false)).await?;
         validate_canonical_hex_u64(result.get("number"), "block.number")?;
         validate_canonical_hex_u64(result.get("l1BlockNumber"), "block.l1BlockNumber")?;
-        let cursor = normalize_block_cursor(result, chain_id, commitment, true)?;
+        let cursor = normalize_block_cursor(&result, chain_id, commitment, true)?;
         if cursor.block_hash != Some(block_hash) {
             return Err(RpcError::Invalid(
                 "execution-context block hash mismatch".into(),
@@ -289,11 +284,7 @@ impl RpcHttpClient {
         require_execution_context: bool,
     ) -> Result<ChainCursor, RpcError> {
         let tag = validate_block_tag(block_tag)?;
-        let value: Value = self
-            .client
-            .request("eth_getBlockByNumber", (tag, false))
-            .await
-            .map_err(|error| RpcError::Transport(error.to_string()))?;
+        let value: Value = self.request("eth_getBlockByNumber", (tag, false)).await?;
         normalize_block_cursor(&value, chain_id, commitment, require_execution_context)
     }
 
@@ -307,8 +298,13 @@ impl RpcHttpClient {
         if request.from_block > request.to_block {
             return Err(RpcError::Invalid("log range starts after its end".into()));
         }
-        let mut pending = initial_log_ranges(request.from_block, request.to_block);
+        let mut pending = initial_log_ranges(
+            request.from_block,
+            request.to_block,
+            self.limits.max_backfill_page_blocks,
+        );
         let mut normalized = Vec::new();
+        let mut normalized_bytes = 0_usize;
         while let Some((from_block, to_block)) = pending.pop_front() {
             let chunk = BackfillRequest {
                 from_block,
@@ -316,24 +312,35 @@ impl RpcHttpClient {
                 filter: request.filter.clone(),
             };
             let filter = backfill_filter(&chunk);
-            let response: Result<Vec<Value>, _> =
-                self.client.request("eth_getLogs", (filter,)).await;
+            let response: Result<Vec<Value>, RpcError> =
+                self.request("eth_getLogs", (filter,)).await;
             match response {
                 Ok(logs) => {
-                    let logs = logs
-                        .into_iter()
-                        .map(|log| {
-                            parse_filtered_rpc_log(&log, chain_id, commitment, &request.filter)
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    normalized.extend(logs);
+                    for value in logs {
+                        let log =
+                            parse_filtered_rpc_log(&value, chain_id, commitment, &request.filter)?;
+                        let bytes = log.retained_bytes();
+                        if normalized.len() >= self.limits.max_backfill_logs
+                            || bytes
+                                > self
+                                    .limits
+                                    .max_backfill_bytes
+                                    .saturating_sub(normalized_bytes)
+                        {
+                            return Err(RpcError::Limit(
+                                "normalized backfill batch count or byte budget exceeded".into(),
+                            ));
+                        }
+                        normalized_bytes += bytes;
+                        normalized.push(log);
+                    }
                 }
-                Err(error) if from_block < to_block && is_log_range_limit(&error.to_string()) => {
+                Err(error) if from_block < to_block && is_bisectable_log_range_limit(&error) => {
                     let middle = from_block + (to_block - from_block) / 2;
                     pending.push_front((middle.saturating_add(1), to_block));
                     pending.push_front((from_block, middle));
                 }
-                Err(error) => return Err(RpcError::Transport(error.to_string())),
+                Err(error) => return Err(error),
             }
         }
         normalized.sort_by_key(|log| log.cursor.event_order());
@@ -346,7 +353,37 @@ impl RpcHttpClient {
             endpoint: Arc::from("mock://alloy"),
             http: reqwest::Client::new(),
             client,
+            limits: RpcHttpLimits::default(),
+            strict_http: false,
+            request_id: Arc::new(AtomicU64::new(1)),
         }
+    }
+
+    async fn request<Params, Response>(
+        &self,
+        method: &'static str,
+        params: Params,
+    ) -> Result<Response, RpcError>
+    where
+        Params: Serialize + Clone + Debug + Send + Sync + Unpin,
+        Response: DeserializeOwned + Debug + Send + Sync + Unpin + 'static,
+    {
+        if !self.strict_http {
+            return self
+                .client
+                .request(method, params)
+                .await
+                .map_err(|error| RpcError::Transport(error.to_string()));
+        }
+        bounded_http_request(
+            &self.http,
+            self.endpoint(),
+            &self.request_id,
+            self.limits,
+            method,
+            params,
+        )
+        .await
     }
 }
 
@@ -391,12 +428,16 @@ impl BlockHashSelector {
     }
 }
 
-fn initial_log_ranges(from_block: u64, to_block: u64) -> VecDeque<(u64, u64)> {
+fn initial_log_ranges(
+    from_block: u64,
+    to_block: u64,
+    max_page_blocks: u64,
+) -> VecDeque<(u64, u64)> {
     let mut ranges = VecDeque::new();
     let mut start = from_block;
     loop {
         let end = start
-            .saturating_add(LOG_RANGE_CHUNK_BLOCKS.saturating_sub(1))
+            .saturating_add(max_page_blocks.saturating_sub(1))
             .min(to_block);
         ranges.push_back((start, end));
         if end == to_block {
@@ -407,8 +448,12 @@ fn initial_log_ranges(from_block: u64, to_block: u64) -> VecDeque<(u64, u64)> {
     ranges
 }
 
-fn is_log_range_limit(message: &str) -> bool {
-    let message = message.to_ascii_lowercase();
+fn is_bisectable_log_range_limit(error: &RpcError) -> bool {
+    if let RpcError::Limit(message) = error {
+        let message = message.to_ascii_lowercase();
+        return message.contains("http content-length") || message.contains("http response body");
+    }
+    let message = error.to_string().to_ascii_lowercase();
     [
         "too many results",
         "response size",

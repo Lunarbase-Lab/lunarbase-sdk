@@ -293,7 +293,7 @@ test("handshake deadline is not extended by an unrelated frame", async (context)
 test("handshake prefetch fails closed at its configured bound", async () => {
   const socket = new FakeSocket();
   const handshake = pendingHandshake(socket, 2);
-  const rejected = assert.rejects(handshake, /prefetch overflow/);
+  const rejected = assert.rejects(handshake, /prefetch count or byte budget exceeded/);
   await flushMicrotasks();
 
   for (let index = 0; index < 3; index += 1) {

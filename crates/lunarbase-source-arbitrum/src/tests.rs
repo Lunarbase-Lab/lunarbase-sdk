@@ -307,7 +307,10 @@ async fn backfill_rejects_mismatched_context_response_id() {
 
     let error = source(&mock).backfill(request()).await.unwrap_err();
 
-    assert!(error.to_string().contains("response id mismatch"));
+    assert!(
+        error.to_string().contains("response id mismatch"),
+        "unexpected error: {error}"
+    );
 }
 
 #[tokio::test]

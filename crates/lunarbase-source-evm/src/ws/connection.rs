@@ -31,6 +31,7 @@ pub(super) async fn establish(
     expected_chain_id: u64,
     max_frame_bytes: usize,
     prefetch_capacity: usize,
+    max_prefetch_bytes: usize,
 ) -> Result<EstablishedSocket, SourceError> {
     let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
     before_handshake_deadline(
@@ -42,6 +43,7 @@ pub(super) async fn establish(
             expected_chain_id,
             max_frame_bytes,
             prefetch_capacity,
+            max_prefetch_bytes,
         ),
     )
     .await
@@ -54,6 +56,7 @@ async fn establish_before_deadline(
     expected_chain_id: u64,
     max_frame_bytes: usize,
     prefetch_capacity: usize,
+    max_prefetch_bytes: usize,
 ) -> Result<EstablishedSocket, SourceError> {
     let bounds = WebSocketConfig {
         max_message_size: Some(max_frame_bytes),
@@ -89,7 +92,13 @@ async fn establish_before_deadline(
             SourceError::Unavailable(format!("RPC chain-id request failed: {error}"))
         })?;
 
-    read_acknowledgements(socket, expected_chain_id, prefetch_capacity).await
+    read_acknowledgements(
+        socket,
+        expected_chain_id,
+        prefetch_capacity,
+        max_prefetch_bytes,
+    )
+    .await
 }
 
 async fn before_handshake_deadline<T>(
@@ -105,11 +114,13 @@ async fn read_acknowledgements(
     mut socket: RpcSocket,
     expected_chain_id: u64,
     prefetch_capacity: usize,
+    max_prefetch_bytes: usize,
 ) -> Result<EstablishedSocket, SourceError> {
     let mut logs_subscription = None;
     let mut heads_subscription = None;
     let mut chain_verified = false;
     let mut buffered = VecDeque::new();
+    let mut buffered_bytes = 0_usize;
     while logs_subscription.is_none() || heads_subscription.is_none() || !chain_verified {
         let message = socket
             .next()
@@ -142,7 +153,13 @@ async fn read_acknowledgements(
                 validate_chain_id_response(&value, expected_chain_id)?;
                 chain_verified = true;
             }
-            _ => push_prefetched(&mut buffered, payload, prefetch_capacity)?,
+            _ => push_prefetched(
+                &mut buffered,
+                &mut buffered_bytes,
+                payload,
+                prefetch_capacity,
+                max_prefetch_bytes,
+            )?,
         }
     }
     Ok(EstablishedSocket {
@@ -171,14 +188,17 @@ fn validate_chain_id_response(value: &Value, expected_chain_id: u64) -> Result<(
 
 fn push_prefetched(
     buffered: &mut VecDeque<Vec<u8>>,
+    buffered_bytes: &mut usize,
     payload: Vec<u8>,
     capacity: usize,
+    byte_capacity: usize,
 ) -> Result<(), SourceError> {
-    if buffered.len() >= capacity {
+    if buffered.len() >= capacity || payload.len() > byte_capacity.saturating_sub(*buffered_bytes) {
         return Err(SourceError::Unavailable(
-            "RPC subscription handshake prefetch overflow".into(),
+            "RPC subscription handshake prefetch count or byte budget exceeded".into(),
         ));
     }
+    *buffered_bytes += payload.len();
     buffered.push_back(payload);
     Ok(())
 }
@@ -282,13 +302,20 @@ mod tests {
     #[test]
     fn handshake_prefetch_fails_closed_at_its_bound() {
         let mut buffered = VecDeque::new();
-        push_prefetched(&mut buffered, vec![1], 2).unwrap();
-        push_prefetched(&mut buffered, vec![2], 2).unwrap();
+        let mut buffered_bytes = 0;
+        push_prefetched(&mut buffered, &mut buffered_bytes, vec![1], 2, 2).unwrap();
+        push_prefetched(&mut buffered, &mut buffered_bytes, vec![2], 2, 2).unwrap();
 
-        let error = push_prefetched(&mut buffered, vec![3], 2).unwrap_err();
+        let error = push_prefetched(&mut buffered, &mut buffered_bytes, vec![3], 2, 2).unwrap_err();
 
-        assert!(error.to_string().contains("prefetch overflow"));
+        assert!(error.to_string().contains("byte budget"));
         assert_eq!(buffered.len(), 2);
+        assert_eq!(buffered_bytes, 2);
+
+        let mut bytes_only = VecDeque::new();
+        let mut bytes = 0;
+        push_prefetched(&mut bytes_only, &mut bytes, vec![1, 2], 4, 2).unwrap();
+        assert!(push_prefetched(&mut bytes_only, &mut bytes, vec![3], 4, 2).is_err());
     }
 
     #[test]
@@ -337,11 +364,11 @@ mod tests {
             topics: Vec::new(),
         };
 
-        let initial = establish(&endpoint, &filter, "logs", 97, 1024, 4)
+        let initial = establish(&endpoint, &filter, "logs", 97, 1024, 4, 4096)
             .await
             .unwrap();
         drop(initial);
-        let reconnect = establish(&endpoint, &filter, "logs", 97, 1024, 4).await;
+        let reconnect = establish(&endpoint, &filter, "logs", 97, 1024, 4, 4096).await;
         let error = match reconnect {
             Ok(_) => panic!("foreign reconnect chain id was accepted"),
             Err(error) => error,

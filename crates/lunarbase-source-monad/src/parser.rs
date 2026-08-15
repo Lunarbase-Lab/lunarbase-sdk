@@ -52,6 +52,7 @@ struct ParserHandshakeState {
     logs_subscription: Option<String>,
     all_subscription: Option<String>,
     buffered: VecDeque<Vec<u8>>,
+    buffered_bytes: usize,
 }
 
 impl ParserHandshakeState {
@@ -228,6 +229,7 @@ async fn connect_parser_stream_with_session(
             &mut socket,
             config.max_frame_bytes,
             config.max_prefetched_frames,
+            config.max_prefetched_bytes,
         ),
     )
     .await
@@ -327,6 +329,7 @@ async fn read_acknowledgements(
     socket: &mut ParserSocket,
     max_frame_bytes: usize,
     max_prefetched_frames: usize,
+    max_prefetched_bytes: usize,
 ) -> Result<ParserHandshake, SourceError> {
     let mut state = ParserHandshakeState::default();
     while !state.is_complete() {
@@ -345,7 +348,12 @@ async fn read_acknowledgements(
                 "Monad parser handshake frame exceeded configured bound".into(),
             ));
         }
-        observe_handshake_payload(&mut state, payload, max_prefetched_frames)?;
+        observe_handshake_payload(
+            &mut state,
+            payload,
+            max_prefetched_frames,
+            max_prefetched_bytes,
+        )?;
     }
     state.finish()
 }
@@ -354,6 +362,7 @@ fn observe_handshake_payload(
     state: &mut ParserHandshakeState,
     payload: Vec<u8>,
     max_prefetched_frames: usize,
+    max_prefetched_bytes: usize,
 ) -> Result<(), SourceError> {
     let value: Value = serde_json::from_slice(&payload).map_err(|error| {
         SourceError::Unavailable(format!("invalid Monad parser handshake JSON: {error}"))
@@ -365,11 +374,14 @@ fn observe_handshake_payload(
     }
 
     let Some(id_value) = value.get("id") else {
-        if state.buffered.len() >= max_prefetched_frames {
+        if state.buffered.len() >= max_prefetched_frames
+            || payload.len() > max_prefetched_bytes.saturating_sub(state.buffered_bytes)
+        {
             return Err(SourceError::Unavailable(
-                "Monad parser handshake prefetch exceeded configured bound".into(),
+                "Monad parser handshake prefetch count or byte budget exceeded".into(),
             ));
         }
+        state.buffered_bytes += payload.len();
         state.buffered.push_back(payload);
         return Ok(());
     };

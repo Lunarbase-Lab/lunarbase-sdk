@@ -42,6 +42,7 @@ async function main(): Promise<void> {
     deployment,
     filter: { address: environment.core, topics: quoteCriticalTopics() },
     queueBound: 4096,
+    queueByteBound: 64 * 1024 * 1024,
     reconnectDelayMilliseconds: 1_000,
     sourceStallTimeoutMilliseconds: 30_000,
   };

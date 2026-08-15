@@ -13,6 +13,7 @@ import { createPublicClient, http, type BlockTag, type PublicClient } from "viem
 import {
   Commitment as CommitmentValue,
   compareCursor,
+  contractLogRetainedBytes,
   CORE_ABI,
   CORE_EVENTS,
   CORE_EVENT_TOPICS,
@@ -29,14 +30,16 @@ import {
   type Network,
 } from "@lunarbase-lab/pmm-v2-client";
 import { RpcError } from "./rpc/error.js";
+import { DEFAULT_HTTP_RPC_LIMITS, boundedFetcher, validateHttpLimits, type HttpRpcLimits } from "./rpc/http_limits.js";
+import { ChainVerification } from "./rpc/identity.js";
 import { normalizeViemLog, parseHash, parseHexU64 } from "./rpc/log.js";
 
 export { RpcError };
+export { DEFAULT_HTTP_RPC_LIMITS, type HttpRpcLimits } from "./rpc/http_limits.js";
 export { parseHexU64 };
 export { parseHash, parseRpcLog } from "./rpc/log.js";
 
 const BLOCK_TAGS = new Set<BlockTag>(["earliest", "finalized", "latest", "pending", "safe"]);
-const LOG_RANGE_CHUNK_BLOCKS = 10_000n;
 const SNAPSHOT_CONCURRENCY = 16;
 const addressKey = parseAddress;
 
@@ -51,23 +54,27 @@ export class JsonRpcHttpClient {
   readonly client: PublicClient;
   /** Injected fetch implementation retained for strict response-envelope validation. */
   private readonly strictFetcher: typeof fetch;
+  /** Hard request/response and normalized backfill limits. */
+  readonly limits: HttpRpcLimits;
 
   /** Creates a strict read-only JSON-RPC client with an injectable fetcher. */
   constructor(
     /** Validated HTTP JSON-RPC endpoint retained for diagnostics. */
     readonly endpoint: string,
     fetcher: typeof fetch = fetch,
+    limits: Partial<HttpRpcLimits> = {},
   ) {
     const url = new URL(endpoint);
     if (url.protocol !== "http:" && url.protocol !== "https:")
       throw new RpcError("INVALID", "HTTP RPC URL must use http: or https:");
-    this.strictFetcher = fetcher;
+    this.limits = validateHttpLimits({ ...DEFAULT_HTTP_RPC_LIMITS, ...limits });
+    this.strictFetcher = boundedFetcher(fetcher, this.limits);
     this.client = createPublicClient({
       batch: { multicall: false },
       ccipRead: false,
       transport: http(url.toString(), {
         batch: false,
-        fetchFn: fetcher,
+        fetchFn: this.strictFetcher,
         retryCount: 0,
         timeout: 15_000,
       }),
@@ -209,8 +216,9 @@ export class JsonRpcHttpClient {
     if (request.fromBlock > request.toBlock) throw new RpcError("INVALID", "log range starts after its end");
     const expectedAddress = addressKey(request.filter.address);
     const events = eventsForTopics(request.filter.topics);
-    const pending = initialLogRanges(request.fromBlock, request.toBlock);
+    const pending = initialLogRanges(request.fromBlock, request.toBlock, this.limits.maxBackfillPageBlocks);
     const logs: ContractLog[] = [];
+    let retainedBytes = 0;
     while (pending.length > 0) {
       const [fromBlock, toBlock] = pending.shift()!;
       try {
@@ -227,7 +235,11 @@ export class JsonRpcHttpClient {
           const log = normalizeViemLog(value, chainId, commitment);
           if (log.address !== expectedAddress)
             throw new RpcError("INVALID", `RPC log address mismatch: expected ${expectedAddress}, got ${log.address}`);
+          const bytes = contractLogRetainedBytes(log);
+          if (logs.length >= this.limits.maxBackfillLogs || bytes > this.limits.maxBackfillBytes - retainedBytes)
+            throw new RpcError("LIMIT", "normalized backfill batch count or byte budget exceeded");
           logs.push(log);
+          retainedBytes += bytes;
         }
       } catch (error) {
         if (fromBlock >= toBlock || !isLogRangeLimit(error)) throw error;
@@ -245,63 +257,29 @@ export class JsonRpcHttpClient {
       return await operation();
     } catch (error) {
       if (error instanceof RpcError) throw error;
-      throw new RpcError("TRANSPORT", error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      if (/JSON-RPC request body exceeds|HTTP response (?:body|content-length) exceeds/i.test(message))
+        throw new RpcError("LIMIT", message);
+      throw new RpcError("TRANSPORT", message);
     }
   }
 }
 
-function initialLogRanges(fromBlock: bigint, toBlock: bigint): Array<[bigint, bigint]> {
+function initialLogRanges(fromBlock: bigint, toBlock: bigint, maxPageBlocks: bigint): Array<[bigint, bigint]> {
   const ranges: Array<[bigint, bigint]> = [];
-  for (let start = fromBlock; start <= toBlock; start += LOG_RANGE_CHUNK_BLOCKS) {
-    const end = start + LOG_RANGE_CHUNK_BLOCKS - 1n;
+  for (let start = fromBlock; start <= toBlock; start += maxPageBlocks) {
+    const end = start + maxPageBlocks - 1n;
     ranges.push([start, end < toBlock ? end : toBlock]);
   }
   return ranges;
 }
 
 function isLogRangeLimit(error: unknown): boolean {
+  if (error instanceof RpcError && error.code === "LIMIT") return /http response|content-length/i.test(error.message);
   const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
   return ["too many results", "response size", "block range", "query exceeds", "limit exceeded", "-32005"].some(
     (needle) => message.includes(needle),
   );
-}
-
-class ChainVerification {
-  private verified = false;
-  private pendingVerifications = 0;
-  private tail: Promise<void> = Promise.resolve();
-
-  verify(check: () => Promise<void>): Promise<void> {
-    this.pendingVerifications += 1;
-    this.verified = false;
-    return this.exclusive(async () => {
-      try {
-        await check();
-        this.verified = true;
-      } finally {
-        this.pendingVerifications -= 1;
-        if (this.pendingVerifications > 0) this.verified = false;
-      }
-    });
-  }
-
-  ensure(check: () => Promise<void>): Promise<void> {
-    if (this.pendingVerifications === 0 && this.verified) return Promise.resolve();
-    return this.exclusive(async () => {
-      if (this.pendingVerifications === 0 && this.verified) return;
-      await check();
-      this.verified = this.pendingVerifications === 0;
-    });
-  }
-
-  private exclusive(operation: () => Promise<void>): Promise<void> {
-    const result = this.tail.then(operation, operation);
-    this.tail = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    return result;
-  }
 }
 
 /** Canonical HTTP fallback for backfill, heads, and checkpoint validation. */
@@ -518,21 +496,27 @@ export class RpcSnapshotProvider {
 
   private async resolveLaneAssets(config: DeploymentConfig, snapshotBlock: bigint): Promise<Address[]> {
     if (config.explicitLaneAssets.length > 0) return config.explicitLaneAssets.map(addressKey);
-    const history = await this.rpc.getLogs(
-      {
-        fromBlock: config.deploymentBlock,
-        toBlock: snapshotBlock,
-        filter: { address: config.core, topics: laneDiscoveryTopics() },
-      },
-      config.chainId,
-      CommitmentValue.Canonical,
-    );
-    history.sort((left, right) => compareCursor(left.cursor, right.cursor));
     const active = new Set<Address>();
-    for (const log of history) {
-      const event = decodeCoreEvent(log);
-      if (event?.kind === "LaneAdded") active.add(addressKey(event.asset));
-      else if (event?.kind === "LaneRemoved") active.delete(addressKey(event.asset));
+    let pageStart = config.deploymentBlock;
+    while (pageStart <= snapshotBlock) {
+      const candidateEnd = pageStart + this.rpc.limits.maxBackfillPageBlocks - 1n;
+      const pageEnd = candidateEnd < snapshotBlock ? candidateEnd : snapshotBlock;
+      const history = await this.rpc.getLogs(
+        {
+          fromBlock: pageStart,
+          toBlock: pageEnd,
+          filter: { address: config.core, topics: laneDiscoveryTopics() },
+        },
+        config.chainId,
+        CommitmentValue.Canonical,
+      );
+      history.sort((left, right) => compareCursor(left.cursor, right.cursor));
+      for (const log of history) {
+        const event = decodeCoreEvent(log);
+        if (event?.kind === "LaneAdded") active.add(addressKey(event.asset));
+        else if (event?.kind === "LaneRemoved") active.delete(addressKey(event.asset));
+      }
+      pageStart = pageEnd + 1n;
     }
     return [...active];
   }

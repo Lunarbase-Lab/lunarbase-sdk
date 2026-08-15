@@ -149,7 +149,7 @@ test("Monad parser accepts a stable duplicate acknowledgement and rejects a conf
 test("Monad parser bounds notifications prefetched during handshake", async () => {
   const socket = new FakeSocket();
   const subscription = parserSource(socket, { queueCapacity: 2 }).subscribeExecution(FILTER);
-  const rejection = expectRejection(subscription, /prefetch exceeded configured queue capacity/);
+  const rejection = expectRejection(subscription, /prefetch count or byte budget exceeded/);
   socket.emit("open", {});
   await settleHandshake();
   for (let index = 0; index < 3; index += 1) {

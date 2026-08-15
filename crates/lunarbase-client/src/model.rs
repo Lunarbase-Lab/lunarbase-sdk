@@ -7,6 +7,9 @@ use lunarbase_math::slot0::{
 use lunarbase_math::{Address, B256, Bytes, U256};
 use lunarbase_math::{FeeClass, QuoteState};
 use serde::{Deserialize, Serialize};
+
+/// Smallest byte budget that can always carry an internally generated gap.
+pub const MIN_UPDATE_QUEUE_BYTE_CAPACITY: usize = 1024;
 use std::collections::HashSet;
 use thiserror::Error;
 
@@ -154,6 +157,22 @@ pub struct ContractLog {
     pub cursor: ChainCursor,
 }
 
+impl ContractLog {
+    /// Returns a conservative retained-memory charge for queue budgeting.
+    ///
+    /// Shared byte buffers are charged to every queued owner deliberately: a
+    /// producer cannot use reference-counted clones to bypass a byte limit.
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            .saturating_add(
+                self.topics
+                    .len()
+                    .saturating_mul(std::mem::size_of::<B256>()),
+            )
+            .saturating_add(self.data.len())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 /// Complete normalized update vocabulary consumed by the reducer.
 pub enum ChainUpdate {
@@ -175,6 +194,20 @@ pub enum ChainUpdate {
         /// Human-readable discontinuity reported by the source.
         reason: String,
     },
+}
+
+impl ChainUpdate {
+    /// Returns a conservative retained-memory charge for bounded handoff queues.
+    pub fn retained_bytes(&self) -> usize {
+        let dynamic = match self {
+            Self::Log(log) => log
+                .retained_bytes()
+                .saturating_sub(std::mem::size_of::<ContractLog>()),
+            Self::Gap { reason, .. } => reason.len(),
+            Self::Head(_) | Self::Reorg { .. } => 0,
+        };
+        std::mem::size_of::<Self>().saturating_add(dynamic)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

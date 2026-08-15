@@ -106,6 +106,7 @@ pub fn fixture(lanes: usize, pairs: usize) -> Result<QuoteBenchmarkFixture, Stri
             topics: Vec::new(),
         },
         buffer_capacity: 4_096,
+        buffer_byte_capacity: 64 * 1024 * 1024,
         reconnect_delay: Duration::from_secs(1),
         source_stall_timeout: Duration::from_secs(3_600),
     };

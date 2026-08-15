@@ -32,17 +32,18 @@ export async function establishSocket(
   logsKind: "logs" | "pendingLogs",
   expectedChainId: bigint,
   queueCapacity: number,
+  queueByteCapacity: number,
+  prefetchByteCapacity: number,
   maxFrameBytes: number,
   signal?: AbortSignal,
 ): Promise<EstablishedSocket> {
   const socket = factory(url);
-  const queue = new BoundedFrameQueue(queueCapacity);
+  const queue = new BoundedFrameQueue(queueCapacity, queueByteCapacity);
   const onOpen = () => queue.open();
   const onMessage = (event: SocketEvent) => {
     const frame = decodeFrame(event.data);
     if (frame === undefined) queue.fail(new Error("RPC WebSocket delivered a non-text frame"));
-    else if (new TextEncoder().encode(frame).byteLength > maxFrameBytes)
-      queue.fail(new Error("RPC WebSocket frame exceeded configured bound"));
+    else if (utf8Bytes(frame) > maxFrameBytes) queue.fail(new Error("RPC WebSocket frame exceeded configured bound"));
     else queue.push(frame);
   };
   const onError = (event: SocketEvent) =>
@@ -72,7 +73,14 @@ export async function establishSocket(
     socket.send(subscriptionRequest(1, filter, logsKind));
     socket.send(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "eth_subscribe", params: ["newHeads"] }));
     socket.send(JSON.stringify({ jsonrpc: "2.0", id: 3, method: "eth_chainId", params: [] }));
-    const result = await readAcknowledgements(queue, expectedChainId, queueCapacity, deadline, signal);
+    const result = await readAcknowledgements(
+      queue,
+      expectedChainId,
+      queueCapacity,
+      prefetchByteCapacity,
+      deadline,
+      signal,
+    );
     return { socket, queue, close, ...result };
   } catch (error) {
     queue.close();
@@ -85,6 +93,7 @@ async function readAcknowledgements(
   queue: BoundedFrameQueue,
   expectedChainId: bigint,
   prefetchCapacity: number,
+  prefetchByteCapacity: number,
   deadline: number,
   signal?: AbortSignal,
 ): Promise<Pick<EstablishedSocket, "logsSubscription" | "headsSubscription" | "prefetched">> {
@@ -92,6 +101,7 @@ async function readAcknowledgements(
   let headsSubscription: string | undefined;
   let chainVerified = false;
   const prefetched: string[] = [];
+  let prefetchedBytes = 0;
   while (!logsSubscription || !headsSubscription || !chainVerified) {
     const frame = await beforeHandshakeDeadline(queue.next(signal), deadline, signal);
     if (frame === undefined) throw new RpcError("TRANSPORT", "RPC WebSocket closed during subscription handshake");
@@ -107,9 +117,11 @@ async function readAcknowledgements(
         throw new RpcError("INVALID", `WebSocket RPC chain id mismatch: expected ${expectedChainId}, got ${actual}`);
       chainVerified = true;
     } else {
-      if (prefetched.length >= prefetchCapacity)
-        throw new RpcError("TRANSPORT", "RPC subscription handshake prefetch overflow");
+      const bytes = utf8Bytes(frame);
+      if (prefetched.length >= prefetchCapacity || bytes > prefetchByteCapacity - prefetchedBytes)
+        throw new RpcError("TRANSPORT", "RPC subscription handshake prefetch count or byte budget exceeded");
       prefetched.push(frame);
+      prefetchedBytes += bytes;
     }
   }
   if (performance.now() >= deadline) throw new RpcError("TRANSPORT", "RPC subscription handshake timed out");
@@ -168,13 +180,17 @@ export function defaultWebSocketFactory(url: string): WebSocketLike {
 }
 
 export class BoundedFrameQueue {
-  private readonly values: string[] = [];
+  private readonly values: Array<{ value: string; bytes: number }> = [];
   private readonly waiters: Array<(value: string | undefined) => void> = [];
   private opened = false;
   private ended = false;
   private failure?: Error;
+  private retainedBytes = 0;
 
-  constructor(private readonly capacity: number) {}
+  constructor(
+    private readonly capacity: number,
+    private readonly byteCapacity: number,
+  ) {}
 
   open(): void {
     this.opened = true;
@@ -183,11 +199,13 @@ export class BoundedFrameQueue {
 
   push(value: string): void {
     if (this.ended) return;
-    if (this.values.length >= this.capacity) {
-      this.fail(new Error("RPC WebSocket frame queue overflow; canonical recovery required"));
+    const bytes = utf8Bytes(value);
+    if (this.values.length >= this.capacity || bytes > this.byteCapacity - this.retainedBytes) {
+      this.fail(new Error("RPC WebSocket frame queue count or byte budget exceeded; canonical recovery required"));
       return;
     }
-    this.values.push(value);
+    this.values.push({ value, bytes });
+    this.retainedBytes += bytes;
     this.resolveWaiters();
   }
 
@@ -212,8 +230,11 @@ export class BoundedFrameQueue {
 
   async next(signal?: AbortSignal): Promise<string | undefined> {
     if (this.failure) throw this.failure;
-    const value = this.values.shift();
-    if (value !== undefined) return value;
+    const entry = this.values.shift();
+    if (entry !== undefined) {
+      this.retainedBytes -= entry.bytes;
+      return entry.value;
+    }
     if (this.ended) return undefined;
     return this.wait(signal);
   }
@@ -242,8 +263,16 @@ export class BoundedFrameQueue {
 
   private resolveWaiters(): void {
     while (this.waiters.length > 0 && (this.values.length > 0 || this.ended || this.opened)) {
-      this.waiters.shift()?.(this.values.shift());
+      const entry = this.values.shift();
+      if (entry) this.retainedBytes -= entry.bytes;
+      this.waiters.shift()?.(entry?.value);
       if (!this.values.length && !this.ended && !this.opened) break;
     }
   }
+}
+
+const UTF8_ENCODER = new TextEncoder();
+
+function utf8Bytes(value: string): number {
+  return UTF8_ENCODER.encode(value).byteLength;
 }

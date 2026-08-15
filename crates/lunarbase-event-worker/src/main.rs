@@ -12,7 +12,7 @@ mod source;
 use clap::Parser;
 use config::Cli;
 use metrics::Metrics;
-use redis_store::{RedisEventStore, RedisWriter};
+use redis_store::{RedisEventStore, RedisQueueLimits, RedisWriter};
 use std::{error::Error, sync::Arc, time::Instant};
 use tokio::{
     sync::watch,
@@ -34,7 +34,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let config = Arc::new(Cli::parse().validate()?);
     let metrics = Arc::new(Metrics::new(
         config.source_queue_bound,
+        config.source_queue_byte_bound,
         config.redis_queue_bound,
+        config.redis_queue_byte_bound,
     ));
     let (store, writer) = RedisEventStore::start(
         config.redis_url.clone(),
@@ -43,7 +45,10 @@ async fn run() -> Result<(), Box<dyn Error>> {
         config.chain_id,
         config.core,
         config.redis_timeout,
-        config.redis_queue_bound,
+        RedisQueueLimits {
+            capacity: config.redis_queue_bound,
+            byte_capacity: config.redis_queue_byte_bound,
+        },
         metrics.clone(),
     )?;
     tracing::info!(

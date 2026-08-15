@@ -34,6 +34,17 @@ struct CursorEnvelope {
 }
 
 impl DurableEvent {
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.event_id
+            .len()
+            .saturating_add(self.cursor_json.len())
+            .saturating_add(self.cursor_order.len())
+            .saturating_add(self.fields.iter().fold(0_usize, |total, (name, value)| {
+                total.saturating_add(name.len()).saturating_add(value.len())
+            }))
+            .saturating_add(std::mem::size_of::<Self>())
+    }
+
     pub(crate) fn from_log(log: &ContractLog) -> Result<Self, EventError> {
         let event_id = core_event_id(log);
         let operation = if log.removed { "removed" } else { "applied" };

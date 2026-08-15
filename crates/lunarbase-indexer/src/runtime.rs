@@ -102,6 +102,7 @@ async fn connect_monad(
                     core: config.client.deployment.core,
                     chain_id: config.client.deployment.chain_id,
                     queue_bound: config.client.buffer_capacity,
+                    queue_byte_bound: config.client.buffer_byte_capacity,
                     poll_interval: Duration::from_micros(100),
                     delivery_mode: lunarbase_source_monad::execution::MonadDeliveryMode::Realtime,
                     emit_removed_logs: false,

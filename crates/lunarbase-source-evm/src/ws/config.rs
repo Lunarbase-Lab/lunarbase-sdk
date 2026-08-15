@@ -39,8 +39,12 @@ impl EvmDeliveryMode {
 pub struct WsRpcConfig {
     /// Maximum accepted WebSocket frame size before the stream fails closed.
     pub max_frame_bytes: usize,
+    /// Maximum total bytes retained by notifications received during handshake.
+    pub max_prefetch_bytes: usize,
     /// Maximum normalized updates retained while waiting for an ordering watermark.
     pub reorder_capacity: usize,
+    /// Maximum total bytes retained while waiting for an ordering watermark.
+    pub reorder_byte_capacity: usize,
     /// Ethereum subscription method, either `logs` or provider-specific `pendingLogs`.
     pub logs_subscription: String,
     /// Accept multiple monotonically sequenced heads at one block height.
@@ -55,7 +59,9 @@ impl Default for WsRpcConfig {
     fn default() -> Self {
         Self {
             max_frame_bytes: 256 * 1024,
+            max_prefetch_bytes: 16 * 1024 * 1024,
             reorder_capacity: 4096,
+            reorder_byte_capacity: 64 * 1024 * 1024,
             logs_subscription: "logs".into(),
             progressive_heads: false,
             delivery_mode: EvmDeliveryMode::BlockOrdered,
@@ -78,12 +84,14 @@ impl WsRpcConfig {
     /// Rejects zero resource bounds and unsupported subscription methods.
     pub fn validate(&self) -> Result<(), SourceError> {
         if self.max_frame_bytes == 0
+            || self.max_prefetch_bytes == 0
             || self.reorder_capacity == 0
+            || self.reorder_byte_capacity == 0
             || self.backfill_page_blocks == 0
             || !matches!(self.logs_subscription.as_str(), "logs" | "pendingLogs")
         {
             return Err(SourceError::Unavailable(
-                "WS frame, reorder, and backfill bounds must be non-zero".into(),
+                "WS frame, prefetch, reorder, and backfill bounds must be non-zero".into(),
             ));
         }
         Ok(())

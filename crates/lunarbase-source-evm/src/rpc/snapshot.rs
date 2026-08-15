@@ -220,32 +220,43 @@ impl RpcSnapshotProvider {
         if !config.explicit_lane_assets.is_empty() {
             return Ok(config.explicit_lane_assets.clone());
         }
-        let request = BackfillRequest {
-            from_block: config.deployment_block,
-            to_block: snapshot_block,
-            filter: ContractFilter {
-                address: config.core,
-                topics: lane_discovery_topics().to_vec(),
-            },
-        };
-        let mut history = self
-            .rpc
-            .get_logs(&request, config.chain_id, Commitment::Canonical)
-            .await?;
-        history.sort_by_key(|log| log.cursor.event_order());
         let mut discovered = BTreeSet::new();
-        for log in history {
-            match decode_core_event(&log)
-                .map_err(|error| SourceError::Unavailable(error.to_string()))?
-            {
-                Some(QuoteEvent::LaneAdded { asset }) => {
-                    discovered.insert(asset);
+        let mut page_start = config.deployment_block;
+        let page_blocks = self.rpc.limits().max_backfill_page_blocks;
+        loop {
+            let page_end = page_start
+                .saturating_add(page_blocks.saturating_sub(1))
+                .min(snapshot_block);
+            let request = BackfillRequest {
+                from_block: page_start,
+                to_block: page_end,
+                filter: ContractFilter {
+                    address: config.core,
+                    topics: lane_discovery_topics().to_vec(),
+                },
+            };
+            let mut history = self
+                .rpc
+                .get_logs(&request, config.chain_id, Commitment::Canonical)
+                .await?;
+            history.sort_by_key(|log| log.cursor.event_order());
+            for log in history {
+                match decode_core_event(&log)
+                    .map_err(|error| SourceError::Unavailable(error.to_string()))?
+                {
+                    Some(QuoteEvent::LaneAdded { asset }) => {
+                        discovered.insert(asset);
+                    }
+                    Some(QuoteEvent::LaneRemoved { asset }) => {
+                        discovered.remove(&asset);
+                    }
+                    _ => {}
                 }
-                Some(QuoteEvent::LaneRemoved { asset }) => {
-                    discovered.remove(&asset);
-                }
-                _ => {}
             }
+            if page_end == snapshot_block {
+                break;
+            }
+            page_start = page_end.saturating_add(1);
         }
         Ok(discovered.into_iter().collect())
     }

@@ -33,6 +33,8 @@ pub struct MonadParserConfig {
     pub max_frame_bytes: usize,
     /// Maximum notifications retained while subscription acknowledgements arrive.
     pub max_prefetched_frames: usize,
+    /// Maximum total bytes retained while subscription acknowledgements arrive.
+    pub max_prefetched_bytes: usize,
     /// Maximum proposal candidates retained between execution and finality.
     pub max_pending_proposals: usize,
     /// Maximum matching logs retained by non-realtime delivery modes.
@@ -54,6 +56,7 @@ impl Default for MonadParserConfig {
             emit_removed_logs: false,
             max_frame_bytes: 64 * 1024,
             max_prefetched_frames: 4096,
+            max_prefetched_bytes: 16 * 1024 * 1024,
             max_pending_proposals: 64,
             max_pending_logs: 16_384,
             max_pending_bytes: 64 * 1024 * 1024,
@@ -87,6 +90,7 @@ impl MonadParserConfig {
             || self.core == Address::ZERO
             || self.max_frame_bytes == 0
             || self.max_prefetched_frames == 0
+            || self.max_prefetched_bytes == 0
             || self.max_pending_proposals == 0
             || self.max_pending_logs == 0
             || self.max_pending_bytes == 0

@@ -17,6 +17,8 @@ import { validateFilterTopics } from "./filter.js";
 import { delay, pumpSource, SourceActivity } from "./source_task.js";
 import { BoundedUpdateQueue } from "./update_queue.js";
 
+const RECOVERY_PAGE_BLOCKS = 1_000n;
+
 /** Runtime-only configuration; persistence belongs to the Rust indexer. */
 export interface ClientConnectConfig {
   /** Immutable network, Core contract, router, and endpoint identity. */
@@ -25,6 +27,8 @@ export interface ClientConnectConfig {
   readonly filter: ContractFilter;
   /** Maximum normalized updates waiting for the ordered reducer. */
   readonly queueBound: number;
+  /** Maximum retained bytes waiting for the ordered reducer. */
+  readonly queueByteBound: number;
   /** Delay before reopening a failed realtime subscription. */
   readonly reconnectDelayMilliseconds: number;
   /** Maximum interval without an update before readiness is revoked. */
@@ -61,7 +65,7 @@ export class ConnectedQuoteClient {
   ): Promise<ConnectedQuoteClient> {
     validateConnectConfig(config, source);
     const controller = new AbortController();
-    const queue = new BoundedUpdateQueue(config.queueBound);
+    const queue = new BoundedUpdateQueue(config.queueBound, config.queueByteBound);
     const activity = new SourceActivity();
     const pumpTask = pumpSource(
       source,
@@ -144,11 +148,13 @@ function validateConnectConfig(config: ClientConnectConfig, source: ChainDataSou
   validateFilterTopics(config.filter.topics);
   for (const [name, value] of Object.entries({
     queueBound: config.queueBound,
+    queueByteBound: config.queueByteBound,
     reconnectDelayMilliseconds: config.reconnectDelayMilliseconds,
     sourceStallTimeoutMilliseconds: config.sourceStallTimeoutMilliseconds,
   }))
     if (!Number.isSafeInteger(value) || value <= 0)
       throw new IndexerError("SOURCE", `${name} must be a positive safe integer`);
+  if (config.queueByteBound < 1024) throw new IndexerError("SOURCE", "queueByteBound must be at least 1024 bytes");
 }
 
 async function reduceSource(
@@ -217,22 +223,27 @@ async function restoreCheckpoint(
       ? checkpoint.cursor.blockNumber + 1n
       : checkpoint.cursor.blockNumber;
   if (fromBlock <= head.blockNumber) {
-    const received = [...(await source.backfill({ fromBlock, toBlock: head.blockNumber, filter: config.filter }))];
     const expectedCore = parseAddress(config.deployment.core);
-    for (const log of received) {
-      validateCoreLogIdentity(log, expectedCore, config.deployment.chainId);
-      if (
-        log.removed ||
-        log.cursor.blockNumber < fromBlock ||
-        log.cursor.blockNumber > head.blockNumber ||
-        log.cursor.blockHash === undefined
-      )
-        throw new IndexerError("GAP", "canonical recovery backfill returned an invalid log");
+    let pageStart = fromBlock;
+    while (pageStart <= head.blockNumber) {
+      const candidateEnd = pageStart + RECOVERY_PAGE_BLOCKS - 1n;
+      const pageEnd = candidateEnd < head.blockNumber ? candidateEnd : head.blockNumber;
+      const received = [...(await source.backfill({ fromBlock: pageStart, toBlock: pageEnd, filter: config.filter }))];
+      for (const log of received) {
+        validateCoreLogIdentity(log, expectedCore, config.deployment.chainId);
+        if (
+          log.removed ||
+          log.cursor.blockNumber < pageStart ||
+          log.cursor.blockNumber > pageEnd ||
+          log.cursor.blockHash === undefined
+        )
+          throw new IndexerError("GAP", "canonical recovery backfill returned an invalid log");
+      }
+      received.sort((left, right) => compareCursor(left.cursor, right.cursor));
+      for (const log of received)
+        if (compareCursor(log.cursor, checkpoint.cursor) > 0) indexer.applyCoreUpdate({ kind: "Log", log });
+      pageStart = pageEnd + 1n;
     }
-    const pending = received
-      .filter((log) => compareCursor(log.cursor, checkpoint.cursor) > 0)
-      .sort((left, right) => compareCursor(left.cursor, right.cursor));
-    for (const log of pending) indexer.applyCoreUpdate({ kind: "Log", log });
   }
   indexer.applyCoreUpdate({ kind: "Head", cursor: head });
   indexer.setCanonicalFloor(head);

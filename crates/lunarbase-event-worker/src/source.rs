@@ -112,6 +112,7 @@ async fn run_monad(
             core: config.core,
             chain_id: config.chain_id,
             queue_bound: config.source_queue_bound,
+            queue_byte_bound: config.source_queue_byte_bound,
             poll_interval: config.native_poll_interval,
             delivery_mode: monad_delivery_mode(config.minimum_commitment),
             emit_removed_logs: true,

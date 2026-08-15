@@ -1,5 +1,5 @@
 /** Bounded deterministic ordering for concurrently decoded source messages. */
-import type { ChainCursor, ChainUpdate } from "../model.js";
+import { chainUpdateRetainedBytes, type ChainCursor, type ChainUpdate } from "../model.js";
 
 type CursorKey = readonly [bigint, bigint, bigint, bigint, bigint, number];
 
@@ -9,13 +9,19 @@ export class CursorReorderBuffer {
   private readonly pending = new Map<string, { key: CursorKey; update: ChainUpdate }>();
   /** Sticky continuity-failure flag cleared only by creating a new buffer. */
   private poisoned = false;
+  /** Conservative bytes retained by pending updates. */
+  private pendingBytes = 0;
 
   /** Creates a buffer with a hard memory bound. */
   constructor(
     /** Maximum retained updates before continuity fails closed. */
     readonly capacity: number,
+    /** Maximum retained bytes before continuity fails closed. */
+    readonly byteCapacity: number = capacity * 64 * 1024,
   ) {
     if (!Number.isSafeInteger(capacity) || capacity <= 0) throw new Error("reorder buffer capacity must be positive");
+    if (!Number.isSafeInteger(byteCapacity) || byteCapacity <= 0)
+      throw new Error("reorder buffer byte capacity must be positive");
   }
 
   /** Returns the number of messages awaiting a head watermark. */
@@ -42,11 +48,13 @@ export class CursorReorderBuffer {
       this.poisoned = true;
       throw new Error("multiple updates share one cursor");
     }
-    if (this.pending.size >= this.capacity) {
+    const bytes = chainUpdateRetainedBytes(update);
+    if (this.pending.size >= this.capacity || bytes > this.byteCapacity - this.pendingBytes) {
       this.poisoned = true;
-      throw new Error("reorder buffer overflow; resnapshot required");
+      throw new Error("reorder buffer count or byte budget exceeded; resnapshot required");
     }
     this.pending.set(encoded, { key, update });
+    this.pendingBytes += bytes;
   }
 
   /** Releases all messages through one block or log watermark. */
@@ -62,7 +70,10 @@ export class CursorReorderBuffer {
 
   private drain(predicate: (entry: { key: CursorKey; update: ChainUpdate }) => boolean): ChainUpdate[] {
     const entries = [...this.pending.values()].filter(predicate).sort((left, right) => compareKey(left.key, right.key));
-    for (const entry of entries) this.pending.delete(encodeKey(entry.key));
+    for (const entry of entries) {
+      this.pending.delete(encodeKey(entry.key));
+      this.pendingBytes -= chainUpdateRetainedBytes(entry.update);
+    }
     return entries.map(({ update }) => update);
   }
 }

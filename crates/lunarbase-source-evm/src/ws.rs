@@ -91,6 +91,7 @@ impl ChainDataSource for EvmRpcSource {
                 self.http.chain_id(),
                 self.config.max_frame_bytes,
                 self.config.reorder_capacity,
+                self.config.max_prefetch_bytes,
             ),
         )?;
         let logs_subscription = established.logs_subscription;
@@ -108,7 +109,10 @@ impl ChainDataSource for EvmRpcSource {
             None
         };
         let stream = stream! {
-            let mut reorder = match CursorReorderBuffer::new(config.reorder_capacity) {
+            let mut reorder = match CursorReorderBuffer::with_limits(
+                config.reorder_capacity,
+                config.reorder_byte_capacity,
+            ) {
                 Ok(buffer) => buffer,
                 Err(error) => {
                     yield Err(error);
@@ -402,7 +406,10 @@ impl ChainDataSource for EvmRpcSource {
                                 old_head: previous.cursor.clone(),
                                 new_head: head.cursor.clone(),
                             });
-                            reorder = match CursorReorderBuffer::new(config.reorder_capacity) {
+                            reorder = match CursorReorderBuffer::with_limits(
+                                config.reorder_capacity,
+                                config.reorder_byte_capacity,
+                            ) {
                                 Ok(buffer) => buffer,
                                 Err(error) => {
                                     yield Err(error);
@@ -418,12 +425,17 @@ impl ChainDataSource for EvmRpcSource {
                         yield Ok(ChainUpdate::Head(head.cursor));
                         continue;
                     }
-                    if config.holds_standard_logs_until_successor() {
-                        observe_standard_head(
+                    if config.holds_standard_logs_until_successor()
+                        && let Err(error) = observe_standard_head(
                             &mut open_standard_heads,
                             head.clone(),
                             Instant::now(),
-                        );
+                            config.reorder_capacity,
+                            config.reorder_byte_capacity,
+                        )
+                    {
+                        yield Err(error);
+                        break;
                     }
                     if let Err(error) = reorder.push(ChainUpdate::Head(head.cursor.clone())) {
                         yield Err(error);

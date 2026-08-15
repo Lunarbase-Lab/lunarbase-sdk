@@ -131,7 +131,10 @@ impl ConnectedQuoteClient {
         let (cancel, pump_cancel) = watch::channel(false);
         let (source_active_tx, mut source_active_rx) = watch::channel(false);
         let (runtime_events, _) = broadcast::channel(RUNTIME_EVENT_CAPACITY);
-        let stats = Arc::new(ClientRuntimeStats::new(config.buffer_capacity));
+        let stats = Arc::new(ClientRuntimeStats::new(
+            config.buffer_capacity,
+            config.buffer_byte_capacity,
+        ));
         let recovery_event_sink = core_event_sink;
         let pump_future = source_pump(
             source.clone(),
@@ -196,8 +199,7 @@ impl ConnectedQuoteClient {
 
         let mut buffered = Vec::new();
         while let Ok(update) = updates_rx.try_recv() {
-            stats.queue_depth.fetch_sub(1, Ordering::Relaxed);
-            buffered.push(update);
+            buffered.push(update.dequeue(&stats));
         }
         crate::indexer::engine::sort_chain_updates(&mut buffered);
         emit_handoff_events(

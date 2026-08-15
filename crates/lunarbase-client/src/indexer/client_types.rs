@@ -2,15 +2,18 @@
 
 use crate::indexer::engine::QuoteIndexer;
 use crate::indexer::errors::IndexerError;
-use crate::model::{Commitment, ContractFilter, ContractLog, DeploymentConfig, SourceError};
+use crate::model::{
+    ChainUpdate, Commitment, ContractFilter, ContractLog, DeploymentConfig,
+    MIN_UPDATE_QUEUE_BYTE_CAPACITY, SourceError,
+};
 use crate::protocol::abi::quote_critical_topics;
 use std::sync::{
-    RwLock,
+    Arc, RwLock,
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 
 #[derive(Clone, Debug)]
 /// Connection and bounded-queue settings for an embeddable client.
@@ -21,6 +24,8 @@ pub struct ClientConnectConfig {
     pub filter: ContractFilter,
     /// Maximum number of normalized updates waiting for the reducer.
     pub buffer_capacity: usize,
+    /// Maximum retained bytes across normalized updates waiting for the reducer.
+    pub buffer_byte_capacity: usize,
     /// Delay before reopening a failed realtime subscription.
     pub reconnect_delay: Duration,
     /// Maximum interval without any realtime update before readiness is revoked.
@@ -52,11 +57,13 @@ impl ClientConnectConfig {
             .into());
         }
         if self.buffer_capacity == 0
+            || self.buffer_byte_capacity < MIN_UPDATE_QUEUE_BYTE_CAPACITY
+            || self.buffer_byte_capacity > u32::MAX as usize
             || self.reconnect_delay.is_zero()
             || self.source_stall_timeout.is_zero()
         {
             return Err(SourceError::Unavailable(
-                "client buffer and reconnect bounds must be non-zero".into(),
+                "client count/byte buffer and reconnect bounds must be valid; byte capacity must be at least 1024".into(),
             )
             .into());
         }
@@ -157,6 +164,7 @@ mod tests {
                 topics: quote_critical_topics().to_vec(),
             },
             buffer_capacity: 16,
+            buffer_byte_capacity: 1024 * 1024,
             reconnect_delay: Duration::from_millis(10),
             source_stall_timeout: Duration::from_secs(1),
         }
@@ -212,6 +220,12 @@ pub(super) struct ClientRuntimeStats {
     pub(super) queue_depth: AtomicUsize,
     /// Immutable hard bound configured for the reducer queue.
     queue_capacity: usize,
+    /// Conservative retained bytes currently waiting for the reducer.
+    pub(super) queue_bytes: AtomicUsize,
+    /// Immutable hard byte bound configured for the reducer queue.
+    pub(super) queue_byte_capacity: usize,
+    /// Weighted permit pool shared by the sole source producer and receiver.
+    pub(super) queue_byte_budget: Arc<Semaphore>,
     /// Number of source subscription reopen attempts.
     pub(super) source_reconnects: AtomicU64,
     /// Number of discontinuities that revoked quote readiness.
@@ -228,10 +242,13 @@ pub(super) struct ClientRuntimeStats {
 
 impl ClientRuntimeStats {
     /// Creates zeroed counters for one bounded reducer queue.
-    pub(super) fn new(queue_capacity: usize) -> Self {
+    pub(super) fn new(queue_capacity: usize, queue_byte_capacity: usize) -> Self {
         Self {
             queue_depth: AtomicUsize::new(0),
             queue_capacity,
+            queue_bytes: AtomicUsize::new(0),
+            queue_byte_capacity,
+            queue_byte_budget: Arc::new(Semaphore::new(queue_byte_capacity)),
             source_reconnects: AtomicU64::new(0),
             gaps: AtomicU64::new(0),
             recoveries: AtomicU64::new(0),
@@ -246,6 +263,8 @@ impl ClientRuntimeStats {
         ClientRuntimeStatsSnapshot {
             queue_depth: self.queue_depth.load(Ordering::Relaxed),
             queue_capacity: self.queue_capacity,
+            queue_bytes: self.queue_bytes.load(Ordering::Relaxed),
+            queue_byte_capacity: self.queue_byte_capacity,
             source_reconnects: self.source_reconnects.load(Ordering::Relaxed),
             gaps: self.gaps.load(Ordering::Relaxed),
             recoveries: self.recoveries.load(Ordering::Relaxed),
@@ -265,6 +284,10 @@ pub struct ClientRuntimeStatsSnapshot {
     pub queue_depth: usize,
     /// Configured hard bound of the reducer queue.
     pub queue_capacity: usize,
+    /// Conservative retained bytes currently waiting in the reducer queue.
+    pub queue_bytes: usize,
+    /// Configured hard byte bound of the reducer queue.
+    pub queue_byte_capacity: usize,
     /// Number of realtime subscription reopen attempts.
     pub source_reconnects: u64,
     /// Number of continuity gaps observed by the runtime.
@@ -277,6 +300,33 @@ pub struct ClientRuntimeStatsSnapshot {
     pub event_observer_drops: u64,
     /// Unix milliseconds when a normalized source update was last queued.
     pub last_source_update_unix_millis: u64,
+}
+
+/// One reducer-queue item that releases its byte budget when dequeued.
+pub(super) struct QueuedChainUpdate {
+    update: ChainUpdate,
+    bytes: usize,
+    _byte_permit: OwnedSemaphorePermit,
+}
+
+impl QueuedChainUpdate {
+    pub(super) fn new(
+        update: ChainUpdate,
+        bytes: usize,
+        byte_permit: OwnedSemaphorePermit,
+    ) -> Self {
+        Self {
+            update,
+            bytes,
+            _byte_permit: byte_permit,
+        }
+    }
+
+    pub(super) fn dequeue(self, stats: &ClientRuntimeStats) -> ChainUpdate {
+        stats.queue_depth.fetch_sub(1, Ordering::Relaxed);
+        stats.queue_bytes.fetch_sub(self.bytes, Ordering::Relaxed);
+        self.update
+    }
 }
 
 /// Returns a saturating wall-clock timestamp for operational age metrics.

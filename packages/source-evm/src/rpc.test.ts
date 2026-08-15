@@ -236,11 +236,12 @@ test("EIP-1898 code reads are pinned by block hash", async () => {
   assert.deepEqual(requests[0]?.params[1], { blockHash: hash });
 });
 
-test("backfill splits ranges larger than ten thousand blocks", async () => {
+test("backfill uses configured block pages", async () => {
   const requests: RpcRequest[] = [];
   const client = new JsonRpcHttpClient(
     "https://rpc.example",
     rpcFetcher(() => [], requests),
+    { maxBackfillPageBlocks: 10_000n },
   );
 
   await client.getLogs(

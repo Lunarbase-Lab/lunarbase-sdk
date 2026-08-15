@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 
 type CursorKey = (u64, u32, u32, u64, u32, u8);
 
+const DEFAULT_BYTES_PER_UPDATE: usize = 64 * 1024;
+
 /// Bounded single-writer reorder buffer for transport/decode work.
 ///
 /// Network sources may decode messages concurrently, but the reducer must
@@ -15,6 +17,10 @@ type CursorKey = (u64, u32, u32, u64, u32, u8);
 pub struct CursorReorderBuffer {
     /// Maximum number of updates retained before continuity fails closed.
     capacity: usize,
+    /// Maximum retained memory charged across all pending updates.
+    byte_capacity: usize,
+    /// Current conservative retained-memory charge.
+    pending_bytes: usize,
     /// Updates indexed by normalized deterministic source position.
     pending: BTreeMap<CursorKey, ChainUpdate>,
     /// Sticky continuity-failure flag cleared only by constructing a new buffer.
@@ -24,13 +30,21 @@ pub struct CursorReorderBuffer {
 impl CursorReorderBuffer {
     /// Creates a bounded deterministic reorder buffer.
     pub fn new(capacity: usize) -> Result<Self, SourceError> {
-        if capacity == 0 {
+        let byte_capacity = capacity.saturating_mul(DEFAULT_BYTES_PER_UPDATE);
+        Self::with_limits(capacity, byte_capacity)
+    }
+
+    /// Creates a deterministic reorder buffer bounded by count and bytes.
+    pub fn with_limits(capacity: usize, byte_capacity: usize) -> Result<Self, SourceError> {
+        if capacity == 0 || byte_capacity == 0 {
             return Err(SourceError::Unavailable(
-                "reorder buffer capacity must be non-zero".into(),
+                "reorder buffer count and byte capacities must be non-zero".into(),
             ));
         }
         Ok(Self {
             capacity,
+            byte_capacity,
+            pending_bytes: 0,
             pending: BTreeMap::new(),
             poisoned: false,
         })
@@ -44,6 +58,11 @@ impl CursorReorderBuffer {
     /// Returns whether no update is currently buffered.
     pub fn is_empty(&self) -> bool {
         self.pending.is_empty()
+    }
+
+    /// Returns the conservative retained-memory charge of pending updates.
+    pub fn retained_bytes(&self) -> usize {
+        self.pending_bytes
     }
 
     /// Returns whether the buffer has entered fail-closed state.
@@ -68,12 +87,16 @@ impl CursorReorderBuffer {
             self.poisoned = true;
             return Err(SourceError::Gap("multiple updates share one cursor".into()));
         }
-        if self.pending.len() >= self.capacity {
+        let update_bytes = update.retained_bytes();
+        if self.pending.len() >= self.capacity
+            || update_bytes > self.byte_capacity.saturating_sub(self.pending_bytes)
+        {
             self.poisoned = true;
             return Err(SourceError::Gap(
-                "reorder buffer overflow; resnapshot required".into(),
+                "reorder buffer count or byte budget exceeded; resnapshot required".into(),
             ));
         }
+        self.pending_bytes += update_bytes;
         self.pending.insert(key, update);
         Ok(())
     }
@@ -86,13 +109,20 @@ impl CursorReorderBuffer {
         let key = watermark_key(watermark);
         let keys: Vec<_> = self.pending.range(..=key).map(|(key, _)| *key).collect();
         keys.into_iter()
-            .filter_map(|key| self.pending.remove(&key))
+            .filter_map(|key| self.remove(&key))
             .collect()
     }
 
     /// Releases every buffered update in deterministic key order.
     pub fn drain_all(&mut self) -> Vec<ChainUpdate> {
+        self.pending_bytes = 0;
         std::mem::take(&mut self.pending).into_values().collect()
+    }
+
+    fn remove(&mut self, key: &CursorKey) -> Option<ChainUpdate> {
+        let update = self.pending.remove(key)?;
+        self.pending_bytes = self.pending_bytes.saturating_sub(update.retained_bytes());
+        Some(update)
     }
 }
 
@@ -216,5 +246,26 @@ mod tests {
                 .push(ChainUpdate::Head(cursor(3, None, None)))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn byte_budget_is_released_on_drain_and_overflow_fails_closed() {
+        let first = ChainUpdate::Head(cursor(1, None, None));
+        let bytes = first.retained_bytes();
+        let mut buffer = CursorReorderBuffer::with_limits(10, bytes).unwrap();
+        buffer.push(first.clone()).unwrap();
+        assert_eq!(buffer.retained_bytes(), bytes);
+        assert_eq!(buffer.drain_all(), vec![first]);
+        assert_eq!(buffer.retained_bytes(), 0);
+
+        buffer
+            .push(ChainUpdate::Head(cursor(2, None, None)))
+            .unwrap();
+        assert!(
+            buffer
+                .push(ChainUpdate::Head(cursor(3, None, None)))
+                .is_err()
+        );
+        assert!(buffer.is_poisoned());
     }
 }

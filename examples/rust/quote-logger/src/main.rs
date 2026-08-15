@@ -130,6 +130,7 @@ async fn main() -> Result<(), AnyError> {
         },
         deployment,
         buffer_capacity: 4096,
+        buffer_byte_capacity: 64 * 1024 * 1024,
         reconnect_delay: Duration::from_secs(1),
         source_stall_timeout: Duration::from_secs(30),
     };

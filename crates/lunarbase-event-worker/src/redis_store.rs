@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 
 const APPEND_EVENT_LUA: &str = r#"
 local existing = redis.call('HGET', KEYS[4], ARGV[1])
@@ -38,6 +38,12 @@ pub(crate) struct RedisKeys {
     cursor_order: String,
     event_ids: String,
     metadata: String,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RedisQueueLimits {
+    pub capacity: usize,
+    pub byte_capacity: usize,
 }
 
 impl RedisKeys {
@@ -72,6 +78,8 @@ pub(crate) enum StoreError {
     ChannelClosed,
     #[error("Redis writer thread panicked")]
     WorkerPanicked,
+    #[error("Redis command exceeds the configured queue byte budget")]
+    QueueByteLimit,
 }
 
 impl StoreError {
@@ -85,6 +93,8 @@ pub(crate) struct RedisEventStore {
     sender: mpsc::Sender<Command>,
     metrics: Arc<Metrics>,
     keys: Arc<RedisKeys>,
+    byte_budget: Arc<Semaphore>,
+    byte_capacity: usize,
 }
 
 pub(crate) struct RedisWriter {
@@ -107,13 +117,14 @@ struct Command {
     operation: Operation,
     response: oneshot::Sender<Result<Response, StoreError>>,
     _depth: RedisDepthGuard,
+    _byte_permit: OwnedSemaphorePermit,
 }
 
-struct RedisDepthGuard(Arc<Metrics>);
+struct RedisDepthGuard(Arc<Metrics>, usize);
 
 impl Drop for RedisDepthGuard {
     fn drop(&mut self) {
-        self.0.redis_finished();
+        self.0.redis_finished(self.1);
     }
 }
 
@@ -134,12 +145,13 @@ impl RedisEventStore {
         chain_id: u64,
         core: Address,
         timeout: Duration,
-        queue_bound: usize,
+        queue_limits: RedisQueueLimits,
         metrics: Arc<Metrics>,
     ) -> Result<(Self, RedisWriter), StoreError> {
         let client = redis::Client::open(url).map_err(redis_error)?;
         let keys = Arc::new(RedisKeys::new(namespace, chain_id, core));
-        let (sender, receiver) = mpsc::channel(queue_bound);
+        let (sender, receiver) = mpsc::channel(queue_limits.capacity);
+        let byte_budget = Arc::new(Semaphore::new(queue_limits.byte_capacity));
         let worker_keys = keys.clone();
         let handle = thread::Builder::new()
             .name("lunarbase-redis-events".into())
@@ -160,6 +172,8 @@ impl RedisEventStore {
                 sender,
                 metrics,
                 keys,
+                byte_budget,
+                byte_capacity: queue_limits.byte_capacity,
             },
             RedisWriter { handle },
         ))
@@ -201,6 +215,28 @@ impl RedisEventStore {
     }
 
     async fn request(&self, operation: Operation) -> Result<Response, StoreError> {
+        let bytes = operation.retained_bytes();
+        if bytes > self.byte_capacity {
+            return Err(StoreError::QueueByteLimit);
+        }
+        let byte_permit = match self
+            .byte_budget
+            .clone()
+            .try_acquire_many_owned(bytes.max(1) as u32)
+        {
+            Ok(permit) => permit,
+            Err(tokio::sync::TryAcquireError::NoPermits) => {
+                self.metrics.queue_saturated();
+                self.byte_budget
+                    .clone()
+                    .acquire_many_owned(bytes.max(1) as u32)
+                    .await
+                    .map_err(|_| StoreError::ChannelClosed)?
+            }
+            Err(tokio::sync::TryAcquireError::Closed) => {
+                return Err(StoreError::ChannelClosed);
+            }
+        };
         let permit = match self.sender.try_reserve() {
             Ok(permit) => permit,
             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -213,11 +249,12 @@ impl RedisEventStore {
             Err(mpsc::error::TrySendError::Closed(_)) => return Err(StoreError::ChannelClosed),
         };
         let (response, receiver) = oneshot::channel();
-        self.metrics.redis_started();
+        self.metrics.redis_started(bytes);
         permit.send(Command {
             operation,
             response,
-            _depth: RedisDepthGuard(self.metrics.clone()),
+            _depth: RedisDepthGuard(self.metrics.clone(), bytes),
+            _byte_permit: byte_permit,
         });
         receiver.await.map_err(|_| StoreError::ChannelClosed)?
     }
@@ -236,6 +273,7 @@ impl BlockingStore {
                 operation,
                 response,
                 _depth,
+                _byte_permit,
             } = command;
             let result = self.execute(operation);
             if matches!(&result, Err(StoreError::Redis(_))) {
@@ -243,6 +281,7 @@ impl BlockingStore {
                 self.initialized = false;
             }
             drop(_depth);
+            drop(_byte_permit);
             let _ = response.send(result);
         }
     }
@@ -284,6 +323,15 @@ impl BlockingStore {
         self.connection = Some(connection);
         self.initialized = false;
         Ok(())
+    }
+}
+
+impl Operation {
+    fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>().saturating_add(match self {
+            Self::Append(event) => event.retained_bytes(),
+            Self::Initialize | Self::LoadCursor => 0,
+        })
     }
 }
 
@@ -384,138 +432,5 @@ fn redis_error(error: redis::RedisError) -> StoreError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{RedisEventStore, RedisKeys, StoreError};
-    use crate::{event::DurableEvent, metrics::Metrics};
-    use alloy_primitives::{Address, B256, Bytes};
-    use lunarbase_client::model::{ChainCursor, Commitment, ContractLog};
-    use std::{sync::Arc, time::Duration};
-
-    #[test]
-    fn deployment_keys_share_one_cluster_hash_slot() {
-        let keys = RedisKeys::new("lunarbase", 8453, Address::new([3; 20]));
-        let tag = "{8453:0x0303030303030303030303030303030303030303}";
-        assert!(keys.stream.contains(tag));
-        assert!(keys.cursor.contains(tag));
-        assert!(keys.cursor_order.contains(tag));
-        assert!(keys.event_ids.contains(tag));
-        assert!(keys.metadata.contains(tag));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "requires LUNARBASE_TEST_REDIS_URL with AOF fsync-always"]
-    async fn durable_redis_append_is_atomic_and_idempotent() {
-        let url = std::env::var("LUNARBASE_TEST_REDIS_URL").expect("durable Redis URL");
-        let core = Address::new([3; 20]);
-        let metrics = Arc::new(Metrics::new(8, 8));
-        let namespace = format!("lunarbase-test-{}", std::process::id());
-        let (store, writer) = RedisEventStore::start(
-            url.clone(),
-            &namespace,
-            "integration-consumers".into(),
-            8453,
-            core,
-            Duration::from_secs(2),
-            8,
-            metrics,
-        )
-        .unwrap();
-        store.initialize().await.unwrap();
-
-        let applied_log = log(core, false);
-        let applied = Arc::new(DurableEvent::from_log(&applied_log).unwrap());
-        let first = store.append(applied.clone()).await.unwrap();
-        let duplicate = store.append(applied).await.unwrap();
-        assert!(first.appended);
-        assert!(!duplicate.appended);
-        assert_eq!(first.stream_id, duplicate.stream_id);
-
-        let removed = Arc::new(DurableEvent::from_log(&log(core, true)).unwrap());
-        assert!(store.append(removed).await.unwrap().appended);
-        assert_eq!(
-            store.load_cursor(8453, core).await.unwrap(),
-            Some(applied_log.cursor.clone())
-        );
-
-        let client = redis::Client::open(url.clone()).unwrap();
-        let mut connection = client.get_connection().unwrap();
-        let stream_length = redis::cmd("XLEN")
-            .arg(&store.keys().stream)
-            .query::<usize>(&mut connection)
-            .unwrap();
-        assert_eq!(stream_length, 2);
-
-        drop(store);
-        writer.join().unwrap();
-
-        let restarted_metrics = Arc::new(Metrics::new(8, 8));
-        let (restarted, restarted_writer) = RedisEventStore::start(
-            url,
-            &namespace,
-            "integration-consumers".into(),
-            8453,
-            core,
-            Duration::from_secs(2),
-            8,
-            restarted_metrics,
-        )
-        .unwrap();
-        restarted.initialize().await.unwrap();
-        assert_eq!(
-            restarted.load_cursor(8453, core).await.unwrap(),
-            Some(applied_log.cursor.clone())
-        );
-        let replay = Arc::new(DurableEvent::from_log(&applied_log).unwrap());
-        let replayed = restarted.append(replay).await.unwrap();
-        assert!(!replayed.appended);
-        assert_eq!(replayed.stream_id, first.stream_id);
-
-        drop(restarted);
-        restarted_writer.join().unwrap();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "requires LUNARBASE_TEST_UNSAFE_REDIS_URL without AOF fsync-always"]
-    async fn redis_without_fsync_always_is_rejected() {
-        let url = std::env::var("LUNARBASE_TEST_UNSAFE_REDIS_URL").expect("unsafe Redis URL");
-        let metrics = Arc::new(Metrics::new(8, 8));
-        let (store, writer) = RedisEventStore::start(
-            url,
-            "lunarbase-unsafe-test",
-            "integration-consumers".into(),
-            8453,
-            Address::new([4; 20]),
-            Duration::from_secs(2),
-            8,
-            metrics,
-        )
-        .unwrap();
-        assert!(matches!(
-            store.initialize().await.unwrap_err(),
-            StoreError::Durability(_)
-        ));
-        drop(store);
-        writer.join().unwrap();
-    }
-
-    fn log(core: Address, removed: bool) -> ContractLog {
-        ContractLog {
-            address: core,
-            transaction_hash: Some(B256::new([7; 32])),
-            topics: vec![B256::new([8; 32])],
-            data: Bytes::from_static(&[9; 64]),
-            removed,
-            cursor: ChainCursor {
-                chain_id: 8453,
-                block_number: 41,
-                execution_block_number: 41,
-                block_hash: Some(B256::new([6; 32])),
-                transaction_index: Some(2),
-                log_index: Some(3),
-                source_sequence: None,
-                source_sub_index: None,
-                commitment: Commitment::Canonical,
-            },
-        }
-    }
-}
+#[path = "redis_store_tests.rs"]
+mod tests;

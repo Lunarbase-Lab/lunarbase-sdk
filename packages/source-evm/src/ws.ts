@@ -38,8 +38,14 @@ export type { SocketEvent, WebSocketFactory, WebSocketLike } from "./ws/connecti
 export interface WsRpcConfig {
   /** Maximum accepted WebSocket frame size before fail-closed recovery. */
   readonly maxFrameBytes: number;
+  /** Maximum total bytes retained by decoded socket frames. */
+  readonly queueByteCapacity: number;
+  /** Maximum total bytes retained by notifications received during handshake. */
+  readonly prefetchByteCapacity: number;
   /** Maximum updates retained while awaiting an ordering watermark. */
   readonly reorderCapacity: number;
+  /** Maximum total bytes retained while awaiting an ordering watermark. */
+  readonly reorderByteCapacity: number;
   /** Maximum decoded frames waiting for the socket consumer. */
   readonly queueCapacity: number;
   /** Ethereum subscription method used for Core event logs. */
@@ -50,7 +56,10 @@ export interface WsRpcConfig {
 
 export const DEFAULT_WS_RPC_CONFIG: WsRpcConfig = Object.freeze({
   maxFrameBytes: 256 * 1024,
+  queueByteCapacity: 16 * 1024 * 1024,
+  prefetchByteCapacity: 16 * 1024 * 1024,
   reorderCapacity: 4096,
+  reorderByteCapacity: 64 * 1024 * 1024,
   queueCapacity: 4096,
   logsSubscription: "logs",
   progressiveHeads: false,
@@ -120,6 +129,8 @@ export class EvmRpcSource implements ChainDataSource {
       this.config.logsSubscription,
       this.chainId,
       this.config.queueCapacity,
+      this.config.queueByteCapacity,
+      this.config.prefetchByteCapacity,
       this.config.maxFrameBytes,
       signal,
     );
@@ -154,7 +165,7 @@ export class EvmRpcSource implements ChainDataSource {
     let lastHead: ChainCursor | undefined;
     let lastParentHash: Hex | undefined;
     let sourceSequence = 0n;
-    let reorder = new CursorReorderBuffer(this.config.reorderCapacity);
+    let reorder = new CursorReorderBuffer(this.config.reorderCapacity, this.config.reorderByteCapacity);
     const standardLogs = holdsStandardLogsUntilSuccessor(this.config);
     let openStandardHeads: OpenStandardHead[] = [];
     let firstStandardHeadBlock: bigint | undefined;
@@ -277,14 +288,27 @@ export class EvmRpcSource implements ChainDataSource {
         }
         if (lastHead && headDiscontinuity(lastHead, lastParentHash, parsed, this.config.progressiveHeads)) {
           yield { kind: "Reorg", oldHead: lastHead, newHead: parsed.cursor };
-          reorder = new CursorReorderBuffer(this.config.reorderCapacity);
+          reorder = new CursorReorderBuffer(this.config.reorderCapacity, this.config.reorderByteCapacity);
           openStandardHeads = [];
           firstStandardHeadBlock = parsed.cursor.blockNumber;
         }
         lastHead = parsed.cursor;
         lastParentHash = parsed.parentHash;
 
-        if (standardLogs) observeStandardHead(openStandardHeads, parsed, monotonicMilliseconds());
+        if (standardLogs) {
+          try {
+            observeStandardHead(
+              openStandardHeads,
+              parsed,
+              monotonicMilliseconds(),
+              this.config.reorderCapacity,
+              this.config.reorderByteCapacity,
+            );
+          } catch (error) {
+            yield gap(`RPC pending heads failed: ${message(error)}`, lastHead);
+            return;
+          }
+        }
 
         try {
           reorder.push({ kind: "Head", cursor: parsed.cursor });
@@ -305,7 +329,10 @@ export class EvmRpcSource implements ChainDataSource {
 function validateConfig(config: WsRpcConfig): WsRpcConfig {
   for (const [name, value] of Object.entries({
     maxFrameBytes: config.maxFrameBytes,
+    queueByteCapacity: config.queueByteCapacity,
+    prefetchByteCapacity: config.prefetchByteCapacity,
     reorderCapacity: config.reorderCapacity,
+    reorderByteCapacity: config.reorderByteCapacity,
     queueCapacity: config.queueCapacity,
   }))
     if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`WS ${name} must be a positive safe integer`);
@@ -352,7 +379,16 @@ function isAtOrBeforeWatermark(cursor: ChainCursor, watermark: ChainCursor | und
   return watermark !== undefined && cursor.blockNumber <= watermark.blockNumber;
 }
 
-function observeStandardHead(openHeads: OpenStandardHead[], head: ParsedHead, observedAt: number): void {
+function observeStandardHead(
+  openHeads: OpenStandardHead[],
+  head: ParsedHead,
+  observedAt: number,
+  countCapacity: number,
+  byteCapacity: number,
+): void {
+  const nextCount = openHeads.length + 1;
+  if (nextCount > countCapacity || nextCount * 256 > byteCapacity)
+    throw new Error("pending head count or byte budget exceeded");
   openHeads.push({ observedAt, head });
 }
 

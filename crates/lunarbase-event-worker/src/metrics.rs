@@ -11,8 +11,12 @@ pub(crate) struct Metrics {
     ready: AtomicBool,
     source_queue_depth: AtomicUsize,
     source_queue_capacity: usize,
+    source_queue_bytes: AtomicUsize,
+    source_queue_byte_capacity: usize,
     redis_queue_depth: AtomicUsize,
     redis_queue_capacity: usize,
+    redis_queue_bytes: AtomicUsize,
+    redis_queue_byte_capacity: usize,
     persisted: AtomicU64,
     duplicates: AtomicU64,
     redis_failures: AtomicU64,
@@ -28,13 +32,22 @@ pub(crate) struct Metrics {
 }
 
 impl Metrics {
-    pub(crate) fn new(source_queue_capacity: usize, redis_queue_capacity: usize) -> Self {
+    pub(crate) fn new(
+        source_queue_capacity: usize,
+        source_queue_byte_capacity: usize,
+        redis_queue_capacity: usize,
+        redis_queue_byte_capacity: usize,
+    ) -> Self {
         Self {
             ready: AtomicBool::new(false),
             source_queue_depth: AtomicUsize::new(0),
             source_queue_capacity,
+            source_queue_bytes: AtomicUsize::new(0),
+            source_queue_byte_capacity,
             redis_queue_depth: AtomicUsize::new(0),
             redis_queue_capacity,
+            redis_queue_bytes: AtomicUsize::new(0),
+            redis_queue_byte_capacity,
             persisted: AtomicU64::new(0),
             duplicates: AtomicU64::new(0),
             redis_failures: AtomicU64::new(0),
@@ -58,14 +71,16 @@ impl Metrics {
         self.ready.load(Ordering::Acquire)
     }
 
-    pub(crate) fn source_enqueued(&self) {
+    pub(crate) fn source_enqueued(&self, bytes: usize) {
         self.source_queue_depth.fetch_add(1, Ordering::Relaxed);
+        self.source_queue_bytes.fetch_add(bytes, Ordering::Relaxed);
         self.last_source_update_millis
             .store(unix_millis(), Ordering::Relaxed);
     }
 
-    pub(crate) fn source_dequeued(&self) {
+    pub(crate) fn source_dequeued(&self, bytes: usize) {
         self.source_queue_depth.fetch_sub(1, Ordering::Relaxed);
+        self.source_queue_bytes.fetch_sub(bytes, Ordering::Relaxed);
     }
 
     pub(crate) fn queue_saturated(&self) {
@@ -73,12 +88,14 @@ impl Metrics {
         self.queue_saturations.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(crate) fn redis_started(&self) {
+    pub(crate) fn redis_started(&self, bytes: usize) {
         self.redis_queue_depth.fetch_add(1, Ordering::Relaxed);
+        self.redis_queue_bytes.fetch_add(bytes, Ordering::Relaxed);
     }
 
-    pub(crate) fn redis_finished(&self) {
+    pub(crate) fn redis_finished(&self, bytes: usize) {
         self.redis_queue_depth.fetch_sub(1, Ordering::Relaxed);
+        self.redis_queue_bytes.fetch_sub(bytes, Ordering::Relaxed);
     }
 
     pub(crate) fn persisted(&self, block: u64, duplicate: bool, latency: Duration) {
@@ -155,6 +172,16 @@ impl Metrics {
         );
         gauge(
             &mut output,
+            "lunarbase_event_worker_source_queue_bytes",
+            self.source_queue_bytes.load(Ordering::Relaxed),
+        );
+        gauge(
+            &mut output,
+            "lunarbase_event_worker_source_queue_byte_capacity",
+            self.source_queue_byte_capacity,
+        );
+        gauge(
+            &mut output,
             "lunarbase_event_worker_redis_queue_depth",
             self.redis_queue_depth.load(Ordering::Relaxed),
         );
@@ -162,6 +189,16 @@ impl Metrics {
             &mut output,
             "lunarbase_event_worker_redis_queue_capacity",
             self.redis_queue_capacity,
+        );
+        gauge(
+            &mut output,
+            "lunarbase_event_worker_redis_queue_bytes",
+            self.redis_queue_bytes.load(Ordering::Relaxed),
+        );
+        gauge(
+            &mut output,
+            "lunarbase_event_worker_redis_queue_byte_capacity",
+            self.redis_queue_byte_capacity,
         );
         gauge(
             &mut output,

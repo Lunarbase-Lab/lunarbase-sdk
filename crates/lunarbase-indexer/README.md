@@ -36,6 +36,8 @@ Base is the default feature. Select evm, monad, monad-native, or arbitrum with
 Deployment identity, fee policy, execution context, and freshness policy
 cannot be overridden by HTTP requests. When source continuity or deployment
 identity is uncertain, readiness is revoked until canonical recovery succeeds.
+The reducer handoff is bounded by both `queue_bound` and `queue_byte_bound`
+(64 MiB by default); an oversized update becomes an explicit recovery gap.
 
 `LUNARBASE_VERIFIED_ROUTER` is optional. Without it, quotes use only the
 selected fee class and skip router whitelist/partner RPCs. Set it only when the

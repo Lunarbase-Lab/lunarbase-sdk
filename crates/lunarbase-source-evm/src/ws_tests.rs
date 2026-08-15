@@ -273,9 +273,16 @@ fn successor_grace_accepts_late_log_and_releases_at_deadline_without_a_third_hea
     let mut open_heads = VecDeque::new();
     let started = Instant::now();
     let successor_observed_at = started + Duration::from_secs(12);
-    observe_standard_head(&mut open_heads, head.clone(), started);
+    observe_standard_head(&mut open_heads, head.clone(), started, 4, 4096).unwrap();
     assert!(standard_head_deadline(&open_heads).is_none());
-    observe_standard_head(&mut open_heads, successor.clone(), successor_observed_at);
+    observe_standard_head(
+        &mut open_heads,
+        successor.clone(),
+        successor_observed_at,
+        4,
+        4096,
+    )
+    .unwrap();
     let deadline = successor_observed_at + Duration::from_secs(2);
     assert_eq!(standard_head_deadline(&open_heads), Some(deadline));
     assert!(

@@ -66,6 +66,12 @@ executed block before publishing it, and finalized follows the HTTP finalized
 watermark with bounded backfill pages. `LUNARBASE_EVENT_BACKFILL_PAGE_BLOCKS`
 bounds both recovery and finalized catch-up requests (default `1000`).
 
+Source and Redis handoffs are bounded by both item count and retained bytes.
+The default byte budgets are 64 MiB and 16 MiB respectively; configure them
+with `LUNARBASE_EVENT_SOURCE_QUEUE_BYTE_BOUND` and
+`LUNARBASE_EVENT_REDIS_QUEUE_BYTE_BOUND`. Saturation backpressures ingestion
+and revokes readiness. It never silently removes a required event.
+
 Provider retractions are persisted as `operation=removed` before the worker
 enters canonical recovery, so consumers can observe both lifecycle edges.
 

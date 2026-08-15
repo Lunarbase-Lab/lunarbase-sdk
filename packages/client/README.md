@@ -27,3 +27,5 @@ await client.shutdown();
 - `quote` and `quoteMany` read one coherent in-memory state snapshot.
 - `ChainDataSource` covers bootstrap, backfill, ordered updates, and checkpoint validation.
 - Gaps and canonical mismatches suspend readiness until recovery completes.
+- `queueBound` and `queueByteBound` jointly cap the source/reducer handoff;
+  overflow fails closed into canonical recovery.

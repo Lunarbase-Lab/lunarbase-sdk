@@ -81,7 +81,7 @@ test("backend coalesces chain verification and never checks per backfill page", 
   assert.equal(head.blockNumber, 42n);
   assert.deepEqual(logs, []);
   assert.equal(requests.filter((request) => request.method === "eth_chainId").length, 1);
-  assert.equal(requests.filter((request) => request.method === "eth_getLogs").length, 2);
+  assert.equal(requests.filter((request) => request.method === "eth_getLogs").length, 11);
 });
 
 test("standalone canonical boundaries reject a foreign HTTP chain before data reads", async () => {

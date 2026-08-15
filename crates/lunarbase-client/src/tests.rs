@@ -601,6 +601,7 @@ fn config() -> ClientConnectConfig {
             topics: quote_critical_topics().to_vec(),
         },
         buffer_capacity: 16,
+        buffer_byte_capacity: 1024 * 1024,
         reconnect_delay: Duration::from_millis(10),
         source_stall_timeout: Duration::from_secs(1),
     }

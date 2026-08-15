@@ -79,6 +79,22 @@ pub enum ExecutionEvent {
     },
 }
 
+impl ExecutionEvent {
+    /// Returns a conservative retained-memory charge for transport queues.
+    pub fn retained_bytes(&self) -> usize {
+        let dynamic = match self {
+            Self::Log(log) => log
+                .topics
+                .len()
+                .saturating_mul(std::mem::size_of::<B256>())
+                .saturating_add(log.data.len()),
+            Self::Gap { reason, .. } => reason.len(),
+            Self::Head(_) | Self::Reorg { .. } => 0,
+        };
+        std::mem::size_of::<Self>().saturating_add(dynamic)
+    }
+}
+
 /// Stream emitted by execution-event readers.
 pub type ExecutionEventStream =
     std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<ExecutionEvent, SourceError>> + Send>>;

@@ -23,8 +23,18 @@ pub(super) fn observe_standard_head(
     open_heads: &mut VecDeque<(Instant, WsHead)>,
     head: WsHead,
     observed_at: Instant,
-) {
+    count_capacity: usize,
+    byte_capacity: usize,
+) -> Result<(), SourceError> {
+    let next_count = open_heads.len().saturating_add(1);
+    let next_bytes = next_count.saturating_mul(std::mem::size_of::<(Instant, WsHead)>());
+    if next_count > count_capacity || next_bytes > byte_capacity {
+        return Err(SourceError::Gap(
+            "RPC pending head count or byte budget exceeded".into(),
+        ));
+    }
     open_heads.push_back((observed_at, head));
+    Ok(())
 }
 
 pub(super) fn standard_head_deadline(open_heads: &VecDeque<(Instant, WsHead)>) -> Option<Instant> {

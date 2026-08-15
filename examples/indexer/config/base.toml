@@ -12,6 +12,7 @@ realtime_url = "ws://127.0.0.1:8546"
 explicit_lane_assets = []
 bind = "127.0.0.1:8080"
 queue_bound = 4096
+queue_byte_bound = 67108864
 reconnect_delay_milliseconds = 1000
 source_stall_timeout_milliseconds = 30000
 # Omit `redis_url` to disable restart acceleration.

@@ -419,6 +419,7 @@ function connectConfig(): ClientConnectConfig {
     deployment: deployment(),
     filter: { address: CORE, topics: [] },
     queueBound: 16,
+    queueByteBound: 1024 * 1024,
     reconnectDelayMilliseconds: 10,
     sourceStallTimeoutMilliseconds: 1_000,
   };

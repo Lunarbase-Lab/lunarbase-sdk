@@ -2,7 +2,8 @@
 
 use crate::indexer::client::publish;
 use crate::indexer::client_types::{
-    ClientConnectConfig, ClientRuntimeStats, CoreEventSink, SharedQuoteState, unix_millis,
+    ClientConnectConfig, ClientRuntimeStats, CoreEventSink, QueuedChainUpdate, SharedQuoteState,
+    unix_millis,
 };
 use crate::indexer::engine::{
     QuoteIndexer, validate_core_log_identity, validate_core_recovery_log,
@@ -18,6 +19,10 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::{sleep, timeout};
+
+const RECOVERY_PAGE_BLOCKS: u64 = 1_000;
+const LEGACY_RECOVERY_LOG_LIMIT: usize = 65_536;
+const LEGACY_RECOVERY_BYTE_LIMIT: usize = 64 * 1024 * 1024;
 
 /// Operational event and counter handles used by the reducer task.
 pub(super) struct ReducerRuntime {
@@ -48,7 +53,7 @@ pub(super) struct SourcePumpRuntime {
 pub(super) async fn source_pump<S>(
     source: Arc<S>,
     filter: ContractFilter,
-    sender: mpsc::Sender<ChainUpdate>,
+    sender: mpsc::Sender<QueuedChainUpdate>,
     runtime: SourcePumpRuntime,
 ) where
     S: ChainDataSource + 'static,
@@ -121,7 +126,7 @@ pub(super) async fn source_pump<S>(
 
 async fn consume_stream(
     mut stream: SourceStream,
-    sender: &mpsc::Sender<ChainUpdate>,
+    sender: &mpsc::Sender<QueuedChainUpdate>,
     stall_timeout: Duration,
     source_active: &watch::Sender<bool>,
     cancel: &mut watch::Receiver<bool>,
@@ -203,11 +208,29 @@ async fn consume_stream(
 }
 
 async fn send_update(
-    sender: &mpsc::Sender<ChainUpdate>,
+    sender: &mpsc::Sender<QueuedChainUpdate>,
     cancel: &mut watch::Receiver<bool>,
     update: ChainUpdate,
     stats: &ClientRuntimeStats,
 ) -> bool {
+    let mut update = update;
+    let mut bytes = update.retained_bytes();
+    if bytes > stats.queue_byte_capacity {
+        update = ChainUpdate::Gap {
+            cursor: None,
+            reason: "source update exceeded reducer queue byte budget; canonical recovery required"
+                .into(),
+        };
+        bytes = update.retained_bytes();
+    }
+    let byte_permit = tokio::select! {
+        biased;
+        () = cancellation_requested(cancel) => return false,
+        result = stats.queue_byte_budget.clone().acquire_many_owned(bytes.max(1) as u32) => result,
+    };
+    let Ok(byte_permit) = byte_permit else {
+        return false;
+    };
     let permit = tokio::select! {
         biased;
         () = cancellation_requested(cancel) => return false,
@@ -220,10 +243,11 @@ async fn send_update(
     // Increment before publishing: `Permit::send` is synchronous, so the
     // receiver cannot decrement the counter before this update becomes visible.
     stats.queue_depth.fetch_add(1, Ordering::Relaxed);
+    stats.queue_bytes.fetch_add(bytes, Ordering::Relaxed);
     stats
         .last_source_update_unix_millis
         .store(unix_millis(), Ordering::Relaxed);
-    permit.send(update);
+    permit.send(QueuedChainUpdate::new(update, bytes, byte_permit));
     true
 }
 
@@ -231,7 +255,7 @@ pub(super) async fn reducer_loop<S>(
     shared: Arc<SharedQuoteState>,
     source: Arc<S>,
     config: ClientConnectConfig,
-    mut updates: mpsc::Receiver<ChainUpdate>,
+    mut updates: mpsc::Receiver<QueuedChainUpdate>,
     mut cancel: watch::Receiver<bool>,
     mut source_active: watch::Receiver<bool>,
     runtime: ReducerRuntime,
@@ -253,7 +277,7 @@ pub(super) async fn reducer_loop<S>(
             );
             return;
         };
-        runtime.stats.queue_depth.fetch_sub(1, Ordering::Relaxed);
+        let update = update.dequeue(&runtime.stats);
         let result = apply_live_update(shared.as_ref(), update, &runtime);
         if let Err(error) = result {
             shared.available.store(false, Ordering::Release);
@@ -316,7 +340,7 @@ async fn recover_until_ready<S: ChainDataSource>(
     shared: &SharedQuoteState,
     source: &S,
     config: &ClientConnectConfig,
-    updates: &mut mpsc::Receiver<ChainUpdate>,
+    updates: &mut mpsc::Receiver<QueuedChainUpdate>,
     cancel: &mut watch::Receiver<bool>,
     source_active: &mut watch::Receiver<bool>,
     runtime: &ReducerRuntime,
@@ -364,8 +388,7 @@ async fn recover_until_ready<S: ChainDataSource>(
                 };
                 let mut buffered = Vec::new();
                 while let Ok(update) = updates.try_recv() {
-                    runtime.stats.queue_depth.fetch_sub(1, Ordering::Relaxed);
-                    buffered.push(update);
+                    buffered.push(update.dequeue(&runtime.stats));
                 }
                 let result = install_recovered_state(
                     shared,
@@ -414,22 +437,38 @@ async fn load_recovery_events<S: ChainDataSource>(
             "canonical recovery head regressed below the pre-gap cursor".into(),
         ));
     }
-    let mut logs = source
-        .backfill(BackfillRequest {
-            from_block: from.block_number,
-            to_block: to.block_number,
-            filter: filter.clone(),
-        })
-        .await?;
-    logs.sort_by_key(|log| log.cursor.event_order());
-    for log in &logs {
-        validate_core_recovery_log(
-            log,
-            filter.address,
-            to.chain_id,
-            from.block_number..=to.block_number,
-        )?;
+    let mut logs = Vec::new();
+    let mut retained_bytes = 0_usize;
+    let mut page_start = from.block_number;
+    loop {
+        let page_end = recovery_page_end(page_start, to.block_number);
+        let mut page = source
+            .backfill(BackfillRequest {
+                from_block: page_start,
+                to_block: page_end,
+                filter: filter.clone(),
+            })
+            .await?;
+        page.sort_by_key(|log| log.cursor.event_order());
+        for log in page {
+            validate_core_recovery_log(&log, filter.address, to.chain_id, page_start..=page_end)?;
+            let bytes = log.retained_bytes();
+            if logs.len() >= LEGACY_RECOVERY_LOG_LIMIT
+                || bytes > LEGACY_RECOVERY_BYTE_LIMIT.saturating_sub(retained_bytes)
+            {
+                return Err(IndexerError::Gap(
+                    "legacy observer recovery exceeded its count or byte budget".into(),
+                ));
+            }
+            retained_bytes += bytes;
+            logs.push(log);
+        }
+        if page_end == to.block_number {
+            break;
+        }
+        page_start = page_end.saturating_add(1);
     }
+    logs.sort_by_key(|log| log.cursor.event_order());
     Ok(logs)
 }
 
@@ -519,37 +558,51 @@ pub(super) async fn recover_checkpoint<S: ChainDataSource>(
             checkpoint_cursor.block_number
         };
     if from_block <= head.block_number {
-        let mut logs = source
-            .backfill(BackfillRequest {
-                from_block,
-                to_block: head.block_number,
-                filter: filter.clone(),
-            })
-            .await?;
-        logs.sort_by_key(|log| log.cursor.event_order());
-        for log in logs {
-            validate_core_recovery_log(
-                &log,
-                indexer.deployment().core,
-                indexer.deployment().chain_id,
-                from_block..=head.block_number,
-            )?;
-            if log.cursor.event_order() <= checkpoint_cursor.event_order() {
-                continue;
-            }
-            if core_event_sink.is_some_and(|sink| sink.accepts(log.cursor.commitment)) {
-                if let Some(log) = indexer.apply_core_log_for_delivery(log)? {
-                    try_observe_core_event(core_event_sink, log, stats);
+        let mut page_start = from_block;
+        loop {
+            let page_end = recovery_page_end(page_start, head.block_number);
+            let mut logs = source
+                .backfill(BackfillRequest {
+                    from_block: page_start,
+                    to_block: page_end,
+                    filter: filter.clone(),
+                })
+                .await?;
+            logs.sort_by_key(|log| log.cursor.event_order());
+            for log in logs {
+                validate_core_recovery_log(
+                    &log,
+                    indexer.deployment().core,
+                    indexer.deployment().chain_id,
+                    page_start..=page_end,
+                )?;
+                if log.cursor.event_order() <= checkpoint_cursor.event_order() {
+                    continue;
                 }
-            } else {
-                indexer.apply_core_update(ChainUpdate::Log(log))?;
+                if core_event_sink.is_some_and(|sink| sink.accepts(log.cursor.commitment)) {
+                    if let Some(log) = indexer.apply_core_log_for_delivery(log)? {
+                        try_observe_core_event(core_event_sink, log, stats);
+                    }
+                } else {
+                    indexer.apply_core_update(ChainUpdate::Log(log))?;
+                }
             }
+            if page_end == head.block_number {
+                break;
+            }
+            page_start = page_end.saturating_add(1);
         }
     }
     indexer.apply_core_update(ChainUpdate::Head(head.clone()))?;
     indexer.set_canonical_floor(head);
     indexer.reducer.publish_ready();
     Ok(())
+}
+
+fn recovery_page_end(from_block: u64, to_block: u64) -> u64 {
+    from_block
+        .saturating_add(RECOVERY_PAGE_BLOCKS.saturating_sub(1))
+        .min(to_block)
 }
 
 async fn cancellation_requested(cancel: &mut watch::Receiver<bool>) {

@@ -6,6 +6,7 @@ contract_compatibility_version = "lunarbase-pmm-v2"
 explicit_lane_assets = []
 bind = "0.0.0.0:8080"
 queue_bound = 16384
+queue_byte_bound = 67108864
 reconnect_delay_milliseconds = 500
 source_stall_timeout_milliseconds = 30000
 redis_url = "redis://redis:6379/"

@@ -87,6 +87,7 @@ where
         topics: Vec::new(),
     };
     let (sender, mut receiver) = mpsc::channel(config.source_queue_bound);
+    let source_byte_budget = Arc::new(tokio::sync::Semaphore::new(config.source_queue_byte_bound));
     let (active_sender, mut active) = watch::channel(false);
     let pump = pump::spawn(
         source.clone(),
@@ -98,6 +99,8 @@ where
             active: active_sender,
             shutdown: shutdown.clone(),
             metrics: metrics.clone(),
+            byte_budget: source_byte_budget,
+            byte_capacity: config.source_queue_byte_bound,
         },
     );
 
