@@ -216,3 +216,7 @@ async fn sleep_or_cancel(delay: Duration, shutdown: &mut watch::Receiver<bool>) 
         () = sleep(delay) => false,
     }
 }
+
+#[cfg(test)]
+#[path = "pump_tests.rs"]
+mod tests;

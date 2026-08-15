@@ -128,6 +128,25 @@ readers. Allocation counting runs separately with one reader because its
 instrumented allocator would otherwise distort latency and RSS. Compare JSON
 reports only on the same pinned host, release profile, and CPU policy.
 
+For a reviewable baseline/current comparison, capture each revision in a clean
+directory on the same idle machine:
+
+```sh
+make performance-capture PERF_OUTPUT=/var/tmp/lunarbase-perf-baseline
+make performance-capture PERF_OUTPUT=/var/tmp/lunarbase-perf-current
+make performance-gate \
+  PERF_BASELINE=/var/tmp/lunarbase-perf-baseline \
+  PERF_CURRENT=/var/tmp/lunarbase-perf-current
+```
+
+Capture covers 15/64 lanes, 100 pairs, batches 1/16/256, 128 quote readers,
+and both quote-only and mixed quote/event pressure. It runs timing and mixed
+scenarios 10 times in fresh processes and measures allocations separately. The
+gate compares medians and rejects more than 3% quote-throughput, 5% p99, or 5%
+peak-RSS regression. Allocation count and bytes may not grow. These margins are
+noise tolerances, not performance budgets; repeat any borderline failure on the
+same idle host before changing the accepted baseline.
+
 ## Release verification
 
 Before publishing or deploying:
@@ -138,4 +157,16 @@ docker build --build-arg NETWORK_FEATURES=base .
 ```
 
 Publishing a vX.Y.Z GitHub Release reruns the release gate before registry
-publication.
+publication. Publication also waits for the `lunarbase-performance` dedicated
+runner. Keep that runner idle, pin its CPU policy and toolchain, and do not run
+unrelated services on it. Set the repository variable
+`LUNARBASE_PERFORMANCE_BASELINE_REF` to a reviewed immutable commit that contains
+the same performance schema and capture tooling. Moving the baseline requires a
+separate reviewed decision; the release job never updates it automatically.
+
+The process E2E gate starts dedicated quote and event-worker connections, kills
+the event worker during ingestion, verifies inclusive replay without duplicate
+stream entries, reclaims an abandoned consumer-group entry, then kills Redis.
+After Redis restarts, AOF data must still exist and the worker must persist the
+event received during the outage. Queue saturation tests additionally require
+backpressure or a terminal recovery gap; silent event loss is forbidden.

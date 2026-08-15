@@ -99,6 +99,10 @@ The release gate covers:
   unit tests
 - deterministic cross-language quote vectors
 - source ordering, bootstrap, recovery, checkpoint, and process-level tests
+- event-worker/Redis crash replay, duplicate delivery, consumer reclaim, queue
+  saturation, EVM reorg, and Monad competing-proposal/parser-gap tests
+- same-runner quote throughput, p99, peak RSS, allocation, and mixed quote/event
+  no-regression comparisons
 - Base, Monad, Arbitrum, and Linux adapter feature builds
 - dependency policy and production npm advisory checks
 - exact crate and npm package contents

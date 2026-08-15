@@ -1,5 +1,7 @@
 use crate::support::e2e::environment::E2eError;
+use crate::support::e2e::{CORE, environment::MockLog};
 use lunarbase_math::{Address, B256};
+use serde_json::{Value, json};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
@@ -48,4 +50,27 @@ pub(super) fn word_hex(value: B256) -> String {
 
 pub(super) fn block_hash(block: u64) -> String {
     format!("{:#x}", B256::left_padding_from(&block.to_be_bytes()))
+}
+
+pub(super) fn raw_event_log(log: MockLog) -> Value {
+    let mut transaction = [0_u8; 32];
+    transaction[..8].copy_from_slice(&log.block.to_be_bytes());
+    transaction[8..12].copy_from_slice(&log.log_index.to_be_bytes());
+    transaction[31] = log.payload;
+    json!({
+        "address": CORE,
+        "topics": [format!("{:#x}", B256::new([0x99; 32]))],
+        "data": format!("0x{:02x}", log.payload),
+        "removed": false,
+        "blockNumber": format!("0x{:x}", log.block),
+        "blockHash": block_hash(log.block),
+        "transactionIndex": "0x0",
+        "logIndex": format!("0x{:x}", log.log_index),
+        "transactionHash": format!("{:#x}", B256::new(transaction)),
+    })
+}
+
+pub(super) fn hex_quantity(value: &Value) -> Option<u64> {
+    let value = value.as_str()?;
+    u64::from_str_radix(value.strip_prefix("0x")?, 16).ok()
 }

@@ -6,7 +6,7 @@
 
 SHELL := /bin/sh
 
-.NOTPARALLEL: ci pre-push release-check performance-baseline
+.NOTPARALLEL: ci pre-push release-check performance-baseline performance-capture performance-gate
 
 CARGO ?= cargo
 PNPM ?= pnpm
@@ -42,7 +42,7 @@ PNPM_CMD := $(shell if command -v corepack >/dev/null 2>&1; then printf '%s' "co
 .PHONY: help install hooks-install build build-rust build-ts build-math-ts build-release build-indexer build-event-worker run run-indexer run-event-worker \
 	check check-rust check-ts check-network-feature check-network-features check-monad-native \
 	fmt fmt-rust fmt-ts fmt-check fmt-check-rust fmt-check-ts lint lint-rust lint-ts \
-	test test-rust test-ts test-runtime test-process-e2e audit audit-rust audit-rust-ci audit-ts load performance-baseline quote-benchmark quote-allocation-benchmark monad-live-validate docs docs-rust ffi \
+	test test-rust test-ts test-runtime test-monad-lifecycle test-process-e2e audit audit-rust audit-rust-ci audit-ts load performance-baseline performance-capture performance-gate quote-benchmark quote-allocation-benchmark monad-live-validate docs docs-rust ffi \
 	quote-logger quote-logger-rust quote-logger-ts activity-actor activity-actor-inspect activity-actor-wallet monad-parser-smoke docker-build docker-image-check docker-build-monad-native docker-up docker-down release-artifacts release-check release-version-check release-check-rust release-check-ts source-size-check repository-check public-api-check check-scripts check-ci-tools verify ci-rust ci-ts ci-supply-chain ci pre-push clean check-pnpm
 
 help:
@@ -58,9 +58,12 @@ help:
 	@echo "  make check          Run Rust and TypeScript compile checks"
 	@echo "  make test           Run Rust and TypeScript tests"
 	@echo "  make test-runtime   Test only client runtime crates/packages"
+	@echo "  make test-monad-lifecycle  Test protocol-v2 proposals, resume, and gaps"
 	@echo "  make test-process-e2e  Run real-process RPC/WS/Redis/multi-replica scenarios"
 	@echo "  make load           Benchmark 15 lanes / 100 pairs by default"
 	@echo "  make performance-baseline  Run the reproducible quote timing/allocation matrix"
+	@echo "  make performance-capture PERF_OUTPUT=...  Capture repeated release reports"
+	@echo "  make performance-gate PERF_BASELINE=... PERF_CURRENT=...  Compare reports"
 	@echo "  make monad-live-validate  Run the real Monad parser/RPC/indexer soak"
 	@echo "  make lint           Run Rust clippy and TypeScript ESLint"
 	@echo "  make audit          Check Rust advisories/licenses/sources and npm advisories"
@@ -172,6 +175,7 @@ lint: lint-rust lint-ts
 
 lint-rust:
 	$(CARGO) clippy --locked --workspace --all-targets -- -D warnings
+	$(CARGO) clippy --locked -p lunarbase-pmm-v2-source-monad --features protocol-v2 --all-targets -- -D warnings
 
 lint-ts: check-pnpm
 	$(PNPM_CMD) exec eslint packages examples/typescript scripts --max-warnings=0
@@ -190,7 +194,7 @@ audit-ts: check-pnpm
 
 test: test-rust test-ts
 
-test-rust:
+test-rust: test-monad-lifecycle
 	$(CARGO) test --locked --workspace
 
 test-ts: build-ts
@@ -198,11 +202,17 @@ test-ts: build-ts
 
 test-runtime: build-ts
 	$(CARGO) test -p lunarbase-pmm-v2-client -p lunarbase-pmm-v2-source-evm -p lunarbase-pmm-v2-source-monad -p lunarbase-pmm-v2-source-arbitrum -p lunarbase-event-worker
+	$(MAKE) test-monad-lifecycle
 	$(NODE) --test packages/client/dist/*.test.js packages/client/dist/**/*.test.js packages/source-evm/dist/*.test.js packages/source-monad/dist/*.test.js packages/source-arbitrum/dist/*.test.js
 
+test-monad-lifecycle:
+	$(CARGO) test --locked -p lunarbase-pmm-v2-source-monad --features protocol-v2
+
 test-process-e2e:
-	$(CARGO) build --locked -p lunarbase-indexer -p lunarbase-tools
-	$(CARGO) run --locked -p lunarbase-tools --bin lunarbase-e2e -- --indexer-bin target/debug/lunarbase-indexer
+	$(CARGO) build --locked -p lunarbase-indexer -p lunarbase-event-worker -p lunarbase-tools
+	$(CARGO) run --locked -p lunarbase-tools --bin lunarbase-e2e -- \
+		--indexer-bin target/debug/lunarbase-indexer \
+		--event-worker-bin target/debug/lunarbase-event-worker
 
 load:
 	$(CARGO) run -p lunarbase-tools --bin lunarbase-load -- \
@@ -211,6 +221,25 @@ load:
 		--requests "$${REQUESTS:-20000}" --concurrency "$${CONCURRENCY:-128}"
 
 performance-baseline: quote-benchmark quote-allocation-benchmark
+
+performance-capture:
+	@if [ -z "$(PERF_OUTPUT)" ]; then \
+		echo "PERF_OUTPUT is required and must name an empty output directory"; \
+		exit 2; \
+	fi
+	$(NODE) scripts/capture-performance.mjs \
+		--output "$(PERF_OUTPUT)" \
+		--repetitions "$(if $(strip $(PERF_REPETITIONS)),$(PERF_REPETITIONS),10)" \
+		--allocation-repetitions "$(if $(strip $(PERF_ALLOCATION_REPETITIONS)),$(PERF_ALLOCATION_REPETITIONS),1)"
+
+performance-gate:
+	@if [ -z "$(PERF_BASELINE)" ] || [ -z "$(PERF_CURRENT)" ]; then \
+		echo "PERF_BASELINE and PERF_CURRENT are required"; \
+		exit 2; \
+	fi
+	$(NODE) scripts/check-performance-regression.mjs \
+		--baseline "$(PERF_BASELINE)" \
+		--current "$(PERF_CURRENT)"
 
 quote-benchmark:
 	@set -eu; for lanes in 15 64; do for batch in 1 16 256; do \

@@ -1,16 +1,14 @@
 //! Reproducible in-process benchmark for the connected quote hot path.
 
 use clap::{Parser, ValueEnum};
-use futures_util::stream;
 use lunarbase_client::indexer::errors::IndexerError;
-use lunarbase_client::prelude::{
-    BackfillRequest, BootstrapSnapshot, ChainCursor, ChainDataSource, ChainUpdate, Checkpoint,
-    ConnectedQuoteClient, ContractFilter, ContractLog, Network, SourceError, SourceStream,
-};
+use lunarbase_client::prelude::ConnectedQuoteClient;
 use lunarbase_math::{QuoteOutcome, QuoteRequest};
 use lunarbase_tools::support::quote_benchmark::{fixture, rotating_batches};
+use lunarbase_tools::support::quote_mixed::{
+    MixedLoadReport, SyntheticSource, UpdateBus, spawn_mixed_publisher, wait_for_reducer_sequence,
+};
 use serde::Serialize;
-use std::future::{Future, ready};
 use std::hint::black_box;
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
@@ -19,6 +17,7 @@ use thiserror::Error;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum BenchmarkMode {
     Timing,
+    Mixed,
     Allocations,
 }
 
@@ -41,6 +40,8 @@ struct Arguments {
     warmup_calls: usize,
     #[arg(long, value_enum, default_value_t = BenchmarkMode::Timing)]
     mode: BenchmarkMode,
+    #[arg(long, default_value_t = 1_000)]
+    mixed_events_per_second: u64,
 }
 
 #[derive(Debug, Error)]
@@ -73,6 +74,7 @@ struct BenchmarkReport {
     measured_quotes: usize,
     timing: Option<TimingReport>,
     allocations: Option<AllocationReport>,
+    event_load: Option<MixedLoadReport>,
     rss_bytes: MemoryReport,
     checksum: u64,
 }
@@ -129,51 +131,6 @@ struct WorkerResult {
     checksum: u64,
 }
 
-#[derive(Clone, Debug)]
-struct SyntheticSource {
-    snapshot: BootstrapSnapshot,
-}
-
-impl ChainDataSource for SyntheticSource {
-    fn network(&self) -> Network {
-        Network::Base
-    }
-
-    fn snapshot(
-        &self,
-        _deployment: &lunarbase_client::model::DeploymentConfig,
-    ) -> impl Future<Output = Result<BootstrapSnapshot, SourceError>> + Send {
-        ready(Ok(self.snapshot.clone()))
-    }
-
-    fn backfill(
-        &self,
-        _request: BackfillRequest,
-    ) -> impl Future<Output = Result<Vec<ContractLog>, SourceError>> + Send {
-        ready(Ok(Vec::new()))
-    }
-
-    fn subscribe(
-        &self,
-        _filter: ContractFilter,
-    ) -> impl Future<Output = Result<SourceStream, SourceError>> + Send {
-        ready(Ok(
-            Box::pin(stream::pending::<Result<ChainUpdate, SourceError>>()) as SourceStream,
-        ))
-    }
-
-    fn canonical_head(&self) -> impl Future<Output = Result<ChainCursor, SourceError>> + Send {
-        ready(Ok(self.snapshot.cursor.clone()))
-    }
-
-    fn validate_checkpoint(
-        &self,
-        _checkpoint: &Checkpoint,
-    ) -> impl Future<Output = Result<bool, SourceError>> + Send {
-        ready(Ok(true))
-    }
-}
-
 #[tokio::main]
 async fn main() {
     if let Err(error) = run(Arguments::parse()).await {
@@ -191,9 +148,18 @@ async fn run(arguments: Arguments) -> Result<(), BenchmarkError> {
         rotating_batches(&benchmark_fixture.requests, arguments.batch_size)
             .map_err(BenchmarkError::Invalid)?,
     );
-    let source = Arc::new(SyntheticSource {
-        snapshot: benchmark_fixture.snapshot,
-    });
+    let lane_asset = benchmark_fixture.connect.deployment.explicit_lane_assets[0];
+    let lane_slot0 = benchmark_fixture.snapshot.state.lanes[&lane_asset].slot0;
+    let mut update_cursor = benchmark_fixture.snapshot.cursor.clone();
+    update_cursor.block_number = update_cursor.block_number.saturating_add(1);
+    update_cursor.execution_block_number = update_cursor.execution_block_number.saturating_add(1);
+    update_cursor.block_hash = Some(lunarbase_math::B256::new([9; 32]));
+    let core_address = benchmark_fixture.connect.deployment.core;
+    let updates = UpdateBus::new(4_096, 4 * 1024 * 1024);
+    let source = Arc::new(SyntheticSource::new(
+        benchmark_fixture.snapshot,
+        updates.clone(),
+    ));
     let client =
         Arc::new(ConnectedQuoteClient::connect(benchmark_fixture.connect, source, None).await?);
     validate_available(&client, &benchmark_fixture.requests)?;
@@ -211,6 +177,39 @@ async fn run(arguments: Arguments) -> Result<(), BenchmarkError> {
                 (
                     Some(timing.report),
                     None,
+                    None,
+                    timing.checksum,
+                    measured_calls(&arguments),
+                )
+            })
+        }
+        BenchmarkMode::Mixed => {
+            let initial_sequence = update_cursor.source_sequence.unwrap_or(0);
+            let publisher = spawn_mixed_publisher(
+                updates,
+                core_address,
+                lane_asset,
+                lane_slot0,
+                update_cursor,
+                arguments.mixed_events_per_second,
+            );
+            wait_for_reducer_sequence(&client, initial_sequence.saturating_add(1))
+                .await
+                .map_err(BenchmarkError::Invalid)?;
+            let timing = run_timing(&arguments, client.clone(), batches.clone());
+            let mut event_load = publisher.finish().await;
+            let expected_sequence = initial_sequence.saturating_add(event_load.published_updates);
+            let applied_sequence = wait_for_reducer_sequence(&client, expected_sequence)
+                .await
+                .map_err(BenchmarkError::Invalid)?;
+            event_load.applied_updates = applied_sequence
+                .saturating_sub(initial_sequence)
+                .min(event_load.published_updates);
+            timing.map(|timing| {
+                (
+                    Some(timing.report),
+                    None,
+                    Some(event_load),
                     timing.checksum,
                     measured_calls(&arguments),
                 )
@@ -226,13 +225,14 @@ async fn run(arguments: Arguments) -> Result<(), BenchmarkError> {
             (
                 None,
                 Some(allocations),
+                None,
                 checksum,
                 arguments.allocation_calls,
             )
         }),
     };
     let shutdown = client.shutdown_gracefully(Duration::from_secs(2)).await;
-    let (timing, allocations, checksum, calls) = result?;
+    let (timing, allocations, event_load, checksum, calls) = result?;
     shutdown?;
     let (after, peak) = process_memory();
     let report = BenchmarkReport {
@@ -240,6 +240,7 @@ async fn run(arguments: Arguments) -> Result<(), BenchmarkError> {
         scenario_id: scenario_id(&arguments),
         mode: match arguments.mode {
             BenchmarkMode::Timing => "timing",
+            BenchmarkMode::Mixed => "mixed",
             BenchmarkMode::Allocations => "allocations",
         },
         build_profile: if cfg!(debug_assertions) {
@@ -258,6 +259,7 @@ async fn run(arguments: Arguments) -> Result<(), BenchmarkError> {
         measured_quotes: calls.saturating_mul(arguments.batch_size),
         timing,
         allocations,
+        event_load,
         rss_bytes: MemoryReport {
             before_fixture,
             ready: ready_memory,
@@ -275,6 +277,7 @@ fn validate_arguments(arguments: &Arguments) -> Result<(), BenchmarkError> {
         || arguments.measured_quotes == 0
         || arguments.allocation_calls == 0
         || arguments.warmup_calls == 0
+        || arguments.mixed_events_per_second == 0
     {
         return Err(BenchmarkError::Invalid(
             "concurrency, measured quotes, allocation calls, and warmup calls must be non-zero"
@@ -282,8 +285,8 @@ fn validate_arguments(arguments: &Arguments) -> Result<(), BenchmarkError> {
         ));
     }
     match arguments.mode {
-        BenchmarkMode::Timing if cfg!(feature = "allocation-stats") => Err(
-            BenchmarkError::Invalid("timing mode must run without allocation-stats".into()),
+        BenchmarkMode::Timing | BenchmarkMode::Mixed if cfg!(feature = "allocation-stats") => Err(
+            BenchmarkError::Invalid("timing modes must run without allocation-stats".into()),
         ),
         BenchmarkMode::Allocations if !cfg!(feature = "allocation-stats") => Err(
             BenchmarkError::Invalid("allocation mode requires --features allocation-stats".into()),
@@ -472,6 +475,7 @@ fn measured_calls(arguments: &Arguments) -> usize {
 fn scenario_id(arguments: &Arguments) -> String {
     let mode = match arguments.mode {
         BenchmarkMode::Timing => "timing",
+        BenchmarkMode::Mixed => "mixed",
         BenchmarkMode::Allocations => "allocations",
     };
     format!(

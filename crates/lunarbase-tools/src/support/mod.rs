@@ -4,3 +4,4 @@ pub mod e2e;
 pub mod load;
 pub mod monad;
 pub mod quote_benchmark;
+pub mod quote_mixed;

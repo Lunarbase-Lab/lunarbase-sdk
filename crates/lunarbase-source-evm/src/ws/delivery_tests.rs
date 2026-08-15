@@ -85,6 +85,48 @@ async fn realtime_stream_delivers_receive_order_and_removal_before_gap() {
 }
 
 #[tokio::test]
+async fn realtime_stream_emits_reorg_before_the_replacement_head() {
+    let asserter = Asserter::new();
+    let client = RpcHttpClient::from_client(RpcClient::mocked(asserter.clone()));
+    asserter.push_success(&json!("0x61"));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(serve_competing_heads(listener));
+    let source = EvmRpcSource::with_delivery_mode(
+        client,
+        endpoint,
+        Network::Evm,
+        97,
+        EvmDeliveryMode::Realtime,
+    );
+    let mut stream = source
+        .subscribe(ContractFilter {
+            address: Address::new([1; 20]),
+            topics: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    let original = stream.next().await.unwrap().unwrap();
+    let reorg = stream.next().await.unwrap().unwrap();
+    let replacement = stream.next().await.unwrap().unwrap();
+
+    assert!(
+        matches!(&original, ChainUpdate::Head(cursor) if cursor.block_hash == Some(B256::new([0x11; 32])))
+    );
+    assert!(matches!(
+        &reorg,
+        ChainUpdate::Reorg { old_head, new_head }
+            if old_head.block_hash == Some(B256::new([0x11; 32]))
+                && new_head.block_hash == Some(B256::new([0x33; 32]))
+    ));
+    assert!(
+        matches!(&replacement, ChainUpdate::Head(cursor) if cursor.block_hash == Some(B256::new([0x33; 32])))
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn finalized_stream_advances_with_bounded_http_pages() {
     let asserter = Asserter::new();
     let client = RpcHttpClient::from_client(RpcClient::mocked(asserter.clone()));
@@ -171,6 +213,32 @@ async fn serve_head_update(listener: TcpListener) {
         .await
         .unwrap();
     std::future::pending::<()>().await;
+}
+
+async fn serve_competing_heads(listener: TcpListener) {
+    let (stream, _) = listener.accept().await.unwrap();
+    let mut socket = accept_async(stream).await.unwrap();
+    acknowledge_subscriptions(&mut socket).await;
+    for (hash, parent) in [(0x11, 0x22), (0x33, 0x44)] {
+        socket
+            .send(Message::Text(
+                json!({
+                    "jsonrpc": "2.0",
+                    "method": "eth_subscription",
+                    "params": {
+                        "subscription": "heads-subscription",
+                        "result": {
+                            "number": "0x2a",
+                            "hash": format!("{:#x}", B256::new([hash; 32])),
+                            "parentHash": format!("{:#x}", B256::new([parent; 32])),
+                        }
+                    }
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+    }
 }
 
 async fn acknowledge_subscriptions(
