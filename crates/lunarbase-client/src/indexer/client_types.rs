@@ -30,6 +30,8 @@ pub struct ClientConnectConfig {
     pub reconnect_delay: Duration,
     /// Maximum interval without any realtime update before readiness is revoked.
     pub source_stall_timeout: Duration,
+    /// Maximum duration of one source subscribe, snapshot, or recovery operation.
+    pub source_operation_timeout: Duration,
 }
 
 impl ClientConnectConfig {
@@ -61,6 +63,7 @@ impl ClientConnectConfig {
             || self.buffer_byte_capacity > u32::MAX as usize
             || self.reconnect_delay.is_zero()
             || self.source_stall_timeout.is_zero()
+            || self.source_operation_timeout.is_zero()
         {
             return Err(SourceError::Unavailable(
                 "client count/byte buffer and reconnect bounds must be valid; byte capacity must be at least 1024".into(),
@@ -167,6 +170,7 @@ mod tests {
             buffer_byte_capacity: 1024 * 1024,
             reconnect_delay: Duration::from_millis(10),
             source_stall_timeout: Duration::from_secs(1),
+            source_operation_timeout: Duration::from_secs(1),
         }
     }
 
@@ -194,6 +198,8 @@ pub(super) struct SharedQuoteState {
     pub(super) indexer: RwLock<QuoteIndexer>,
     /// Lock-free readiness gate checked before entering the quote read path.
     pub(super) available: AtomicBool,
+    /// Sticky lifecycle gate preventing freshness restoration during shutdown.
+    pub(super) stopping: AtomicBool,
     /// Notification used to wake commitment/readiness waiters after recovery.
     pub(super) ready: Notify,
 }
@@ -204,7 +210,18 @@ impl SharedQuoteState {
         Self {
             indexer: RwLock::new(indexer),
             available: AtomicBool::new(false),
+            stopping: AtomicBool::new(false),
             ready: Notify::new(),
+        }
+    }
+
+    /// Restores readiness after verified reducer progress unless shutdown began.
+    pub(super) fn publish_available(&self) {
+        if !self.stopping.load(Ordering::Acquire)
+            && !self.available.load(Ordering::Acquire)
+            && !self.available.swap(true, Ordering::AcqRel)
+        {
+            self.ready.notify_waiters();
         }
     }
 }
@@ -238,6 +255,10 @@ pub(super) struct ClientRuntimeStats {
     pub(super) event_observer_drops: AtomicU64,
     /// Unix milliseconds when the pump last delivered a normalized update.
     pub(super) last_source_update_unix_millis: AtomicU64,
+    /// Unix milliseconds when the reducer last published verified quote state.
+    pub(super) last_state_update_unix_millis: AtomicU64,
+    /// Monotonic reducer publication generation used to close watchdog races.
+    pub(super) state_update_generation: AtomicU64,
 }
 
 impl ClientRuntimeStats {
@@ -255,7 +276,16 @@ impl ClientRuntimeStats {
             recovery_failures: AtomicU64::new(0),
             event_observer_drops: AtomicU64::new(0),
             last_source_update_unix_millis: AtomicU64::new(0),
+            last_state_update_unix_millis: AtomicU64::new(0),
+            state_update_generation: AtomicU64::new(0),
         }
+    }
+
+    /// Records one verified state publication outside the quote hot path.
+    pub(super) fn record_state_update(&self) {
+        self.last_state_update_unix_millis
+            .store(unix_millis(), Ordering::Relaxed);
+        self.state_update_generation.fetch_add(1, Ordering::Release);
     }
 
     /// Samples each counter independently using relaxed atomic loads.
@@ -272,6 +302,9 @@ impl ClientRuntimeStats {
             event_observer_drops: self.event_observer_drops.load(Ordering::Relaxed),
             last_source_update_unix_millis: self
                 .last_source_update_unix_millis
+                .load(Ordering::Relaxed),
+            last_state_update_unix_millis: self
+                .last_state_update_unix_millis
                 .load(Ordering::Relaxed),
         }
     }
@@ -300,6 +333,8 @@ pub struct ClientRuntimeStatsSnapshot {
     pub event_observer_drops: u64,
     /// Unix milliseconds when a normalized source update was last queued.
     pub last_source_update_unix_millis: u64,
+    /// Unix milliseconds when verified quote state last advanced or refreshed.
+    pub last_state_update_unix_millis: u64,
 }
 
 /// One reducer-queue item that releases its byte budget when dequeued.

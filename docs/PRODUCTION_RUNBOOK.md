@@ -55,7 +55,9 @@ curl -fsS http://127.0.0.1:9091/metrics
 ## Monitoring
 
 - /healthz is a process liveness signal.
-- /readyz is the traffic-routing signal.
+- /readyz is the traffic-routing signal. It fails closed when reducer-published
+  state exceeds `source_stall_timeout_milliseconds`, even if the process and
+  transport are still alive.
 - /metrics exposes Prometheus metrics.
 
 Alert on sustained non-readiness, repeated recovery, queue saturation, source
@@ -90,8 +92,15 @@ and `XACK` only after their own side effect commits.
 ## Graceful shutdown
 
 Send SIGTERM and set the orchestrator grace period above
-shutdown_timeout_seconds. The service revokes readiness, stops background
-work, closes HTTP gracefully, and writes a final checkpoint when configured.
+`shutdown_timeout_seconds`. The service immediately revokes quote admission,
+stops the periodic checkpoint writer, closes HTTP gracefully, stops ingestion,
+drains updates already accepted by the reducer, and only then writes the final
+checkpoint. Redis rejects checkpoint cursor regressions atomically.
+
+`max_in_flight_quotes` is a fail-fast concurrency bound: requests above it get
+HTTP 429 instead of waiting in an unbounded service queue. Every source
+handshake, snapshot, and recovery RPC is bounded by
+`source_operation_timeout_milliseconds`.
 
 ## Capacity validation
 

@@ -109,6 +109,7 @@ pub fn fixture(lanes: usize, pairs: usize) -> Result<QuoteBenchmarkFixture, Stri
         buffer_byte_capacity: 64 * 1024 * 1024,
         reconnect_delay: Duration::from_secs(1),
         source_stall_timeout: Duration::from_secs(3_600),
+        source_operation_timeout: Duration::from_secs(5),
     };
     let requests = quote_requests(cash, &lane_assets, pairs);
     debug_assert_eq!(requests.len(), pairs);

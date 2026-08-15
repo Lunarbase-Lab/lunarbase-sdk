@@ -19,10 +19,14 @@ pub struct Metrics {
     quote_latency_nanos: AtomicU64,
     /// Quote requests submitted through the batch endpoint.
     quote_batches: AtomicU64,
+    /// Quote requests rejected before parsing because admission was saturated.
+    quote_overload_rejections: AtomicU64,
     /// Best-effort Redis checkpoint writes completed successfully.
     checkpoint_success: AtomicU64,
     /// Redis checkpoint load or write attempts that failed.
     checkpoint_failure: AtomicU64,
+    /// Checkpoint writes rejected because Redis already held newer state.
+    checkpoint_stale: AtomicU64,
 }
 
 impl Metrics {
@@ -39,6 +43,12 @@ impl Metrics {
         }
     }
 
+    /// Records one fail-fast rejection at the HTTP admission boundary.
+    pub fn quote_overload_rejection(&self) {
+        self.quote_overload_rejections
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Records a successful best-effort checkpoint write.
     pub fn checkpoint_success(&self) {
         self.checkpoint_success.fetch_add(1, Ordering::Relaxed);
@@ -47,6 +57,11 @@ impl Metrics {
     /// Records Redis load/write failure without changing readiness.
     pub fn checkpoint_failure(&self) {
         self.checkpoint_failure.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records one monotonic CAS rejection without treating it as data loss.
+    pub fn checkpoint_stale(&self) {
+        self.checkpoint_stale.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Renders current gauges and counters in Prometheus text format.
@@ -63,7 +78,8 @@ impl Metrics {
             .and_then(|health| health.execution_block_number)
             .unwrap_or(0);
         let execution_context_delta = head.saturating_sub(execution);
-        let source_update_age = source_update_age(stats.last_source_update_unix_millis);
+        let source_update_age = update_age(stats.last_source_update_unix_millis);
+        let state_update_age = update_age(stats.last_state_update_unix_millis);
         let commitment = health.as_ref().map_or(0, |health| match health.commitment {
             Commitment::Realtime => 0,
             Commitment::Canonical => 1,
@@ -90,6 +106,11 @@ impl Metrics {
             &mut output,
             "lunarbase_source_update_age_seconds",
             source_update_age,
+        );
+        gauge(
+            &mut output,
+            "lunarbase_state_update_age_seconds",
+            state_update_age,
         );
         gauge(&mut output, "lunarbase_commitment", commitment);
         gauge(&mut output, "lunarbase_queue_depth", stats.queue_depth);
@@ -121,6 +142,11 @@ impl Metrics {
             "lunarbase_quote_batches_total",
             self.quote_batches.load(Ordering::Relaxed),
         );
+        counter(
+            &mut output,
+            "lunarbase_quote_overload_rejections_total",
+            self.quote_overload_rejections.load(Ordering::Relaxed),
+        );
         gauge(
             &mut output,
             "lunarbase_quote_latency_seconds_average",
@@ -135,6 +161,11 @@ impl Metrics {
             &mut output,
             "lunarbase_checkpoint_failure_total",
             self.checkpoint_failure.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut output,
+            "lunarbase_checkpoint_stale_total",
+            self.checkpoint_stale.load(Ordering::Relaxed),
         );
         output
     }
@@ -154,7 +185,7 @@ fn saturating_nanos(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
 }
 
-fn source_update_age(last_update_millis: u64) -> f64 {
+fn update_age(last_update_millis: u64) -> f64 {
     if last_update_millis == 0 {
         return u64::MAX as f64 / 1_000.0;
     }

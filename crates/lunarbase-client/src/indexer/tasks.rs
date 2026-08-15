@@ -5,11 +5,10 @@ use crate::indexer::client_types::{
     ClientConnectConfig, ClientRuntimeStats, CoreEventSink, QueuedChainUpdate, SharedQuoteState,
     unix_millis,
 };
-use crate::indexer::engine::{
-    QuoteIndexer, validate_core_log_identity, validate_core_recovery_log,
-};
+use crate::indexer::engine::{validate_core_log_identity, validate_core_recovery_log};
 use crate::indexer::errors::{ClientRuntimeEvent, IndexerError};
 use crate::indexer::event_delivery::{same_core_event_identity, try_observe_core_event};
+use crate::indexer::runtime_helpers::source_operation;
 use crate::model::{BackfillRequest, ChainUpdate, Commitment, ContractFilter, ContractLog};
 use crate::source::{ChainDataSource, SourceStream};
 use crate::state::reducer::ReducerError;
@@ -40,6 +39,8 @@ pub(super) struct SourcePumpRuntime {
     pub reconnect_delay: Duration,
     /// Maximum interval without one normalized source update.
     pub stall_timeout: Duration,
+    /// Maximum duration of one subscription handshake.
+    pub operation_timeout: Duration,
     /// Handshake state observed by bootstrap and recovery.
     pub source_active: watch::Sender<bool>,
     /// Cooperative cancellation receiver owned by the source task.
@@ -61,6 +62,7 @@ pub(super) async fn source_pump<S>(
     let SourcePumpRuntime {
         reconnect_delay,
         stall_timeout,
+        operation_timeout,
         source_active,
         mut cancel,
         events,
@@ -72,7 +74,11 @@ pub(super) async fn source_pump<S>(
         let stream = tokio::select! {
             biased;
             () = cancellation_requested(&mut cancel) => return,
-            result = source.subscribe(filter.clone()) => result,
+            result = source_operation(
+                "subscription",
+                operation_timeout,
+                source.subscribe(filter.clone()),
+            ) => result,
         };
         match stream {
             Ok(stream) => {
@@ -265,29 +271,21 @@ pub(super) async fn reducer_loop<S>(
     loop {
         let update = tokio::select! {
             biased;
-            () = cancellation_requested(&mut cancel) => return,
+            () = cancellation_requested(&mut cancel) => {
+                drain_pending_updates(shared.as_ref(), &mut updates, &runtime).await;
+                return;
+            }
             update = updates.recv() => update,
         };
         let Some(update) = update else {
             shared.available.store(false, Ordering::Release);
             shared.ready.notify_waiters();
-            publish(
-                &runtime.events,
-                ClientRuntimeEvent::BackgroundTaskStopped { task: "reducer" },
-            );
             return;
         };
         let update = update.dequeue(&runtime.stats);
         let result = apply_live_update(shared.as_ref(), update, &runtime);
         if let Err(error) = result {
-            shared.available.store(false, Ordering::Release);
-            runtime.stats.gaps.fetch_add(1, Ordering::Relaxed);
-            publish(
-                &runtime.events,
-                ClientRuntimeEvent::StateTransitionFailed {
-                    detail: error.to_string(),
-                },
-            );
+            record_transition_failure(shared.as_ref(), error, &runtime);
             if !recover_until_ready(
                 shared.as_ref(),
                 source.as_ref(),
@@ -333,7 +331,39 @@ fn apply_live_update(
     if let Some(log) = event_log {
         try_observe_core_event(runtime.core_event_sink.as_ref(), log, &runtime.stats);
     }
+    runtime.stats.record_state_update();
+    shared.publish_available();
     Ok(())
+}
+
+async fn drain_pending_updates(
+    shared: &SharedQuoteState,
+    updates: &mut mpsc::Receiver<QueuedChainUpdate>,
+    runtime: &ReducerRuntime,
+) {
+    let mut state_valid = true;
+    while let Some(queued) = updates.recv().await {
+        let update = queued.dequeue(&runtime.stats);
+        if state_valid && let Err(error) = apply_live_update(shared, update, runtime) {
+            record_transition_failure(shared, error, runtime);
+            state_valid = false;
+        }
+    }
+}
+
+fn record_transition_failure(
+    shared: &SharedQuoteState,
+    error: IndexerError,
+    runtime: &ReducerRuntime,
+) {
+    shared.available.store(false, Ordering::Release);
+    runtime.stats.gaps.fetch_add(1, Ordering::Relaxed);
+    publish(
+        &runtime.events,
+        ClientRuntimeEvent::StateTransitionFailed {
+            detail: error.to_string(),
+        },
+    );
 }
 
 async fn recover_until_ready<S: ChainDataSource>(
@@ -360,7 +390,11 @@ async fn recover_until_ready<S: ChainDataSource>(
         let snapshot = tokio::select! {
             biased;
             () = cancellation_requested(cancel) => return false,
-            result = source.snapshot(&config.deployment) => result,
+            result = source_operation(
+                "recovery snapshot",
+                config.source_operation_timeout,
+                source.snapshot(&config.deployment),
+            ) => result,
         };
         match snapshot {
             Ok(snapshot) => {
@@ -371,6 +405,7 @@ async fn recover_until_ready<S: ChainDataSource>(
                         recovery_from,
                         &snapshot.cursor,
                         runtime.core_event_sink.as_ref(),
+                        config.source_operation_timeout,
                     )
                     .await
                     {
@@ -401,8 +436,8 @@ async fn recover_until_ready<S: ChainDataSource>(
                 match result {
                     Ok(()) => {
                         runtime.stats.recoveries.fetch_add(1, Ordering::Relaxed);
-                        shared.available.store(true, Ordering::Release);
-                        shared.ready.notify_waiters();
+                        runtime.stats.record_state_update();
+                        shared.publish_available();
                         publish(&runtime.events, ClientRuntimeEvent::RecoveryCompleted);
                         return true;
                     }
@@ -411,7 +446,7 @@ async fn recover_until_ready<S: ChainDataSource>(
                     }
                 }
             }
-            Err(error) => record_recovery_failure(error.into(), &runtime.events, &runtime.stats),
+            Err(error) => record_recovery_failure(error, &runtime.events, &runtime.stats),
         }
         if sleep_or_cancel(config.reconnect_delay, cancel).await {
             return false;
@@ -425,6 +460,7 @@ async fn load_recovery_events<S: ChainDataSource>(
     from: &crate::model::ChainCursor,
     to: &crate::model::ChainCursor,
     core_event_sink: Option<&CoreEventSink>,
+    operation_timeout: Duration,
 ) -> Result<Vec<ContractLog>, IndexerError> {
     if core_event_sink.is_none_or(|sink| !sink.accepts(Commitment::Canonical)) {
         return Ok(Vec::new());
@@ -442,13 +478,16 @@ async fn load_recovery_events<S: ChainDataSource>(
     let mut page_start = from.block_number;
     loop {
         let page_end = recovery_page_end(page_start, to.block_number);
-        let mut page = source
-            .backfill(BackfillRequest {
+        let mut page = source_operation(
+            "recovery backfill",
+            operation_timeout,
+            source.backfill(BackfillRequest {
                 from_block: page_start,
                 to_block: page_end,
                 filter: filter.clone(),
-            })
-            .await?;
+            }),
+        )
+        .await?;
         page.sort_by_key(|log| log.cursor.event_order());
         for log in page {
             validate_core_recovery_log(&log, filter.address, to.chain_id, page_start..=page_end)?;
@@ -529,77 +568,7 @@ fn record_recovery_failure(
     );
 }
 
-pub(super) async fn recover_checkpoint<S: ChainDataSource>(
-    indexer: &mut QuoteIndexer,
-    source: &S,
-    filter: &ContractFilter,
-    core_event_sink: Option<&CoreEventSink>,
-    stats: &ClientRuntimeStats,
-) -> Result<(), IndexerError> {
-    let checkpoint_cursor = indexer
-        .reducer
-        .cursor()
-        .cloned()
-        .ok_or(IndexerError::NoCursor)?;
-    indexer.reducer.mark_not_ready();
-    let head = source.canonical_head().await?;
-    if head.chain_id != checkpoint_cursor.chain_id {
-        return Err(ReducerError::ChainIdMismatch.into());
-    }
-    if head.block_number < checkpoint_cursor.block_number {
-        return Err(IndexerError::Gap(
-            "canonical head regressed below checkpoint".into(),
-        ));
-    }
-    let from_block =
-        if checkpoint_cursor.transaction_index.is_none() && checkpoint_cursor.log_index.is_none() {
-            checkpoint_cursor.block_number.saturating_add(1)
-        } else {
-            checkpoint_cursor.block_number
-        };
-    if from_block <= head.block_number {
-        let mut page_start = from_block;
-        loop {
-            let page_end = recovery_page_end(page_start, head.block_number);
-            let mut logs = source
-                .backfill(BackfillRequest {
-                    from_block: page_start,
-                    to_block: page_end,
-                    filter: filter.clone(),
-                })
-                .await?;
-            logs.sort_by_key(|log| log.cursor.event_order());
-            for log in logs {
-                validate_core_recovery_log(
-                    &log,
-                    indexer.deployment().core,
-                    indexer.deployment().chain_id,
-                    page_start..=page_end,
-                )?;
-                if log.cursor.event_order() <= checkpoint_cursor.event_order() {
-                    continue;
-                }
-                if core_event_sink.is_some_and(|sink| sink.accepts(log.cursor.commitment)) {
-                    if let Some(log) = indexer.apply_core_log_for_delivery(log)? {
-                        try_observe_core_event(core_event_sink, log, stats);
-                    }
-                } else {
-                    indexer.apply_core_update(ChainUpdate::Log(log))?;
-                }
-            }
-            if page_end == head.block_number {
-                break;
-            }
-            page_start = page_end.saturating_add(1);
-        }
-    }
-    indexer.apply_core_update(ChainUpdate::Head(head.clone()))?;
-    indexer.set_canonical_floor(head);
-    indexer.reducer.publish_ready();
-    Ok(())
-}
-
-fn recovery_page_end(from_block: u64, to_block: u64) -> u64 {
+pub(super) fn recovery_page_end(from_block: u64, to_block: u64) -> u64 {
     from_block
         .saturating_add(RECOVERY_PAGE_BLOCKS.saturating_sub(1))
         .min(to_block)

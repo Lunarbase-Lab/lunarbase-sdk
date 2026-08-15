@@ -42,6 +42,8 @@ mod queue;
 
 use queue::{QueuedExecutionEvent, send_error, send_gap, send_result};
 
+const MAX_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
 /// Native event-ring settings for a colocated Monad execution node.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MonadEventRingConfig {
@@ -71,9 +73,11 @@ impl MonadEventRingConfig {
             || self.queue_bound == 0
             || self.queue_byte_bound < MIN_UPDATE_QUEUE_BYTE_CAPACITY
             || self.queue_byte_bound > u32::MAX as usize
+            || self.poll_interval.is_zero()
+            || self.poll_interval > MAX_POLL_INTERVAL
         {
             return Err(SourceError::Unavailable(
-                "Monad ring chain, Core, and count/byte queue bounds must be valid".into(),
+                "Monad ring identity, count/byte queue, and poll bounds must be valid".into(),
             ));
         }
         Ok(())
@@ -488,7 +492,21 @@ impl Drop for RingReaderGuard {
     fn drop(&mut self) {
         self.cancelled.store(true, Ordering::Release);
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            if let Ok(runtime) = Handle::try_current() {
+                runtime.spawn_blocking(move || {
+                    let _ = worker.join();
+                });
+            } else {
+                let _ = thread::Builder::new()
+                    .name("lunarbase-monad-ring-reaper".into())
+                    .spawn(move || {
+                        let _ = worker.join();
+                    });
+            }
         }
     }
 }
+
+#[cfg(test)]
+#[path = "native_tests.rs"]
+mod tests;

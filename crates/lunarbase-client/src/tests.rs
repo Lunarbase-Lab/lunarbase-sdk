@@ -582,6 +582,8 @@ mod fee_policy;
 
 mod source_identity;
 
+mod lifecycle;
+
 fn config() -> ClientConnectConfig {
     ClientConnectConfig {
         deployment: DeploymentConfig {
@@ -604,6 +606,7 @@ fn config() -> ClientConnectConfig {
         buffer_byte_capacity: 1024 * 1024,
         reconnect_delay: Duration::from_millis(10),
         source_stall_timeout: Duration::from_secs(1),
+        source_operation_timeout: Duration::from_secs(1),
     }
 }
 

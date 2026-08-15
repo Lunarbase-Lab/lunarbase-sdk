@@ -3,8 +3,9 @@
 use crate::metrics::Metrics;
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Request, State},
     http::{HeaderMap, StatusCode, header},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -17,6 +18,7 @@ use lunarbase_math::{QuoteMode, QuoteOutcome, QuoteRequest, QuoteResult, Unavail
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{future::Future, net::SocketAddr, str::FromStr, sync::Arc, time::Instant};
+use tokio::sync::Semaphore;
 
 #[derive(Clone)]
 struct ApiState {
@@ -24,24 +26,61 @@ struct ApiState {
     metrics: Arc<Metrics>,
 }
 
+#[derive(Clone)]
+struct AdmissionState {
+    permits: Arc<Semaphore>,
+    metrics: Arc<Metrics>,
+}
+
+impl AdmissionState {
+    fn try_acquire(
+        &self,
+    ) -> Result<tokio::sync::SemaphorePermit<'_>, tokio::sync::TryAcquireError> {
+        self.permits.try_acquire()
+    }
+}
+
 /// Serves all HTTP endpoints until `shutdown` resolves.
 pub async fn serve(
     bind: SocketAddr,
     client: Arc<ConnectedQuoteClient>,
     metrics: Arc<Metrics>,
+    max_in_flight_quotes: usize,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<(), std::io::Error> {
+    let admission = AdmissionState {
+        permits: Arc::new(Semaphore::new(max_in_flight_quotes)),
+        metrics: metrics.clone(),
+    };
+    let quote_routes = Router::new()
+        .route("/v1/quote", post(quote))
+        .route("/v1/quotes", post(quotes))
+        .route_layer(middleware::from_fn_with_state(admission, admit_quote));
     let router = Router::new()
         .route("/healthz", get(live))
         .route("/readyz", get(ready))
         .route("/metrics", get(prometheus))
-        .route("/v1/quote", post(quote))
-        .route("/v1/quotes", post(quotes))
+        .merge(quote_routes)
         .with_state(ApiState { client, metrics });
     let listener = tokio::net::TcpListener::bind(bind).await?;
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown)
         .await
+}
+
+async fn admit_quote(
+    State(state): State<AdmissionState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let Ok(_permit) = state.try_acquire() else {
+        state.metrics.quote_overload_rejection();
+        return api_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "quote service is at its concurrency limit".into(),
+        );
+    };
+    next.run(request).await
 }
 
 async fn live() -> impl IntoResponse {
@@ -386,8 +425,25 @@ fn fee_class_name(value: FeeClass) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use crate::api::{ApiFeeAllocation, ApiQuoteOutcome, ApiQuoteRequest};
+    use crate::{
+        api::{AdmissionState, ApiFeeAllocation, ApiQuoteOutcome, ApiQuoteRequest},
+        metrics::Metrics,
+    };
     use serde_json::json;
+    use std::sync::Arc;
+    use tokio::sync::Semaphore;
+
+    #[test]
+    fn admission_rejects_instead_of_queueing() {
+        let admission = AdmissionState {
+            permits: Arc::new(Semaphore::new(1)),
+            metrics: Arc::new(Metrics::default()),
+        };
+        let permit = admission.try_acquire().unwrap();
+        assert!(admission.try_acquire().is_err());
+        drop(permit);
+        assert!(admission.try_acquire().is_ok());
+    }
 
     #[test]
     fn outcome_fields_are_camel_case() {

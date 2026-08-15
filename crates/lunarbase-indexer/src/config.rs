@@ -84,6 +84,12 @@ pub struct ConfigValues {
     /// Maximum interval without a source update before fail-closed recovery.
     #[arg(long, env = "LUNARBASE_SOURCE_STALL_TIMEOUT_MILLISECONDS")]
     pub source_stall_timeout_milliseconds: Option<u64>,
+    /// Maximum duration of one source handshake, snapshot, or recovery RPC.
+    #[arg(long, env = "LUNARBASE_SOURCE_OPERATION_TIMEOUT_MILLISECONDS")]
+    pub source_operation_timeout_milliseconds: Option<u64>,
+    /// Maximum quote HTTP requests executing concurrently; excess is rejected.
+    #[arg(long, env = "LUNARBASE_MAX_IN_FLIGHT_QUOTES")]
+    pub max_in_flight_quotes: Option<usize>,
     /// Optional Redis URL used solely to accelerate restarts.
     #[arg(long, env = "LUNARBASE_REDIS_URL")]
     pub redis_url: Option<String>,
@@ -106,6 +112,8 @@ pub struct Config {
     pub realtime_url: String,
     /// Parsed HTTP listen address.
     pub bind: SocketAddr,
+    /// Hard admission bound for concurrently executing quote requests.
+    pub max_in_flight_quotes: usize,
     /// Optional Redis checkpoint endpoint.
     pub redis_url: Option<String>,
     /// Period between background checkpoint attempts.
@@ -181,6 +189,10 @@ impl ConfigValues {
         self.source_stall_timeout_milliseconds = overrides
             .source_stall_timeout_milliseconds
             .or(self.source_stall_timeout_milliseconds);
+        self.source_operation_timeout_milliseconds = overrides
+            .source_operation_timeout_milliseconds
+            .or(self.source_operation_timeout_milliseconds);
+        self.max_in_flight_quotes = overrides.max_in_flight_quotes.or(self.max_in_flight_quotes);
         self.redis_url = overrides.redis_url.or(self.redis_url);
         self.checkpoint_interval_seconds = overrides
             .checkpoint_interval_seconds
@@ -249,6 +261,12 @@ impl ConfigValues {
         let source_stall_timeout_milliseconds = self
             .source_stall_timeout_milliseconds
             .unwrap_or_else(default_source_stall_milliseconds);
+        let source_operation_timeout_milliseconds = self
+            .source_operation_timeout_milliseconds
+            .unwrap_or_else(default_source_operation_milliseconds);
+        let max_in_flight_quotes = self
+            .max_in_flight_quotes
+            .unwrap_or_else(default_max_in_flight_quotes);
         let checkpoint_interval_seconds = self
             .checkpoint_interval_seconds
             .unwrap_or_else(default_checkpoint_seconds);
@@ -260,6 +278,8 @@ impl ConfigValues {
             || queue_byte_bound > u32::MAX as usize
             || reconnect_delay_milliseconds == 0
             || source_stall_timeout_milliseconds == 0
+            || source_operation_timeout_milliseconds == 0
+            || max_in_flight_quotes == 0
             || checkpoint_interval_seconds == 0
             || shutdown_timeout_seconds == 0
         {
@@ -300,6 +320,7 @@ impl ConfigValues {
             buffer_byte_capacity: queue_byte_bound,
             reconnect_delay: Duration::from_millis(reconnect_delay_milliseconds),
             source_stall_timeout: Duration::from_millis(source_stall_timeout_milliseconds),
+            source_operation_timeout: Duration::from_millis(source_operation_timeout_milliseconds),
         };
         client.validate().map_err(|error| ConfigError::Invalid {
             field: "deployment",
@@ -310,6 +331,7 @@ impl ConfigValues {
             http_rpc_url,
             realtime_url,
             bind,
+            max_in_flight_quotes,
             redis_url: self.redis_url,
             checkpoint_interval: Duration::from_secs(checkpoint_interval_seconds),
             shutdown_timeout: Duration::from_secs(shutdown_timeout_seconds),
@@ -360,6 +382,12 @@ fn default_reconnect_milliseconds() -> u64 {
 fn default_source_stall_milliseconds() -> u64 {
     30_000
 }
+fn default_source_operation_milliseconds() -> u64 {
+    15_000
+}
+fn default_max_in_flight_quotes() -> usize {
+    1_024
+}
 fn default_checkpoint_seconds() -> u64 {
     30
 }
@@ -398,6 +426,11 @@ mod tests {
         let config = complete_values().validate().unwrap();
         assert_eq!(config.client.deployment.chain_id, 8453);
         assert_eq!(config.client.buffer_capacity, 4096);
+        assert_eq!(config.max_in_flight_quotes, 1024);
+        assert_eq!(
+            config.client.source_operation_timeout,
+            std::time::Duration::from_secs(15)
+        );
         assert_eq!(
             config.client.deployment.fee_class,
             lunarbase_math::FeeClass::Whitelisted
@@ -437,6 +470,19 @@ mod tests {
         assert!(matches!(
             ConfigValues::default().validate(),
             Err(ConfigError::Missing("network"))
+        ));
+    }
+
+    #[test]
+    fn rejects_zero_quote_admission_capacity() {
+        let mut values = complete_values();
+        values.max_in_flight_quotes = Some(0);
+        assert!(matches!(
+            values.validate(),
+            Err(ConfigError::Invalid {
+                field: "runtime",
+                ..
+            })
         ));
     }
 }

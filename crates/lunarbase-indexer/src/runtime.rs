@@ -1,12 +1,80 @@
 //! Network client construction and best-effort checkpoint scheduling.
 
-use crate::{checkpoint::RedisCheckpointStore, config::Config, metrics::Metrics};
+use crate::{
+    checkpoint::{RedisCheckpointStore, StoreOutcome},
+    config::Config,
+    metrics::Metrics,
+};
 use lunarbase_client::indexer::client::ConnectedQuoteClient;
 use lunarbase_client::indexer::errors::IndexerError;
 use lunarbase_client::model::{Checkpoint, Network};
 use std::{sync::Arc, time::Duration};
 use thiserror::Error;
-use tokio::{sync::watch, task::JoinHandle, time::interval};
+use tokio::{
+    sync::{Mutex, watch},
+    task::JoinHandle,
+    time::interval,
+};
+
+#[derive(Clone)]
+/// Serializes periodic and final writes for one checkpoint key.
+pub struct CheckpointCoordinator {
+    store: Option<RedisCheckpointStore>,
+    singleflight: Arc<Mutex<()>>,
+}
+
+impl CheckpointCoordinator {
+    /// Creates a coordinator around an optional best-effort Redis store.
+    pub fn new(store: Option<RedisCheckpointStore>) -> Self {
+        Self {
+            store,
+            singleflight: Arc::new(Mutex::new(())),
+        }
+    }
+
+    /// Returns whether persistence is configured for this process.
+    pub fn enabled(&self) -> bool {
+        self.store.is_some()
+    }
+
+    /// Snapshots and writes current ready state under the single-flight gate.
+    pub async fn flush_client(&self, client: &ConnectedQuoteClient, metrics: &Metrics) {
+        let _guard = self.singleflight.lock().await;
+        let checkpoint = match client.checkpoint() {
+            Ok(Some(checkpoint)) => checkpoint,
+            Ok(None) => return,
+            Err(error) => {
+                metrics.checkpoint_failure();
+                tracing::warn!(error = %error, "checkpoint snapshot failed");
+                return;
+            }
+        };
+        self.store_checkpoint(&checkpoint, metrics).await;
+    }
+
+    /// Writes state captured after reducer drain under the same gate.
+    pub async fn flush_final(&self, checkpoint: &Checkpoint, metrics: &Metrics) {
+        let _guard = self.singleflight.lock().await;
+        self.store_checkpoint(checkpoint, metrics).await;
+    }
+
+    async fn store_checkpoint(&self, checkpoint: &Checkpoint, metrics: &Metrics) {
+        let Some(store) = &self.store else {
+            return;
+        };
+        match store.store(checkpoint).await {
+            Ok(StoreOutcome::Stored | StoreOutcome::Unchanged) => metrics.checkpoint_success(),
+            Ok(StoreOutcome::Stale) => {
+                metrics.checkpoint_stale();
+                tracing::warn!("stale Redis checkpoint rejected by monotonic CAS");
+            }
+            Err(error) => {
+                metrics.checkpoint_failure();
+                tracing::warn!(error = %error, "Redis checkpoint write failed");
+            }
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 /// Service startup failure.
@@ -182,15 +250,15 @@ pub async fn load_checkpoint(
 /// Starts periodic full-checkpoint replacement.
 pub fn spawn_checkpoint_loop(
     client: Arc<ConnectedQuoteClient>,
-    store: Option<RedisCheckpointStore>,
+    coordinator: CheckpointCoordinator,
     every: Duration,
     metrics: Arc<Metrics>,
     mut shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let Some(store) = store else {
+        if !coordinator.enabled() {
             return;
-        };
+        }
         let mut ticks = interval(every);
         ticks.tick().await;
         loop {
@@ -201,33 +269,9 @@ pub fn spawn_checkpoint_loop(
                     }
                 }
                 _ = ticks.tick() => {
-                    flush_checkpoint(&client, &store, &metrics).await;
+                    coordinator.flush_client(&client, &metrics).await;
                 }
             }
         }
     })
-}
-
-/// Writes the current checkpoint, treating every failure as restart-only loss.
-pub async fn flush_checkpoint(
-    client: &ConnectedQuoteClient,
-    store: &RedisCheckpointStore,
-    metrics: &Metrics,
-) {
-    let checkpoint = match client.checkpoint() {
-        Ok(Some(checkpoint)) => checkpoint,
-        Ok(None) => return,
-        Err(error) => {
-            metrics.checkpoint_failure();
-            tracing::warn!(error = %error, "checkpoint snapshot failed");
-            return;
-        }
-    };
-    match store.store(&checkpoint).await {
-        Ok(()) => metrics.checkpoint_success(),
-        Err(error) => {
-            metrics.checkpoint_failure();
-            tracing::warn!(error = %error, "Redis checkpoint write failed");
-        }
-    }
 }

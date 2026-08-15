@@ -42,6 +42,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         .redis_url
         .as_ref()
         .map(|url| RedisCheckpointStore::new(url.clone(), &config.client.deployment));
+    let checkpoints = runtime::CheckpointCoordinator::new(store.clone());
     let checkpoint = tokio::select! {
         result = runtime::load_checkpoint(store.as_ref(), &metrics) => result,
         result = &mut signal => {
@@ -78,7 +79,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let checkpoint_task = runtime::spawn_checkpoint_loop(
         client.clone(),
-        store.clone(),
+        checkpoints.clone(),
         config.checkpoint_interval,
         metrics.clone(),
         shutdown_rx.clone(),
@@ -87,6 +88,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         config.bind,
         client.clone(),
         metrics.clone(),
+        config.max_in_flight_quotes,
         wait_for_shutdown(shutdown_rx),
     ));
     let mut api_finished = false;
@@ -106,25 +108,33 @@ async fn run() -> Result<(), Box<dyn Error>> {
         detail = wait_for_runtime_failure(&mut runtime_events) => Some(detail),
     };
     tracing::info!(failure = failure.as_deref(), "graceful shutdown started");
+    client.begin_shutdown();
     let _ = shutdown_tx.send(true);
     let deadline = Instant::now() + config.shutdown_timeout;
 
-    if let Some(store) = &store
-        && timeout(
-            remaining(deadline),
-            runtime::flush_checkpoint(&client, store, &metrics),
-        )
-        .await
-        .is_err()
-    {
-        metrics.checkpoint_failure();
-        tracing::warn!("final Redis checkpoint exceeded shutdown deadline");
-    }
-    if let Err(error) = client.shutdown_gracefully(remaining(deadline)).await {
-        failure.get_or_insert_with(|| format!("client shutdown failed: {error}"));
-    }
     if let Err(detail) = join_unit_task(checkpoint_task, deadline).await {
         failure.get_or_insert_with(|| format!("checkpoint task {detail}"));
+    }
+    match client
+        .shutdown_gracefully_with_checkpoint(remaining(deadline))
+        .await
+    {
+        Ok(Some(checkpoint)) if checkpoints.enabled() => {
+            if timeout(
+                remaining(deadline),
+                checkpoints.flush_final(&checkpoint, &metrics),
+            )
+            .await
+            .is_err()
+            {
+                metrics.checkpoint_failure();
+                tracing::warn!("final Redis checkpoint exceeded shutdown deadline");
+            }
+        }
+        Ok(_) => {}
+        Err(error) => {
+            failure.get_or_insert_with(|| format!("client shutdown failed: {error}"));
+        }
     }
     if !api_finished && let Err(detail) = join_api_task(api_task, deadline).await {
         failure.get_or_insert_with(|| format!("HTTP API task {detail}"));
