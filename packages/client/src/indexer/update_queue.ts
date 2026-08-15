@@ -1,11 +1,14 @@
 /** Bounded single-consumer handoff for normalized chain updates. */
 import { chainUpdateRetainedBytes, type ChainUpdate } from "../model.js";
+import { BoundedRingBuffer } from "./ring_buffer.js";
+
+type UpdateWaiter = (value: ChainUpdate | undefined) => void;
 
 export class BoundedUpdateQueue {
   /** Updates waiting for the ordered reducer. */
-  private readonly values: ChainUpdate[] = [];
+  private readonly values: BoundedRingBuffer<ChainUpdate>;
   /** Pending reducer reads. */
-  private readonly waiters: Array<(value: ChainUpdate | undefined) => void> = [];
+  private readonly waiters = new Set<UpdateWaiter>();
   /** Conservative bytes charged by updates currently in `values`. */
   private retainedBytes = 0;
   /** Whether shutdown has permanently closed the queue. */
@@ -23,6 +26,7 @@ export class BoundedUpdateQueue {
     if (!Number.isSafeInteger(capacity) || capacity <= 0) throw new Error("queue capacity must be positive");
     if (!Number.isSafeInteger(byteCapacity) || byteCapacity < 1024)
       throw new Error("queue byte capacity must be at least 1024");
+    this.values = new BoundedRingBuffer(capacity);
   }
 
   /** Reports whether producers must stop. */
@@ -35,7 +39,7 @@ export class BoundedUpdateQueue {
     if (this.ended || this.overflowed) return;
     const bytes = chainUpdateRetainedBytes(update);
     if (this.values.length >= this.capacity || bytes > this.byteCapacity - this.retainedBytes) {
-      this.values.length = 0;
+      this.values.clear();
       this.retainedBytes = 0;
       const gap: ChainUpdate = {
         kind: "Gap",
@@ -55,7 +59,7 @@ export class BoundedUpdateQueue {
   drainAll(): ChainUpdate[] {
     this.overflowed = false;
     this.retainedBytes = 0;
-    return this.values.splice(0);
+    return this.values.drainAll();
   }
 
   /** Closes the queue and releases a waiting reducer. */
@@ -74,28 +78,29 @@ export class BoundedUpdateQueue {
     }
     if (this.ended || signal.aborted) return undefined;
     return new Promise((resolve) => {
+      let settled = false;
       const waiter = (next: ChainUpdate | undefined) => {
+        if (settled) return;
+        settled = true;
         signal.removeEventListener("abort", onAbort);
+        this.waiters.delete(waiter);
         resolve(next);
       };
-      const removeWaiter = () => {
-        const index = this.waiters.indexOf(waiter);
-        if (index >= 0) this.waiters.splice(index, 1);
-      };
       const onAbort = () => {
-        removeWaiter();
-        resolve(undefined);
+        waiter(undefined);
       };
+      this.waiters.add(waiter);
       signal.addEventListener("abort", onAbort, { once: true });
-      this.waiters.push(waiter);
+      if (signal.aborted) onAbort();
     });
   }
 
   private resolveWaiters(): void {
-    while (this.waiters.length > 0 && (this.values.length > 0 || this.ended)) {
+    while (this.waiters.size > 0 && (this.values.length > 0 || this.ended)) {
       const value = this.values.shift();
       if (value) this.retainedBytes -= chainUpdateRetainedBytes(value);
-      this.waiters.shift()?.(value);
+      const waiter = this.waiters.values().next().value;
+      if (waiter) waiter(value);
     }
   }
 }

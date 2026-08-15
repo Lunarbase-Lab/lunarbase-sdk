@@ -21,6 +21,9 @@ import {
   decodeImplementation,
   ERC1967_IMPLEMENTATION_SLOT,
   laneDiscoveryTopics,
+  ownBackfillRequest,
+  ownContractFilter,
+  ownDeploymentConfig,
   type BackfillRequest,
   type BootstrapSnapshot,
   type ChainCursor,
@@ -213,18 +216,21 @@ export class JsonRpcHttpClient {
     chainId: bigint,
     commitment: ChainCursor["commitment"],
   ): Promise<ContractLog[]> {
-    if (request.fromBlock > request.toBlock) throw new RpcError("INVALID", "log range starts after its end");
-    const expectedAddress = addressKey(request.filter.address);
-    const events = eventsForTopics(request.filter.topics);
-    const pending = initialLogRanges(request.fromBlock, request.toBlock, this.limits.maxBackfillPageBlocks);
+    const from = request.fromBlock;
+    const to = request.toBlock;
+    const filter = ownContractFilter(request.filter);
+    if (from > to) throw new RpcError("INVALID", "log range starts after its end");
+    const expectedAddress = addressKey(filter.address);
+    const events = eventsForTopics(filter.topics);
+    const pending = initialLogRanges(from, to, this.limits.maxBackfillPageBlocks).reverse();
     const logs: ContractLog[] = [];
     let retainedBytes = 0;
     while (pending.length > 0) {
-      const [fromBlock, toBlock] = pending.shift()!;
+      const [fromBlock, toBlock] = pending.pop()!;
       try {
         const chunk = await this.remote(() =>
           this.client.getLogs({
-            address: request.filter.address,
+            address: filter.address,
             events: events.length === 0 ? undefined : events,
             fromBlock,
             toBlock,
@@ -244,8 +250,8 @@ export class JsonRpcHttpClient {
       } catch (error) {
         if (fromBlock >= toBlock || !isLogRangeLimit(error)) throw error;
         const middle = fromBlock + (toBlock - fromBlock) / 2n;
-        pending.unshift([middle + 1n, toBlock]);
-        pending.unshift([fromBlock, middle]);
+        pending.push([middle + 1n, toBlock]);
+        pending.push([fromBlock, middle]);
       }
     }
     logs.sort((left, right) => compareCursor(left.cursor, right.cursor));
@@ -324,8 +330,9 @@ export class RpcHttpBackend {
 
   /** Backfills canonical logs through one `eth_getLogs` request. */
   async backfill(request: BackfillRequest): Promise<readonly ContractLog[]> {
+    const ownedRequest = ownBackfillRequest(request);
     await this.ensureChainId();
-    return this.rpc.getLogs(request, this.chainId, CommitmentValue.Canonical);
+    return this.rpc.getLogs(ownedRequest, this.chainId, CommitmentValue.Canonical);
   }
 
   /** Confirms checkpoint canonicality and the ERC-1967 implementation identity. */
@@ -369,7 +376,8 @@ export class RpcSnapshotProvider {
   ) {}
 
   /** Reads chain-wide quote state and optional verified-router accounting. */
-  async snapshot(config: DeploymentConfig): Promise<BootstrapSnapshot> {
+  async snapshot(input: DeploymentConfig): Promise<BootstrapSnapshot> {
+    const config = ownDeploymentConfig(input);
     const rpcChainId = await this.rpc.chainId();
     if (rpcChainId !== config.chainId)
       throw new RpcError("INVALID", `HTTP RPC chain id mismatch: expected ${config.chainId}, got ${rpcChainId}`);

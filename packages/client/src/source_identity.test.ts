@@ -183,6 +183,7 @@ function connectConfig(): ClientConnectConfig {
     queueByteBound: 1024 * 1024,
     reconnectDelayMilliseconds: 10,
     sourceStallTimeoutMilliseconds: 1_000,
+    sourceOperationTimeoutMilliseconds: 1_000,
   };
 }
 

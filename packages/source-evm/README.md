@@ -40,5 +40,7 @@ Use `EvmRpcSource` for standard EVM `logs` and `newHeads` streams.
 - The configured chain ID binds cursors and checkpoints to one deployment.
 - WebSocket frames, handshake prefetch, reordering, HTTP bodies, and normalized
   backfills have independent count+byte budgets and fail closed on overflow.
+- Socket queues use fixed-capacity ring buffers, and every subscription owns an
+  immutable copy of its contract filter.
 - Canonical backfill starts with 1,000-block pages and bisects only an oversized
   response range.

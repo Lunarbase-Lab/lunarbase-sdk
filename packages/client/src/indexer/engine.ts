@@ -1,6 +1,7 @@
 /** Synchronous in-memory quote engine around the ordered reducer. */
 import { BPS, parseAddress, type Address, type QuoteRequest } from "@lunarbase-lab/pmm-v2-math";
 import { checkpointMatchesDeployment } from "../bootstrap.js";
+import { ownDeploymentConfig } from "../ownership.js";
 import { decodeCoreEvent } from "../protocol/abi.js";
 import { QuoteReducer } from "../state/reducer.js";
 import { Commitment, IndexerError, MATH_COMPATIBILITY_VERSION } from "../model.js";
@@ -25,12 +26,16 @@ export class QuoteIndexer {
     /** Ordered owner of current quote-critical state and cursor. */
     private reducer: QuoteReducer,
     /** Immutable deployment identity used for compatibility checks. */
-    private readonly deployment: DeploymentConfig,
+    deployment: DeploymentConfig,
     /** Canonical state boundary already represented by the reducer. */
     private canonicalFloor?: ChainCursor,
   ) {
-    this.coreAddress = parseAddress(deployment.core);
+    this.deployment = ownDeploymentConfig(deployment);
+    this.coreAddress = this.deployment.core;
   }
+
+  /** Owned immutable deployment identity used for compatibility checks. */
+  private readonly deployment: DeploymentConfig;
 
   /** Builds a ready indexer from one coherent source snapshot. */
   static fromSnapshot(snapshot: BootstrapSnapshot, deployment: DeploymentConfig): QuoteIndexer {

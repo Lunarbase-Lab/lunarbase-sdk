@@ -35,3 +35,5 @@ await client.shutdown();
 - Gaps and reconnects require canonical recovery before readiness.
 - WebSocket frame, handshake-prefetch, and pending proposal queues are bounded
   by both count and bytes; overflow is reported as a gap, never silently dropped.
+- Parser socket queues use fixed-capacity ring buffers; handshake timeout and
+  cancellation paths release their socket and AbortSignal listeners.

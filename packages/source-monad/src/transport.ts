@@ -1,7 +1,9 @@
 /** Portable Monad parser-WebSocket source with canonical RPC recovery. */
 import {
+  BoundedRingBuffer,
   Commitment,
   Network,
+  ownContractFilter,
   type BackfillRequest,
   type BootstrapSnapshot,
   type ChainCursor,
@@ -26,6 +28,7 @@ import {
   type WebSocketLike,
 } from "@lunarbase-lab/pmm-v2-source-evm";
 import * as Hex from "ox/Hex";
+import type { Address } from "@lunarbase-lab/pmm-v2-math";
 import { MonadExecutionNormalizer, type ExecutionEvent, type ExecutionEventReader } from "./execution.js";
 
 /** Bounded parser-side WebSocket resources. */
@@ -55,7 +58,7 @@ interface EstablishedParserSocket {
   readonly queue: BoundedFrameQueue;
   readonly logsSubscription: string;
   readonly allSubscription: string;
-  readonly prefetched: string[];
+  readonly prefetched: BoundedRingBuffer<string>;
   readonly close: () => void;
 }
 
@@ -129,13 +132,14 @@ export class MonadParserSource implements ChainDataSource, ExecutionEventReader 
 
   /** Exposes raw portable parser records for live validation tooling. */
   async subscribeExecution(filter: ContractFilter, signal?: AbortSignal): Promise<AsyncIterable<ExecutionEvent>> {
-    const connection = await establishParserSocket(this.factory(this.wsEndpoint), filter, this.config, signal);
-    return this.readSocket(connection, filter, signal);
+    const ownedFilter = ownContractFilter(filter);
+    const connection = await establishParserSocket(this.factory(this.wsEndpoint), ownedFilter, this.config, signal);
+    return this.readSocket(connection, ownedFilter.address, signal);
   }
 
   private async *readSocket(
     connection: EstablishedParserSocket,
-    filter: ContractFilter,
+    expectedAddress: Address,
     signal?: AbortSignal,
   ): AsyncIterable<ExecutionEvent> {
     const { queue, logsSubscription, allSubscription, prefetched, close } = connection;
@@ -209,7 +213,7 @@ export class MonadParserSource implements ChainDataSource, ExecutionEventReader 
         }
         if (subscription === logsSubscription && type === "log" && result.kind === "event") {
           const log = parseParserLog(result, this.chainId, commitments);
-          if (log.address.toLowerCase() !== filter.address.toLowerCase()) continue;
+          if (log.address !== expectedAddress) continue;
           if (log.removed) {
             yield executionGap("Monad parser retracted a log; canonical recovery required");
             return;
@@ -265,6 +269,7 @@ async function establishParserSocket(
   const abort = () => queue.close();
   signal?.addEventListener("abort", abort, { once: true });
   const close = () => {
+    queue.close();
     signal?.removeEventListener("abort", abort);
     socket.removeEventListener?.("open", onOpen);
     socket.removeEventListener?.("message", onMessage);
@@ -300,7 +305,7 @@ async function readParserAcknowledgements(
   handshakeDeadline: number,
   signal?: AbortSignal,
 ): Promise<Pick<EstablishedParserSocket, "logsSubscription" | "allSubscription" | "prefetched">> {
-  const state: ParserHandshakeState = { prefetched: [] };
+  const state: ParserHandshakeState = { prefetched: new BoundedRingBuffer(prefetchCapacity) };
   while (!state.logsSubscription || !state.allSubscription) {
     const frame = await beforeHandshakeDeadline(queue.next(signal), handshakeDeadline);
     if (frame === undefined) throw new RpcError("TRANSPORT", "Monad parser closed during handshake");
@@ -316,7 +321,7 @@ async function readParserAcknowledgements(
 interface ParserHandshakeState {
   logsSubscription?: string;
   allSubscription?: string;
-  readonly prefetched: string[];
+  readonly prefetched: BoundedRingBuffer<string>;
   prefetchedBytes?: number;
 }
 

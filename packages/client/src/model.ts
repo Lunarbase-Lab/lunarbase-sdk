@@ -87,7 +87,7 @@ export interface ContractLog {
 /** Core address and accepted event signatures. */
 export interface ContractFilter {
   /** Contract address accepted by the source. */
-  address: Address;
+  readonly address: Address;
   /** Allowed event signatures; an empty list accepts every topic zero. */
   topics: readonly Hex[];
 }
@@ -95,11 +95,11 @@ export interface ContractFilter {
 /** Inclusive canonical recovery range. */
 export interface BackfillRequest {
   /** First canonical block included in recovery. */
-  fromBlock: bigint;
+  readonly fromBlock: bigint;
   /** Last canonical block included in recovery. */
-  toBlock: bigint;
+  readonly toBlock: bigint;
   /** Contract and topic filter applied by the source. */
-  filter: ContractFilter;
+  readonly filter: ContractFilter;
 }
 
 /** Complete update vocabulary accepted by the ordered reducer. */
@@ -132,25 +132,25 @@ export function chainUpdateRetainedBytes(update: ChainUpdate): number {
 /** Identity and runtime policy for one Core deployment. */
 export interface DeploymentConfig {
   /** Network source family required by this deployment. */
-  network: Network;
+  readonly network: Network;
   /** EIP-155 chain identifier expected from every source cursor. */
-  chainId: bigint;
+  readonly chainId: bigint;
   /** LunarBase Core contract whose quote-critical state is indexed. */
-  core: Address;
+  readonly core: Address;
   /** Mandatory economic fee class used by every quote. */
-  feeClass: FeeClass;
+  readonly feeClass: FeeClass;
   /** Optional execution caller whose fee allocation is chain-verified. */
-  verifiedRouter: Address | undefined;
+  readonly verifiedRouter: Address | undefined;
   /** First block that can contain deployment lane events. */
-  deploymentBlock: bigint;
+  readonly deploymentBlock: bigint;
   /** Pinned ERC-1967 implementation behind the Core proxy. */
-  expectedImplementation: Address;
+  readonly expectedImplementation: Address;
   /** Pinned runtime bytecode hash of `expectedImplementation`. */
-  expectedImplementationCodeHash: Hex;
+  readonly expectedImplementationCodeHash: Hex;
   /** Quote-math compatibility profile expected by the client. */
-  contractCompatibilityVersion: string;
+  readonly contractCompatibilityVersion: string;
   /** Optional fixed lane assets that avoid a discovery replay. */
-  explicitLaneAssets: readonly Address[];
+  readonly explicitLaneAssets: readonly Address[];
 }
 
 /** Complete block-tagged state returned by a data source. */

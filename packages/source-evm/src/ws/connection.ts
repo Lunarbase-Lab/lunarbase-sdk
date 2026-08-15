@@ -1,5 +1,5 @@
 /** Browser-compatible socket lifecycle and bounded frame queue. */
-import type { ContractFilter } from "@lunarbase-lab/pmm-v2-client";
+import { BoundedRingBuffer, type ContractFilter } from "@lunarbase-lab/pmm-v2-client";
 import { parseHexU64, RpcError } from "../rpc.js";
 import { subscriptionRequest } from "./protocol.js";
 
@@ -21,7 +21,7 @@ export interface EstablishedSocket {
   readonly queue: BoundedFrameQueue;
   readonly logsSubscription: string;
   readonly headsSubscription: string;
-  readonly prefetched: string[];
+  readonly prefetched: BoundedRingBuffer<string>;
   readonly close: () => void;
 }
 
@@ -56,6 +56,7 @@ export async function establishSocket(
   const abort = () => queue.close();
   signal?.addEventListener("abort", abort, { once: true });
   const close = () => {
+    queue.close();
     signal?.removeEventListener("abort", abort);
     socket.removeEventListener?.("open", onOpen);
     socket.removeEventListener?.("message", onMessage);
@@ -100,7 +101,7 @@ async function readAcknowledgements(
   let logsSubscription: string | undefined;
   let headsSubscription: string | undefined;
   let chainVerified = false;
-  const prefetched: string[] = [];
+  const prefetched = new BoundedRingBuffer<string>(prefetchCapacity);
   let prefetchedBytes = 0;
   while (!logsSubscription || !headsSubscription || !chainVerified) {
     const frame = await beforeHandshakeDeadline(queue.next(signal), deadline, signal);
@@ -180,8 +181,9 @@ export function defaultWebSocketFactory(url: string): WebSocketLike {
 }
 
 export class BoundedFrameQueue {
-  private readonly values: Array<{ value: string; bytes: number }> = [];
-  private readonly waiters: Array<(value: string | undefined) => void> = [];
+  private readonly values: BoundedRingBuffer<{ value: string; bytes: number }>;
+  private readonly openWaiters = new Set<() => void>();
+  private readonly valueWaiters = new Set<(value: string | undefined) => void>();
   private opened = false;
   private ended = false;
   private failure?: Error;
@@ -190,11 +192,16 @@ export class BoundedFrameQueue {
   constructor(
     private readonly capacity: number,
     private readonly byteCapacity: number,
-  ) {}
+  ) {
+    if (!Number.isSafeInteger(byteCapacity) || byteCapacity <= 0)
+      throw new Error("frame queue byte capacity must be a positive safe integer");
+    this.values = new BoundedRingBuffer(capacity);
+  }
 
   open(): void {
+    if (this.ended) return;
     this.opened = true;
-    this.resolveWaiters();
+    this.resolveOpenWaiters();
   }
 
   push(value: string): void {
@@ -204,27 +211,37 @@ export class BoundedFrameQueue {
       this.fail(new Error("RPC WebSocket frame queue count or byte budget exceeded; canonical recovery required"));
       return;
     }
+    const waiter = this.valueWaiters.values().next().value;
+    if (waiter) {
+      waiter(value);
+      return;
+    }
     this.values.push({ value, bytes });
     this.retainedBytes += bytes;
-    this.resolveWaiters();
   }
 
   fail(error: Error): void {
     if (this.ended) return;
     this.failure = error;
     this.ended = true;
-    this.resolveWaiters();
+    this.values.clear();
+    this.retainedBytes = 0;
+    this.resolveOpenWaiters();
+    this.resolveValueWaiters();
   }
 
   close(): void {
     if (this.ended) return;
     this.ended = true;
-    this.resolveWaiters();
+    this.resolveOpenWaiters();
+    this.resolveValueWaiters();
   }
 
   async waitUntilOpen(signal?: AbortSignal): Promise<void> {
     if (this.opened) return;
-    await this.wait(signal);
+    if (this.failure) throw this.failure;
+    if (this.ended) throw new Error("RPC WebSocket closed before open");
+    await this.waitForOpen(signal);
     if (!this.opened) throw this.failure ?? new Error("RPC WebSocket closed before open");
   }
 
@@ -236,37 +253,66 @@ export class BoundedFrameQueue {
       return entry.value;
     }
     if (this.ended) return undefined;
-    return this.wait(signal);
+    return this.waitForValue(signal);
   }
 
-  private wait(signal?: AbortSignal): Promise<string | undefined> {
-    if (signal?.aborted) return Promise.resolve(undefined);
+  private waitForOpen(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.reject(new Error("RPC WebSocket operation aborted"));
     return new Promise((resolve, reject) => {
-      const waiter = (value: string | undefined) => {
+      let settled = false;
+      const waiter = () => {
+        if (settled) return;
+        settled = true;
         signal?.removeEventListener("abort", onAbort);
+        this.openWaiters.delete(waiter);
         if (this.failure) reject(this.failure);
-        else resolve(value);
-      };
-      const removeWaiter = () => {
-        const index = this.waiters.indexOf(waiter);
-        if (index >= 0) this.waiters.splice(index, 1);
+        else if (this.opened) resolve();
+        else reject(new Error("RPC WebSocket closed before open"));
       };
       const onAbort = () => {
+        if (settled) return;
+        settled = true;
         signal?.removeEventListener("abort", onAbort);
-        removeWaiter();
-        resolve(undefined);
+        this.openWaiters.delete(waiter);
+        reject(new Error("RPC WebSocket operation aborted"));
       };
+      this.openWaiters.add(waiter);
       signal?.addEventListener("abort", onAbort, { once: true });
-      this.waiters.push(waiter);
+      if (signal?.aborted) onAbort();
     });
   }
 
-  private resolveWaiters(): void {
-    while (this.waiters.length > 0 && (this.values.length > 0 || this.ended || this.opened)) {
+  private waitForValue(signal?: AbortSignal): Promise<string | undefined> {
+    if (signal?.aborted) return Promise.resolve(undefined);
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const waiter = (value: string | undefined) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", onAbort);
+        this.valueWaiters.delete(waiter);
+        if (this.failure) reject(this.failure);
+        else resolve(value);
+      };
+      const onAbort = () => {
+        waiter(undefined);
+      };
+      this.valueWaiters.add(waiter);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) onAbort();
+    });
+  }
+
+  private resolveOpenWaiters(): void {
+    for (const waiter of [...this.openWaiters]) waiter();
+  }
+
+  private resolveValueWaiters(): void {
+    while (this.valueWaiters.size > 0 && (this.values.length > 0 || this.ended)) {
       const entry = this.values.shift();
       if (entry) this.retainedBytes -= entry.bytes;
-      this.waiters.shift()?.(entry?.value);
-      if (!this.values.length && !this.ended && !this.opened) break;
+      const waiter = this.valueWaiters.values().next().value;
+      if (waiter) waiter(entry?.value);
     }
   }
 }

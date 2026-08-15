@@ -2,6 +2,7 @@
 import { parseAddress, type QuoteRequest } from "@lunarbase-lab/pmm-v2-math";
 import { checkpointMatchesDeployment, validateDeploymentConfig } from "../bootstrap.js";
 import { IndexerError } from "../model.js";
+import { ownContractFilter, ownDeploymentConfig } from "../ownership.js";
 import type {
   ChainDataSource,
   Checkpoint,
@@ -16,8 +17,10 @@ import { QuoteIndexer, validateCoreLogIdentity } from "./engine.js";
 import { validateFilterTopics } from "./filter.js";
 import { delay, pumpSource, SourceActivity } from "./source_task.js";
 import { BoundedUpdateQueue } from "./update_queue.js";
+import { monotonicMilliseconds, withDeadline } from "./lifecycle.js";
 
 const RECOVERY_PAGE_BLOCKS = 1_000n;
+const DEFAULT_SHUTDOWN_TIMEOUT_MILLISECONDS = 10_000;
 
 /** Runtime-only configuration; persistence belongs to the Rust indexer. */
 export interface ClientConnectConfig {
@@ -33,6 +36,8 @@ export interface ClientConnectConfig {
   readonly reconnectDelayMilliseconds: number;
   /** Maximum interval without an update before readiness is revoked. */
   readonly sourceStallTimeoutMilliseconds: number;
+  /** Maximum duration of one source handshake, snapshot, or recovery operation. */
+  readonly sourceOperationTimeoutMilliseconds: number;
 }
 
 /** High-level embeddable client with one active ordered reducer. */
@@ -41,7 +46,9 @@ export class ConnectedQuoteClient {
     /** Mutable quote state owned by the single ordered reducer. */
     private readonly indexer: QuoteIndexer,
     /** Cooperative cancellation signal for source and reducer loops. */
-    private readonly controller: AbortController,
+    private readonly sourceController: AbortController,
+    /** Reducer cancellation is delayed until accepted updates are drained. */
+    private readonly reducerController: AbortController,
     /** Bounded handoff between asynchronous ingestion and ordered reduction. */
     private readonly queue: BoundedUpdateQueue,
     /** Acknowledged-subscription state shared with recovery. */
@@ -54,6 +61,9 @@ export class ConnectedQuoteClient {
     private readonly reducerTask: Promise<void>,
   ) {}
 
+  private stopping = false;
+  private shutdownTask?: Promise<void>;
+
   /**
    * Connects and acknowledges a subscription before loading checkpoint or
    * snapshot state, preserving every update that races with bootstrap.
@@ -64,70 +74,135 @@ export class ConnectedQuoteClient {
     optionalCheckpoint?: Checkpoint,
   ): Promise<ConnectedQuoteClient> {
     validateConnectConfig(config, source);
-    const controller = new AbortController();
-    const queue = new BoundedUpdateQueue(config.queueBound, config.queueByteBound);
+    const ownedConfig = ownConnectConfig(config);
+    const sourceController = new AbortController();
+    const reducerController = new AbortController();
+    const queue = new BoundedUpdateQueue(ownedConfig.queueBound, ownedConfig.queueByteBound);
     const activity = new SourceActivity();
     const pumpTask = pumpSource(
       source,
-      config.filter,
+      ownedConfig.filter,
       queue,
       activity,
-      controller.signal,
-      config.reconnectDelayMilliseconds,
-      config.sourceStallTimeoutMilliseconds,
+      sourceController.signal,
+      ownedConfig.reconnectDelayMilliseconds,
+      ownedConfig.sourceStallTimeoutMilliseconds,
+      ownedConfig.sourceOperationTimeoutMilliseconds,
     );
     try {
-      if (!(await activity.waitUntilActive(controller.signal)))
-        throw new IndexerError("SOURCE", "realtime source stopped before handshake");
-      const indexer = await bootstrapIndexer(config, source, queue, activity, controller.signal, optionalCheckpoint);
-      const recovery = new RecoveryCoordinator(indexer, source, config, queue, activity, controller.signal);
-      const reducerTask = reduceSource(indexer, queue, recovery, controller.signal).catch(() => {
+      const active = await waitForActivity(
+        "initial source subscription",
+        activity,
+        ownedConfig.sourceOperationTimeoutMilliseconds,
+        sourceController.signal,
+      );
+      if (!active) throw new IndexerError("SOURCE", "realtime source stopped before handshake");
+      const indexer = await bootstrapIndexer(
+        ownedConfig,
+        source,
+        queue,
+        activity,
+        sourceController.signal,
+        optionalCheckpoint,
+      );
+      const recovery = new RecoveryCoordinator(indexer, source, ownedConfig, queue, activity, sourceController.signal);
+      const reducerTask = reduceSource(
+        indexer,
+        queue,
+        recovery,
+        reducerController.signal,
+        () => sourceController.signal.aborted,
+      ).catch(() => {
         indexer.markNotReady();
-        controller.abort();
+        sourceController.abort();
+        reducerController.abort();
         queue.close();
         activity.setActive(false);
       });
-      return new ConnectedQuoteClient(indexer, controller, queue, activity, recovery, pumpTask, reducerTask);
+      return new ConnectedQuoteClient(
+        indexer,
+        sourceController,
+        reducerController,
+        queue,
+        activity,
+        recovery,
+        pumpTask,
+        reducerTask,
+      );
     } catch (error) {
-      controller.abort();
+      sourceController.abort();
+      reducerController.abort();
       queue.close();
-      await Promise.allSettled([pumpTask]);
+      activity.setActive(false);
+      await withDeadline("failed connect cleanup", ownedConfig.sourceOperationTimeoutMilliseconds, undefined, () =>
+        Promise.allSettled([pumpTask]).then(() => undefined),
+      ).catch(() => undefined);
       throw error;
     }
   }
 
   /** Computes one fully offchain quote. */
   quote(request: QuoteRequest): ClientQuote {
+    this.requireRunning();
     return this.indexer.quote(request);
   }
 
   /** Computes a batch on one cursor without yielding to the event loop. */
   quoteMany(requests: readonly QuoteRequest[]): ClientBatchQuote {
+    this.requireRunning();
     return this.indexer.quoteMany(requests);
   }
 
   /** Returns current readiness and cursor metadata. */
   health(): IndexerHealth {
-    return this.indexer.health();
+    const health = this.indexer.health();
+    return this.stopping ? { ...health, ready: false } : health;
   }
 
   /** Returns a checkpoint only while the current state is publishable. */
   checkpoint(): Checkpoint | undefined {
-    return this.indexer.health().ready ? this.indexer.checkpoint() : undefined;
+    return !this.stopping && this.indexer.health().ready ? this.indexer.checkpoint() : undefined;
   }
 
   /** Forces one serialized canonical recovery while subscription buffering continues. */
   recover(): Promise<void> {
+    this.requireRunning();
     return this.recovery.run();
   }
 
   /** Stops all background work and revokes readiness. */
-  async shutdown(): Promise<void> {
-    this.controller.abort();
-    this.queue.close();
+  shutdown(timeoutMilliseconds = DEFAULT_SHUTDOWN_TIMEOUT_MILLISECONDS): Promise<void> {
+    if (!Number.isSafeInteger(timeoutMilliseconds) || timeoutMilliseconds <= 0)
+      return Promise.reject(new IndexerError("SOURCE", "shutdown timeout must be a positive safe integer"));
+    if (this.shutdownTask) return this.shutdownTask;
+    this.stopping = true;
+    this.sourceController.abort();
     this.activity.setActive(false);
     this.indexer.markNotReady();
-    await Promise.allSettled([this.pumpTask, this.reducerTask]);
+    this.shutdownTask = this.finishShutdown(timeoutMilliseconds);
+    return this.shutdownTask;
+  }
+
+  private async finishShutdown(timeoutMilliseconds: number): Promise<void> {
+    const deadline = monotonicMilliseconds() + timeoutMilliseconds;
+    let pumpError: unknown;
+    try {
+      await withDeadline("source pump shutdown", remaining(deadline), undefined, () => this.pumpTask);
+    } catch (error) {
+      pumpError = error;
+    }
+    this.queue.close();
+    try {
+      await withDeadline("reducer drain", remaining(deadline), undefined, () => this.reducerTask);
+    } finally {
+      this.reducerController.abort();
+      this.queue.close();
+    }
+    if (pumpError) throw pumpError;
+  }
+
+  private requireRunning(): void {
+    if (this.stopping) throw new IndexerError("NOT_READY", "client is shutting down");
   }
 }
 
@@ -151,10 +226,19 @@ function validateConnectConfig(config: ClientConnectConfig, source: ChainDataSou
     queueByteBound: config.queueByteBound,
     reconnectDelayMilliseconds: config.reconnectDelayMilliseconds,
     sourceStallTimeoutMilliseconds: config.sourceStallTimeoutMilliseconds,
+    sourceOperationTimeoutMilliseconds: config.sourceOperationTimeoutMilliseconds,
   }))
     if (!Number.isSafeInteger(value) || value <= 0)
       throw new IndexerError("SOURCE", `${name} must be a positive safe integer`);
   if (config.queueByteBound < 1024) throw new IndexerError("SOURCE", "queueByteBound must be at least 1024 bytes");
+}
+
+function ownConnectConfig(config: ClientConnectConfig): ClientConnectConfig {
+  return Object.freeze({
+    ...config,
+    deployment: ownDeploymentConfig(config.deployment),
+    filter: ownContractFilter(config.filter),
+  });
 }
 
 async function reduceSource(
@@ -162,14 +246,22 @@ async function reduceSource(
   queue: BoundedUpdateQueue,
   recovery: RecoveryCoordinator,
   signal: AbortSignal,
+  stopping: () => boolean,
 ): Promise<void> {
+  let stateValid = true;
   while (!signal.aborted) {
     const update = await queue.next(signal);
     if (!update) return;
+    if (!stateValid) continue;
     try {
       indexer.applyCoreUpdate(update);
     } catch {
-      await recovery.run();
+      if (stopping()) {
+        indexer.markNotReady();
+        stateValid = false;
+      } else {
+        await recovery.run();
+      }
     }
   }
 }
@@ -182,40 +274,40 @@ async function bootstrapIndexer(
   signal: AbortSignal,
   optionalCheckpoint?: Checkpoint,
 ): Promise<QuoteIndexer> {
-  let checkpoint = optionalCheckpoint;
-  while (!signal.aborted) {
-    if (!(await activity.waitUntilActive(signal))) break;
-    try {
-      if (
-        checkpoint &&
-        checkpointMatchesDeployment(checkpoint, config.deployment) &&
-        (await source.validateCheckpoint(checkpoint))
-      ) {
-        try {
-          const restored = await restoreCheckpoint(checkpoint, config, source);
-          restored.replayHandoff(queue.drainAll(), restored.health().cursor ?? checkpoint.cursor);
-          return restored;
-        } catch {
-          checkpoint = undefined;
-        }
+  const active = await waitForActivity(
+    "bootstrap source activity",
+    activity,
+    config.sourceOperationTimeoutMilliseconds,
+    signal,
+  );
+  if (!active) throw new IndexerError("SOURCE", "bootstrap cancelled before source became active");
+  if (optionalCheckpoint && checkpointMatchesDeployment(optionalCheckpoint, config.deployment)) {
+    const valid = await withDeadline("checkpoint validation", config.sourceOperationTimeoutMilliseconds, signal, () =>
+      source.validateCheckpoint(optionalCheckpoint),
+    );
+    if (valid) {
+      try {
+        const restored = await restoreCheckpoint(optionalCheckpoint, config, source, signal);
+        restored.replayHandoff(queue.drainAll(), restored.health().cursor ?? optionalCheckpoint.cursor);
+        return restored;
+      } catch (error) {
+        if (isPermanentBootstrapError(error)) throw error;
       }
-      return await snapshotIndexer(config, source, queue);
-    } catch (error) {
-      if (isPermanentBootstrapError(error)) throw error;
-      checkpoint = undefined;
-      await delay(config.reconnectDelayMilliseconds, signal);
     }
   }
-  throw new IndexerError("SOURCE", "bootstrap cancelled before a coherent state was installed");
+  return snapshotIndexer(config, source, queue, signal);
 }
 
 async function restoreCheckpoint(
   checkpoint: Checkpoint,
   config: ClientConnectConfig,
   source: ChainDataSource,
+  signal: AbortSignal,
 ): Promise<QuoteIndexer> {
   const indexer = QuoteIndexer.fromCheckpoint(checkpoint, config.deployment);
-  const head = await source.canonicalHead();
+  const head = await withDeadline("checkpoint canonical head", config.sourceOperationTimeoutMilliseconds, signal, () =>
+    source.canonicalHead(),
+  );
   if (head.chainId !== checkpoint.cursor.chainId || head.blockNumber < checkpoint.cursor.blockNumber)
     throw new IndexerError("GAP", "checkpoint is ahead of canonical head");
   const fromBlock =
@@ -228,7 +320,11 @@ async function restoreCheckpoint(
     while (pageStart <= head.blockNumber) {
       const candidateEnd = pageStart + RECOVERY_PAGE_BLOCKS - 1n;
       const pageEnd = candidateEnd < head.blockNumber ? candidateEnd : head.blockNumber;
-      const received = [...(await source.backfill({ fromBlock: pageStart, toBlock: pageEnd, filter: config.filter }))];
+      const received = [
+        ...(await withDeadline("checkpoint backfill", config.sourceOperationTimeoutMilliseconds, signal, () =>
+          source.backfill({ fromBlock: pageStart, toBlock: pageEnd, filter: config.filter }),
+        )),
+      ];
       for (const log of received) {
         validateCoreLogIdentity(log, expectedCore, config.deployment.chainId);
         if (
@@ -254,8 +350,11 @@ async function snapshotIndexer(
   config: ClientConnectConfig,
   source: ChainDataSource,
   queue: BoundedUpdateQueue,
+  signal: AbortSignal,
 ): Promise<QuoteIndexer> {
-  const snapshot = await source.snapshot(config.deployment);
+  const snapshot = await withDeadline("bootstrap snapshot", config.sourceOperationTimeoutMilliseconds, signal, () =>
+    source.snapshot(config.deployment),
+  );
   const indexer = QuoteIndexer.fromSnapshot(snapshot, config.deployment);
   indexer.replayHandoff(queue.drainAll(), snapshot.cursor);
   return indexer;
@@ -288,9 +387,20 @@ class RecoveryCoordinator {
 
   private async recoverUntilReady(): Promise<void> {
     while (!this.signal.aborted) {
-      if (!(await this.activity.waitUntilActive(this.signal))) return;
       try {
-        const snapshot = await this.source.snapshot(this.config.deployment);
+        const active = await waitForActivity(
+          "recovery source activity",
+          this.activity,
+          this.config.sourceOperationTimeoutMilliseconds,
+          this.signal,
+        );
+        if (!active) return;
+        const snapshot = await withDeadline(
+          "recovery snapshot",
+          this.config.sourceOperationTimeoutMilliseconds,
+          this.signal,
+          () => this.source.snapshot(this.config.deployment),
+        );
         this.indexer.installSnapshot(snapshot, this.queue.drainAll());
         return;
       } catch (error) {
@@ -300,6 +410,26 @@ class RecoveryCoordinator {
       }
     }
   }
+}
+
+function remaining(deadline: number): number {
+  return Math.max(1, Math.ceil(deadline - monotonicMilliseconds()));
+}
+
+function waitForActivity(
+  operation: string,
+  activity: SourceActivity,
+  timeoutMilliseconds: number,
+  signal: AbortSignal,
+): Promise<boolean> {
+  const wait = new AbortController();
+  return withDeadline(
+    operation,
+    timeoutMilliseconds,
+    signal,
+    () => activity.waitUntilActive(wait.signal),
+    () => wait.abort(),
+  );
 }
 
 function isPermanentBootstrapError(error: unknown): boolean {

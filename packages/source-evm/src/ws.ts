@@ -1,7 +1,9 @@
 import {
+  BoundedRingBuffer,
   Commitment,
   CursorReorderBuffer,
   Network as NetworkValue,
+  ownContractFilter,
   type BackfillRequest,
   type BootstrapSnapshot,
   type ChainCursor,
@@ -121,11 +123,12 @@ export class EvmRpcSource implements ChainDataSource {
    * connecting or while the node has rejected either subscription.
    */
   async subscribe(filter: ContractFilter, signal?: AbortSignal): Promise<AsyncIterable<ChainUpdate>> {
-    const expectedAddress = parseAddress(filter.address);
+    const ownedFilter = ownContractFilter(filter);
+    const expectedAddress = parseAddress(ownedFilter.address);
     const connection = establishSocket(
       this.wsEndpoint,
       this.factory,
-      filter,
+      ownedFilter,
       this.config.logsSubscription,
       this.chainId,
       this.config.queueCapacity,
@@ -167,7 +170,7 @@ export class EvmRpcSource implements ChainDataSource {
     let sourceSequence = 0n;
     let reorder = new CursorReorderBuffer(this.config.reorderCapacity, this.config.reorderByteCapacity);
     const standardLogs = holdsStandardLogsUntilSuccessor(this.config);
-    let openStandardHeads: OpenStandardHead[] = [];
+    const openStandardHeads = new BoundedRingBuffer<OpenStandardHead>(this.config.reorderCapacity);
     let firstStandardHeadBlock: bigint | undefined;
     let publishedWatermark: ChainCursor | undefined;
 
@@ -289,7 +292,7 @@ export class EvmRpcSource implements ChainDataSource {
         if (lastHead && headDiscontinuity(lastHead, lastParentHash, parsed, this.config.progressiveHeads)) {
           yield { kind: "Reorg", oldHead: lastHead, newHead: parsed.cursor };
           reorder = new CursorReorderBuffer(this.config.reorderCapacity, this.config.reorderByteCapacity);
-          openStandardHeads = [];
+          openStandardHeads.clear();
           firstStandardHeadBlock = parsed.cursor.blockNumber;
         }
         lastHead = parsed.cursor;
@@ -380,7 +383,7 @@ function isAtOrBeforeWatermark(cursor: ChainCursor, watermark: ChainCursor | und
 }
 
 function observeStandardHead(
-  openHeads: OpenStandardHead[],
+  openHeads: BoundedRingBuffer<OpenStandardHead>,
   head: ParsedHead,
   observedAt: number,
   countCapacity: number,
@@ -389,15 +392,18 @@ function observeStandardHead(
   const nextCount = openHeads.length + 1;
   if (nextCount > countCapacity || nextCount * 256 > byteCapacity)
     throw new Error("pending head count or byte budget exceeded");
-  openHeads.push({ observedAt, head });
+  if (!openHeads.push({ observedAt, head })) throw new Error("pending head count budget exceeded");
 }
 
-function standardHeadDeadline(openHeads: readonly OpenStandardHead[]): number | undefined {
-  const successor = openHeads[1];
+function standardHeadDeadline(openHeads: BoundedRingBuffer<OpenStandardHead>): number | undefined {
+  const successor = openHeads.peek(1);
   return successor === undefined ? undefined : successor.observedAt + STANDARD_LOG_GRACE_MILLISECONDS;
 }
 
-function takeReadyStandardHead(openHeads: OpenStandardHead[], observedAt: number): ParsedHead | undefined {
+function takeReadyStandardHead(
+  openHeads: BoundedRingBuffer<OpenStandardHead>,
+  observedAt: number,
+): ParsedHead | undefined {
   const deadline = standardHeadDeadline(openHeads);
   if (deadline === undefined || observedAt < deadline) return undefined;
   return openHeads.shift()?.head;
@@ -429,6 +435,7 @@ async function nextFrameOrStandardDeadline(
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener("abort", abort);
+    wait.abort();
   }
 }
 

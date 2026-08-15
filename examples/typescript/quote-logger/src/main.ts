@@ -45,6 +45,7 @@ async function main(): Promise<void> {
     queueByteBound: 64 * 1024 * 1024,
     reconnectDelayMilliseconds: 1_000,
     sourceStallTimeoutMilliseconds: 30_000,
+    sourceOperationTimeoutMilliseconds: 15_000,
   };
   writeLog("info", "connecting LunarBase client", {
     chainId,

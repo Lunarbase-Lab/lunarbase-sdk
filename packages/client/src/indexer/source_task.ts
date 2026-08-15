@@ -1,6 +1,7 @@
 /** Realtime subscription lifecycle, liveness watchdog, and reconnect loop. */
 import type { ChainDataSource, ContractFilter } from "../model.js";
 import type { BoundedUpdateQueue } from "./update_queue.js";
+import { withDeadline } from "./lifecycle.js";
 
 /** Observable transport activity used to gate bootstrap and recovery. */
 export class SourceActivity {
@@ -23,17 +24,23 @@ export class SourceActivity {
     if (this.active) return true;
     if (signal.aborted) return false;
     return new Promise((resolve) => {
-      const ready = () => {
+      let settled = false;
+      const finish = (active: boolean) => {
+        if (settled) return;
+        settled = true;
         signal.removeEventListener("abort", aborted);
         this.waiters.delete(ready);
-        resolve(true);
+        resolve(active);
+      };
+      const ready = () => {
+        finish(true);
       };
       const aborted = () => {
-        this.waiters.delete(ready);
-        resolve(false);
+        finish(false);
       };
       this.waiters.add(ready);
       signal.addEventListener("abort", aborted, { once: true });
+      if (signal.aborted) aborted();
     });
   }
 }
@@ -47,16 +54,23 @@ export async function pumpSource(
   signal: AbortSignal,
   reconnectDelayMilliseconds: number,
   stallTimeoutMilliseconds: number,
+  operationTimeoutMilliseconds: number,
 ): Promise<void> {
   let everActive = false;
   while (!signal.aborted && !queue.closed) {
     const attempt = linkedController(signal);
     activity.setActive(false);
     try {
-      const stream = await source.subscribe(filter, attempt.signal);
+      const stream = await withDeadline(
+        "source subscription",
+        operationTimeoutMilliseconds,
+        signal,
+        () => source.subscribe(filter, attempt.signal),
+        () => attempt.abort(),
+      );
       everActive = true;
       activity.setActive(true);
-      await consumeStream(stream, queue, attempt, signal, stallTimeoutMilliseconds);
+      await consumeStream(stream, queue, attempt, signal, stallTimeoutMilliseconds, operationTimeoutMilliseconds);
     } catch (error) {
       if (signal.aborted || queue.closed) return;
       if (everActive)
@@ -78,11 +92,13 @@ async function consumeStream(
   attempt: AbortController,
   signal: AbortSignal,
   stallTimeoutMilliseconds: number,
+  operationTimeoutMilliseconds: number,
 ): Promise<void> {
   const iterator = stream[Symbol.asyncIterator]();
   try {
     while (!signal.aborted && !queue.closed) {
       const result = await nextWithTimeout(iterator, stallTimeoutMilliseconds, attempt);
+      if (result === "cancelled") return;
       if (result === "timeout") {
         queue.push({ kind: "Gap", reason: "realtime source stalled; canonical recovery required" });
         return;
@@ -96,7 +112,10 @@ async function consumeStream(
     }
   } finally {
     attempt.abort();
-    await iterator.return?.();
+    if (iterator.return)
+      await withDeadline("source iterator close", operationTimeoutMilliseconds, undefined, () =>
+        iterator.return!(),
+      ).catch(() => undefined);
   }
 }
 
@@ -104,31 +123,53 @@ async function nextWithTimeout(
   iterator: AsyncIterator<import("../model.js").ChainUpdate>,
   milliseconds: number,
   attempt: AbortController,
-): Promise<IteratorResult<import("../model.js").ChainUpdate> | "timeout"> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<"timeout">((resolve) => {
-    timer = setTimeout(() => {
+): Promise<IteratorResult<import("../model.js").ChainUpdate> | "timeout" | "cancelled"> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timedOut = false;
+    const finish = (value: IteratorResult<import("../model.js").ChainUpdate> | "timeout" | "cancelled") => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      attempt.signal.removeEventListener("abort", onAbort);
+      resolve(value);
+    };
+    const fail = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      attempt.signal.removeEventListener("abort", onAbort);
+      reject(error);
+    };
+    const onAbort = () => finish(timedOut ? "timeout" : "cancelled");
+    const timer = setTimeout(() => {
+      timedOut = true;
+      finish("timeout");
       attempt.abort();
-      resolve("timeout");
     }, milliseconds);
+    attempt.signal.addEventListener("abort", onAbort, { once: true });
+    if (attempt.signal.aborted) {
+      onAbort();
+      return;
+    }
+    iterator.next().then(finish, fail);
   });
-  try {
-    return await Promise.race([iterator.next(), timeout]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
 }
 
 export function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) return Promise.resolve();
   return new Promise((resolve) => {
-    const timer = setTimeout(done, milliseconds);
+    let settled = false;
     function done() {
+      if (settled) return;
+      settled = true;
       signal.removeEventListener("abort", done);
       clearTimeout(timer);
       resolve();
     }
+    const timer = setTimeout(done, milliseconds);
     signal.addEventListener("abort", done, { once: true });
+    if (signal.aborted) done();
   });
 }
 
