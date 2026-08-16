@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Monad execution-event data source for LunarBase"
 keywords = ["lunarbase", "monad", "evm", "rpc", "websocket"]
 categories = ["api-bindings", "asynchronous", "network-programming"]
+publish = false
 
 [lib]
 name = "lunarbase_source_monad"

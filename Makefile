@@ -24,13 +24,12 @@ INDEXER_ARGS ?=
 EVENT_WORKER_ARGS ?=
 INDEXER_FEATURES ?= $(NETWORK)
 COMPOSE ?= docker compose -f examples/indexer/docker-compose.yml
-CARGO_PUBLISH_PACKAGES := lunarbase-pmm-v2-math lunarbase-pmm-v2-client lunarbase-pmm-v2-source-evm lunarbase-pmm-v2-source-monad lunarbase-pmm-v2-source-arbitrum
-NPM_PUBLISH_DIRS := packages/math packages/client packages/source-evm packages/source-monad packages/source-arbitrum
+CARGO_PUBLISH_PACKAGES := lunarbase-pmm-v2-math lunarbase-pmm-v2-client lunarbase-pmm-v2-source-evm lunarbase-pmm-v2-source-arbitrum
+NPM_PUBLISH_DIRS := packages/math packages/client packages/source-evm packages/source-arbitrum
 CARGO_PACKAGE_PATCHES := \
 	--config 'patch.crates-io.lunarbase-pmm-v2-math.path="$(CURDIR)/crates/lunarbase-math"' \
 	--config 'patch.crates-io.lunarbase-pmm-v2-client.path="$(CURDIR)/crates/lunarbase-client"' \
 	--config 'patch.crates-io.lunarbase-pmm-v2-source-evm.path="$(CURDIR)/crates/lunarbase-source-evm"' \
-	--config 'patch.crates-io.lunarbase-pmm-v2-source-monad.path="$(CURDIR)/crates/lunarbase-source-monad"' \
 	--config 'patch.crates-io.lunarbase-pmm-v2-source-arbitrum.path="$(CURDIR)/crates/lunarbase-source-arbitrum"'
 
 # Use the workspace-pinned pnpm through Corepack when available. Fall back to

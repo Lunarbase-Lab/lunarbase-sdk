@@ -10,12 +10,11 @@ const expectedKeywords = new Map([
   ["@lunarbase-lab/pmm-v2-math", ["lunarbase", "pmm", "defi", "evm", "quote-math"]],
   ["@lunarbase-lab/pmm-v2-client", ["lunarbase", "pmm", "defi", "evm", "realtime"]],
   ["@lunarbase-lab/pmm-v2-source-evm", ["lunarbase", "evm", "base", "rpc", "websocket"]],
-  ["@lunarbase-lab/pmm-v2-source-monad", ["lunarbase", "monad", "evm", "rpc", "websocket"]],
   ["@lunarbase-lab/pmm-v2-source-arbitrum", ["lunarbase", "arbitrum", "nitro", "evm", "rpc"]],
 ]);
 const archives = (await readdir(dist)).filter((entry) => entry.endsWith(".tgz")).map((entry) => join(dist, entry));
-if (releaseNpmPackages.length !== 5) {
-  throw new Error("release inventory must contain exactly five npm packages");
+if (releaseNpmPackages.length !== 4) {
+  throw new Error("release inventory must contain exactly four npm packages");
 }
 if (archives.length !== releaseNpmPackages.length) {
   throw new Error("expected exactly " + releaseNpmPackages.length + " npm archives, found " + archives.length);

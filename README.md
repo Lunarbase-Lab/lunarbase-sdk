@@ -15,13 +15,16 @@ or consumer latency to quote requests.
 | Quote math          | [lunarbase-pmm-v2-math](crates/lunarbase-math/README.md)                       | [@lunarbase-lab/pmm-v2-math](packages/math/README.md)                       | Fully supported |
 | Realtime client     | [lunarbase-pmm-v2-client](crates/lunarbase-client/README.md)                   | [@lunarbase-lab/pmm-v2-client](packages/client/README.md)                   | Fully supported |
 | EVM and Base source | [lunarbase-pmm-v2-source-evm](crates/lunarbase-source-evm/README.md)           | [@lunarbase-lab/pmm-v2-source-evm](packages/source-evm/README.md)           | Fully supported |
-| Monad source        | [lunarbase-pmm-v2-source-monad](crates/lunarbase-source-monad/README.md)       | [@lunarbase-lab/pmm-v2-source-monad](packages/source-monad/README.md)       | Maintenance     |
+| Monad source        | [Workspace/Git only](crates/lunarbase-source-monad/README.md)                  | [Workspace only](packages/source-monad/README.md)                           | Maintenance     |
 | Arbitrum source     | [lunarbase-pmm-v2-source-arbitrum](crates/lunarbase-source-arbitrum/README.md) | [@lunarbase-lab/pmm-v2-source-arbitrum](packages/source-arbitrum/README.md) | Maintenance     |
 
 All public packages use version 0.3.1.
 
-Maintenance packages remain publishable; updates focus on compatibility,
-reliability, and security fixes.
+Maintenance packages receive compatibility, reliability, and security fixes.
+The Monad sources are built and tested from the workspace but are not published
+to crates.io or npm. Rust protocol v2 pins upstream Git dependencies, while the
+TypeScript workspace adapter has no direct access to the native Monad Event
+Ring and does not implement the resumable protocol-v2 lifecycle.
 
 ## Install
 
@@ -41,8 +44,9 @@ pnpm add @lunarbase-lab/pmm-v2-client@0.3.1
 pnpm add @lunarbase-lab/pmm-v2-source-evm@0.3.1
 ```
 
-Choose source-monad or source-arbitrum instead of source-evm when integrating
-those networks.
+Choose source-arbitrum instead of source-evm for Arbitrum. Monad integrations
+must pin the SDK repository or build the workspace applications; the
+compatibility-only TypeScript adapter is not a production Event Ring source.
 
 ## Indexer
 
@@ -96,7 +100,7 @@ process, supply-chain, formatting, lint, test, and documentation gate.
 ## Releases
 
 Publishing a GitHub Release with a vX.Y.Z tag runs the complete release gate
-and publishes the five Rust crates to crates.io and the five scoped packages
+and publishes four Rust crates to crates.io and four scoped packages
 to npm in dependency order. The tag must match every public package version.
 
 ## License

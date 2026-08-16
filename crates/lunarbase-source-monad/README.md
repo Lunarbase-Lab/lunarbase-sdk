@@ -4,12 +4,20 @@ Monad execution-event data source for `lunarbase-pmm-v2-client`.
 
 Status: **maintenance**. Updates focus on compatibility, reliability, and security fixes.
 
-## Install
+## Availability
+
+This crate is built and tested as part of the SDK workspace but is not
+published by the crates.io release workflow. Protocol v2 depends on pinned
+upstream Git packages that crates.io cannot accept. Rust Monad deployments
+must pin the SDK repository or build the workspace applications. The TypeScript
+Monad compatibility adapter is also workspace-only and is not published to npm.
+
+## Workspace use
 
 ```toml
 [dependencies]
-lunarbase-client = { package = "lunarbase-pmm-v2-client", version = "0.3.1" }
-lunarbase-source-monad = { package = "lunarbase-pmm-v2-source-monad", version = "0.3.1" }
+lunarbase-client = { package = "lunarbase-pmm-v2-client", path = "../lunarbase-client" }
+lunarbase-source-monad = { package = "lunarbase-pmm-v2-source-monad", path = "../lunarbase-source-monad", features = ["protocol-v2"] }
 ```
 
 ## Use
