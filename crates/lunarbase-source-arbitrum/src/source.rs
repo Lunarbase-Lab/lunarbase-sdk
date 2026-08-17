@@ -8,6 +8,7 @@ use lunarbase_client::model::{
     DeploymentConfig, Network, SourceError,
 };
 use lunarbase_client::source::{ChainDataSource, SourceStream};
+use lunarbase_source_evm::fork::{ForkError, ForkResolver};
 use lunarbase_source_evm::rpc::client::RpcHttpClient;
 use lunarbase_source_evm::ws::{EvmDeliveryMode, EvmRpcSource};
 use std::{
@@ -123,6 +124,11 @@ impl ArbitrumNitroSource {
     pub fn with_backfill_page_blocks(mut self, blocks: u64) -> Self {
         self.inner = self.inner.with_backfill_page_blocks(blocks);
         self
+    }
+
+    /// Creates a rare-path fork resolver with Nitro execution context.
+    pub fn fork_resolver(&self, max_depth: usize) -> Result<ForkResolver, ForkError> {
+        self.inner.fork_resolver(max_depth)
     }
 
     async fn nitro_execution_context(

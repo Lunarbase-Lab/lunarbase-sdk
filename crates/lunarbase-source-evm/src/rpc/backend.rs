@@ -210,10 +210,7 @@ impl RpcHttpBackend {
     }
 
     /// Returns the configured canonical block with parent linkage.
-    pub(crate) async fn snapshot_block_ref(
-        &self,
-        network: Network,
-    ) -> Result<BlockRef, SourceError> {
+    pub async fn snapshot_block_ref(&self, network: Network) -> Result<BlockRef, SourceError> {
         if network != self.network {
             return Err(SourceError::NetworkMismatch);
         }
@@ -223,10 +220,17 @@ impl RpcHttpBackend {
         } else {
             Commitment::Canonical
         };
-        self.rpc
-            .block_ref(&self.snapshot_tag, self.chain_id, commitment)
-            .await
-            .map_err(Into::into)
+        if self.network == Network::Arbitrum {
+            self.rpc
+                .block_ref_with_execution_context(&self.snapshot_tag, self.chain_id, commitment)
+                .await
+                .map_err(Into::into)
+        } else {
+            self.rpc
+                .block_ref(&self.snapshot_tag, self.chain_id, commitment)
+                .await
+                .map_err(Into::into)
+        }
     }
 
     /// Reads canonical logs for recovery.
@@ -246,6 +250,26 @@ impl RpcHttpBackend {
             .map_err(Into::into)
     }
 
+    /// Resolves one canonical block tag with network-specific execution context.
+    pub async fn block_ref_at_tag(
+        &self,
+        block_tag: &str,
+        commitment: Commitment,
+    ) -> Result<BlockRef, SourceError> {
+        self.ensure_chain_id().await?;
+        if self.network == Network::Arbitrum {
+            self.rpc
+                .block_ref_with_execution_context(block_tag, self.chain_id, commitment)
+                .await
+                .map_err(Into::into)
+        } else {
+            self.rpc
+                .block_ref(block_tag, self.chain_id, commitment)
+                .await
+                .map_err(Into::into)
+        }
+    }
+
     /// Resolves one exact block hash after verifying the HTTP chain identity.
     ///
     /// Fork walkers share this backend with subscription setup, so the common
@@ -256,10 +280,17 @@ impl RpcHttpBackend {
         commitment: Commitment,
     ) -> Result<BlockRef, SourceError> {
         self.ensure_chain_id().await?;
-        self.rpc
-            .block_ref_by_hash(block_hash, self.chain_id, commitment)
-            .await
-            .map_err(Into::into)
+        if self.network == Network::Arbitrum {
+            self.rpc
+                .block_ref_by_hash_with_execution_context(block_hash, self.chain_id, commitment)
+                .await
+                .map_err(Into::into)
+        } else {
+            self.rpc
+                .block_ref_by_hash(block_hash, self.chain_id, commitment)
+                .await
+                .map_err(Into::into)
+        }
     }
 
     /// Verifies checkpoint canonicality and the ERC-1967 implementation identity.

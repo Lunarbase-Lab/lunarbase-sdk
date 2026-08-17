@@ -25,14 +25,16 @@ log append atomically validates deployment metadata and canonical membership,
 deduplicates `recordId`, appends the Stream record, updates
 `logicalLogId` lifecycle state, writes a lightweight block-journal reference,
 and advances the recovery cursor. A block-head command atomically persists
-parent linkage, canonical-height mapping, canonical/finalized heads, and the
-cursor. No Redis read is required before a normal append.
+parent linkage and canonical/finalized indexes. A head alone never advances
+the recovery cursor, so a crash between a head and its logs cannot skip the
+block. No Redis read is required before a normal append.
 
 An ambiguous connection failure retries the same `recordId`. Redis therefore
 cannot expose a log without its deduplication, lifecycle, block reference, and
 cursor updates. Provider `removed` notifications are never persisted as a
-complete correction: they require resolved fork history. Until a fork is
-resolved, the worker fails closed and remains unready.
+complete correction: they trigger bounded exact-hash resolution. The worker
+stays live but unready while one atomic `begin -> reverted -> applied -> commit`
+correction is retried; normal persistence remains backpressured.
 
 Use a dedicated Redis resource with persistent storage, capacity alerts,
 authentication, network isolation, and backups. The worker intentionally does
@@ -76,6 +78,13 @@ The default byte budgets are 64 MiB and 16 MiB respectively; configure them
 with `LUNARBASE_EVENT_SOURCE_QUEUE_BYTE_BOUND` and
 `LUNARBASE_EVENT_REDIS_QUEUE_BYTE_BOUND`. Saturation backpressures ingestion
 and revokes readiness. It never silently removes a required event.
+
+Fork history defaults to 4096 headers / 2 MiB and exact resolution is capped at
+4096 blocks. One correction is admitted only below 8192 lifecycle records and
+16 MiB. Override these with `LUNARBASE_EVENT_FORK_WINDOW_BLOCKS`,
+`LUNARBASE_EVENT_FORK_WINDOW_BYTES`, `LUNARBASE_EVENT_FORK_MAX_DEPTH`,
+`LUNARBASE_EVENT_CORRECTION_EVENT_BOUND`, and
+`LUNARBASE_EVENT_CORRECTION_BYTE_BOUND`.
 
 The complete fork-aware contract is specified in
 [`docs/EVENT_DELIVERY.md`](../../docs/EVENT_DELIVERY.md).

@@ -52,6 +52,11 @@ async fn durable_redis_append_is_atomic_and_idempotent() {
     assert!(first_head.appended);
     assert!(!duplicate_head.appended);
 
+    assert_eq!(
+        store.load_cursor(8453, core).await.unwrap(),
+        None,
+        "a header alone must not skip unpersisted logs during recovery"
+    );
     let mut competing = block();
     competing.cursor.block_hash = Some(B256::new([4; 32]));
     let competing = Arc::new(DurableHead::from_block(&competing, core).unwrap());

@@ -1,6 +1,7 @@
 //! Delivery semantics and transport bounds for EVM subscriptions.
 
 use super::EvmRpcSource;
+use crate::fork::{ForkError, ForkResolver};
 use crate::rpc::{backend::RpcHttpBackend, client::RpcHttpClient};
 use lunarbase_client::model::{Commitment, Network, SourceError};
 use std::sync::Arc;
@@ -181,6 +182,11 @@ impl EvmRpcSource {
     /// Returns the transport and delivery policy.
     pub fn config(&self) -> &WsRpcConfig {
         &self.config
+    }
+
+    /// Creates a rare-path exact-hash resolver sharing this HTTP session.
+    pub fn fork_resolver(&self, max_depth: usize) -> Result<ForkResolver, ForkError> {
+        ForkResolver::new(self.http.clone(), max_depth)
     }
 
     /// Overrides the bounded block span used by finalized live catch-up.

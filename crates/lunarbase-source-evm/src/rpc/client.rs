@@ -256,6 +256,18 @@ impl RpcHttpClient {
         normalize_block_ref(&value, chain_id, commitment, false)
     }
 
+    /// Resolves block identity, parent linkage, and explicit execution context by tag.
+    pub async fn block_ref_with_execution_context(
+        &self,
+        block_tag: &str,
+        chain_id: u64,
+        commitment: Commitment,
+    ) -> Result<BlockRef, RpcError> {
+        let tag = validate_block_tag(block_tag)?;
+        let value: Value = self.request("eth_getBlockByNumber", (tag, false)).await?;
+        normalize_block_ref(&value, chain_id, commitment, true)
+    }
+
     /// Resolves block identity and parent linkage by an exact block hash.
     ///
     /// This method is intended for rare fork resolution. Normal head and log
@@ -267,6 +279,18 @@ impl RpcHttpClient {
         commitment: Commitment,
     ) -> Result<BlockRef, RpcError> {
         self.block_ref_by_hash_inner(block_hash, chain_id, commitment, false)
+            .await
+    }
+
+    /// Resolves block identity and parent linkage by hash while requiring an
+    /// explicit execution context such as Nitro's `l1BlockNumber`.
+    pub async fn block_ref_by_hash_with_execution_context(
+        &self,
+        block_hash: B256,
+        chain_id: u64,
+        commitment: Commitment,
+    ) -> Result<BlockRef, RpcError> {
+        self.block_ref_by_hash_inner(block_hash, chain_id, commitment, true)
             .await
     }
 

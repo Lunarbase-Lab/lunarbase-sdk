@@ -20,6 +20,9 @@ pub(crate) struct Metrics {
     persisted: AtomicU64,
     duplicates: AtomicU64,
     journaled_headers: AtomicU64,
+    reorg_corrections: AtomicU64,
+    reorg_reverted_events: AtomicU64,
+    reorg_applied_events: AtomicU64,
     redis_failures: AtomicU64,
     source_reconnects: AtomicU64,
     source_gaps: AtomicU64,
@@ -49,6 +52,9 @@ impl Metrics {
             redis_queue_capacity,
             redis_queue_bytes: AtomicUsize::new(0),
             redis_queue_byte_capacity,
+            reorg_corrections: AtomicU64::new(0),
+            reorg_reverted_events: AtomicU64::new(0),
+            reorg_applied_events: AtomicU64::new(0),
             persisted: AtomicU64::new(0),
             duplicates: AtomicU64::new(0),
             journaled_headers: AtomicU64::new(0),
@@ -116,6 +122,18 @@ impl Metrics {
             self.journaled_headers.fetch_add(1, Ordering::Relaxed);
         }
         self.last_persisted_block.store(block, Ordering::Relaxed);
+    }
+
+    pub(crate) fn reorg_corrected(&self, reverted: usize, applied: usize, duplicate: bool) {
+        if duplicate {
+            self.duplicates.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.reorg_corrections.fetch_add(1, Ordering::Relaxed);
+            self.reorg_reverted_events
+                .fetch_add(reverted as u64, Ordering::Relaxed);
+            self.reorg_applied_events
+                .fetch_add(applied as u64, Ordering::Relaxed);
+        }
     }
 
     pub(crate) fn redis_failure(&self) {
@@ -243,6 +261,21 @@ impl Metrics {
             &mut output,
             "lunarbase_event_worker_journaled_headers_total",
             self.journaled_headers.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut output,
+            "lunarbase_event_worker_reorg_corrections_total",
+            self.reorg_corrections.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut output,
+            "lunarbase_event_worker_reorg_reverted_events_total",
+            self.reorg_reverted_events.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut output,
+            "lunarbase_event_worker_reorg_applied_events_total",
+            self.reorg_applied_events.load(Ordering::Relaxed),
         );
         counter(
             &mut output,

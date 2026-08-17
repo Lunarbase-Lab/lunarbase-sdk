@@ -45,7 +45,8 @@ async fn run_evm(
         )
         .with_backfill_page_blocks(config.backfill_page_blocks),
     );
-    runtime::run(source, config, store, metrics, shutdown).await
+    let resolver = source.fork_resolver(config.fork_max_depth)?;
+    runtime::run(source, Some(resolver), config, store, metrics, shutdown).await
 }
 
 #[cfg(not(feature = "evm"))]
@@ -85,7 +86,8 @@ async fn run_base(
     }
     .with_backfill_page_blocks(config.backfill_page_blocks);
     let source = Arc::new(source);
-    runtime::run(source, config, store, metrics, shutdown).await
+    let resolver = source.fork_resolver(config.fork_max_depth)?;
+    runtime::run(source, Some(resolver), config, store, metrics, shutdown).await
 }
 
 #[cfg(not(feature = "base"))]
@@ -131,7 +133,7 @@ async fn run_monad(
         },
         config.http_rpc_url.clone(),
     )?;
-    runtime::run(Arc::new(source), config, store, metrics, shutdown).await
+    runtime::run(Arc::new(source), None, config, store, metrics, shutdown).await
 }
 
 #[cfg(not(feature = "monad"))]
@@ -172,7 +174,16 @@ async fn run_arbitrum(
             delivery_mode(config.minimum_commitment),
         )?
         .with_backfill_page_blocks(config.backfill_page_blocks);
-    runtime::run(Arc::new(source), config, store, metrics, shutdown).await
+    let resolver = source.fork_resolver(config.fork_max_depth)?;
+    runtime::run(
+        Arc::new(source),
+        Some(resolver),
+        config,
+        store,
+        metrics,
+        shutdown,
+    )
+    .await
 }
 
 #[cfg(any(feature = "evm", feature = "base", feature = "arbitrum"))]

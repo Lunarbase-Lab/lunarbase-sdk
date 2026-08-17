@@ -4,8 +4,7 @@ This document is the normative delivery contract for fork-aware LunarBase Core
 events. The words MUST, MUST NOT, SHOULD, and MAY describe requirements for a
 production implementation.
 
-The event worker currently emits Redis schema v1. Schema v2 becomes active only
-after the worker is configured to open the separate v2 namespace. A v1
+The event worker emits Redis schema v2 in its deployment-bound v2 namespace. A v1
 namespace MUST NOT be opened or mutated as v2.
 
 ## Scope and isolation
@@ -208,11 +207,11 @@ reorg/commit
 finalized watermark, and expected applied/reverted counts. The commit counts
 MUST equal the number of lifecycle records between the barriers.
 
-Corrections are written in bounded atomic chunks. The manifest records phase,
-next block, next event, counts, and last committed Stream ID in the same
-transaction as every chunk. A process crash resumes after the last committed
-position. Stable `recordId` values make replay of an ambiguous chunk
-idempotent.
+One correction is admitted only when its complete event count and serialized
+bytes fit the configured bounds, then it is written as one atomic Lua
+transaction. The manifest, barriers, lifecycle records, canonical indexes, and
+cursor therefore become visible together or not at all. Stable `recordId`
+values make an ambiguous transaction retry idempotent.
 
 Readiness remains false from discontinuity through `reorg/commit`. The worker
 updates the canonical-height index and source resume position before committing
@@ -228,7 +227,6 @@ the barrier, then closes the manifest atomically with `ReorgCommit`.
   finalized watermark is a fatal provider invariant violation; no correction
   is guessed.
 
-Commitment selects delivery latency. It does not weaken identity, durability,
 ordering, or fork detection.
 
 ## Consumer contract
@@ -284,7 +282,8 @@ Redis MUST use AOF with `appendfsync always` and
 `maxmemory-policy noeviction`. Capacity alerts fire before the configured
 journal or Redis memory high-watermark. If finality stalls, a consumer blocks
 retention, a common ancestor is outside the retained window, or any byte budget
-is exhausted, the worker stops ingestion and remains unhealthy. It never
+is exhausted, the worker pauses persistence through bounded backpressure and
+remains live but unready. It never
 silently drops an event, deletes an unfinalized branch, or substitutes a normal
 backfill for an unknown correction.
 
@@ -299,5 +298,6 @@ same boundary, and start the v2 worker from the next block. Canonical backfill
 then covers downtime. A v1 `eventId` is not a v2 `recordId` or
 `logicalLogId`.
 
-Until the v2 runtime and its crash/reorg tests are enabled, fork-sensitive
-production consumers SHOULD use finalized delivery.
+Fork correction is enabled for EVM, Base, and Arbitrum workers. A Monad worker
+without a durable proposal resolver remains live but unready on a retraction;
+fork-sensitive Monad deployments SHOULD use finalized delivery.

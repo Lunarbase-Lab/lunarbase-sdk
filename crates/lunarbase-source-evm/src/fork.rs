@@ -308,6 +308,34 @@ impl ForkResolver {
         Ok(Self { backend, max_depth })
     }
 
+    /// Resolves the backend's configured canonical tip with parent linkage.
+    pub async fn canonical_tip(&self) -> Result<BlockRef, ForkError> {
+        self.backend
+            .snapshot_block_ref(self.backend.network())
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Resolves one exact block hash with network-specific execution context.
+    pub async fn block_ref_by_hash(
+        &self,
+        block_hash: B256,
+        commitment: Commitment,
+    ) -> Result<BlockRef, ForkError> {
+        self.backend
+            .block_ref_by_hash(block_hash, commitment)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Resolves the provider's finalized watermark with parent linkage.
+    pub async fn finalized_tip(&self) -> Result<BlockRef, ForkError> {
+        self.backend
+            .block_ref_at_tag("finalized", Commitment::Finalized)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Computes a correction plan without mutating the retained window.
     pub async fn resolve(
         &self,

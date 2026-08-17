@@ -1,11 +1,17 @@
 //! Versioned Redis Stream and block-journal representations.
 
+#[path = "event/reorg.rs"]
+mod reorg;
+
+pub(crate) use reorg::ReorgCorrection;
+
 use alloy_primitives::{Address, B256, keccak256};
 use lunarbase_client::model::{BlockRef, ChainCursor, Commitment, ContractLog};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub(crate) const STREAM_SCHEMA_VERSION: u16 = 2;
+const REORG_ID_DOMAIN: &[u8] = b"lunarbase-durable-reorg-v2";
 pub(crate) const ID_DOMAIN_VERSION: &str = "lunarbase-durable-v2";
 
 const LOG_ID_DOMAIN: &[u8] = b"lunarbase-durable-log-v2";
@@ -186,6 +192,25 @@ impl DurableHead {
             cursor_order: cursor_order(&block.cursor),
         })
     }
+}
+
+pub(crate) fn decode_header(payload: &str, expected_chain_id: u64) -> Result<BlockRef, EventError> {
+    let envelope: HeaderEnvelope = serde_json::from_str(payload)?;
+    if envelope.schema_version != STREAM_SCHEMA_VERSION
+        || envelope.chain_id != expected_chain_id
+        || envelope.block_hash == B256::ZERO
+        || envelope.parent_hash == B256::ZERO
+    {
+        return Err(EventError::HeadIdentity);
+    }
+    let mut cursor = ChainCursor::block(
+        envelope.chain_id,
+        envelope.block_number,
+        Some(envelope.block_hash),
+        Commitment::Canonical,
+    );
+    cursor.execution_block_number = envelope.execution_block_number;
+    Ok(BlockRef::new(cursor, Some(envelope.parent_hash)))
 }
 
 pub(crate) fn decode_cursor(

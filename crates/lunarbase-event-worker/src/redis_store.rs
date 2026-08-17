@@ -2,11 +2,17 @@
 
 #[path = "redis_store/commands.rs"]
 mod commands;
+#[path = "redis_store/correction.rs"]
+mod correction;
+#[path = "redis_store/window.rs"]
+mod window;
+
+pub(crate) use correction::CorrectionLimits;
 
 use crate::{
     event::{
-        DurableEvent, DurableHead, EventError, STREAM_SCHEMA_VERSION, commitment_name,
-        decode_cursor,
+        DurableEvent, DurableHead, EventError, ReorgCorrection, STREAM_SCHEMA_VERSION,
+        commitment_name, decode_cursor,
     },
     metrics::Metrics,
 };
@@ -85,6 +91,20 @@ pub(crate) struct AppendOutcome {
     pub appended: bool,
 }
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct JournalWindow {
+    pub blocks: Vec<lunarbase_client::model::BlockRef>,
+    pub finalized: Option<lunarbase_client::model::BlockRef>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CorrectionOutcome {
+    pub stream_id: String,
+    pub appended: bool,
+    pub reverted: usize,
+    pub applied: usize,
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum StoreError {
     #[error("Redis: {0}")]
@@ -95,6 +115,10 @@ pub(crate) enum StoreError {
     Journal(String),
     #[error(transparent)]
     Event(#[from] EventError),
+    #[error("fork correction exceeds a configured resource budget: {0}")]
+    CorrectionBudget(String),
+    #[error("fork correction JSON: {0}")]
+    Json(#[from] serde_json::Error),
     #[error("Redis writer stopped")]
     ChannelClosed,
     #[error("Redis writer thread panicked")]
@@ -125,14 +149,22 @@ pub(crate) struct RedisWriter {
 enum Operation {
     Initialize,
     LoadCursor,
+    LoadWindow {
+        chain_id: u64,
+        max_blocks: usize,
+        max_bytes: usize,
+    },
     AppendEvent(Arc<DurableEvent>),
     AppendHead(Arc<DurableHead>),
+    Correct(Arc<ReorgCorrection>, CorrectionLimits),
 }
 
 enum Response {
     Initialized,
     Cursor(Option<Vec<u8>>),
+    Window(JournalWindow),
     Appended(AppendOutcome),
+    Corrected(CorrectionOutcome),
 }
 
 struct Command {
@@ -157,6 +189,7 @@ struct BlockingStore {
     keys: Arc<RedisKeys>,
     metadata: commands::DeploymentMetadata,
     script: redis::Script,
+    correction_script: redis::Script,
     group: String,
     timeout: Duration,
 }
@@ -183,6 +216,7 @@ impl RedisEventStore {
             commitment_name(deployment.delivery_mode),
         );
         let script = commands::script();
+        let correction_script = correction::script();
         let (sender, receiver) = mpsc::channel(queue_limits.capacity);
         let byte_budget = Arc::new(Semaphore::new(queue_limits.byte_capacity));
         let worker_keys = keys.clone();
@@ -196,6 +230,7 @@ impl RedisEventStore {
                     keys: worker_keys,
                     metadata,
                     script,
+                    correction_script,
                     group,
                     timeout,
                 }
@@ -249,12 +284,40 @@ impl RedisEventStore {
         }
     }
 
+    pub(crate) async fn load_window(
+        &self,
+        chain_id: u64,
+        max_blocks: usize,
+        max_bytes: usize,
+    ) -> Result<JournalWindow, StoreError> {
+        let operation = Operation::LoadWindow {
+            chain_id,
+            max_blocks,
+            max_bytes,
+        };
+        match self.request(operation).await? {
+            Response::Window(window) => Ok(window),
+            _ => Err(StoreError::ChannelClosed),
+        }
+    }
+
     pub(crate) async fn append_head(
         &self,
         head: Arc<DurableHead>,
     ) -> Result<AppendOutcome, StoreError> {
         match self.request(Operation::AppendHead(head)).await? {
             Response::Appended(outcome) => Ok(outcome),
+            _ => Err(StoreError::ChannelClosed),
+        }
+    }
+
+    pub(crate) async fn correct(
+        &self,
+        correction: Arc<ReorgCorrection>,
+        limits: CorrectionLimits,
+    ) -> Result<CorrectionOutcome, StoreError> {
+        match self.request(Operation::Correct(correction, limits)).await? {
+            Response::Corrected(outcome) => Ok(outcome),
             _ => Err(StoreError::ChannelClosed),
         }
     }
@@ -330,7 +393,6 @@ impl BlockingStore {
             let _ = response.send(result);
         }
     }
-
     fn execute(&mut self, operation: Operation) -> Result<Response, StoreError> {
         self.connect()?;
         let connection = self.connection.as_mut().ok_or(StoreError::ChannelClosed)?;
@@ -341,6 +403,7 @@ impl BlockingStore {
                 &self.group,
                 &self.metadata,
                 &self.script,
+                &self.correction_script,
             )?;
             self.initialized = true;
         }
@@ -351,6 +414,12 @@ impl BlockingStore {
                 .query::<Option<Vec<u8>>>(connection)
                 .map(Response::Cursor)
                 .map_err(redis_error),
+            Operation::LoadWindow {
+                chain_id,
+                max_blocks,
+                max_bytes,
+            } => window::load(connection, &self.keys, chain_id, max_blocks, max_bytes)
+                .map(Response::Window),
             Operation::AppendEvent(event) => {
                 commands::append_event(connection, &self.keys, &self.metadata, &self.script, &event)
                     .map(Response::Appended)
@@ -359,6 +428,15 @@ impl BlockingStore {
                 commands::append_head(connection, &self.keys, &self.metadata, &self.script, &head)
                     .map(Response::Appended)
             }
+            Operation::Correct(correction, limits) => correction::correct(
+                connection,
+                &self.keys,
+                &self.metadata,
+                &self.correction_script,
+                &correction,
+                limits,
+            )
+            .map(Response::Corrected),
         }
     }
 
@@ -387,6 +465,8 @@ impl Operation {
         std::mem::size_of::<Self>().saturating_add(match self {
             Self::AppendEvent(event) => event.retained_bytes(),
             Self::AppendHead(head) => head.retained_bytes(),
+            Self::Correct(correction, _) => correction.retained_bytes(),
+            Self::LoadWindow { .. } => 0,
             Self::Initialize | Self::LoadCursor => 0,
         })
     }
@@ -400,6 +480,10 @@ fn redis_error(error: redis::RedisError) -> StoreError {
         StoreError::Redis(detail)
     }
 }
+
+#[cfg(test)]
+#[path = "redis_store_reorg_tests.rs"]
+mod reorg_tests;
 
 #[cfg(test)]
 #[path = "redis_store_tests.rs"]

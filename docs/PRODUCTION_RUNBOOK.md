@@ -76,6 +76,11 @@ does not stop quote serving because the two processes do not share resources.
 A gap, reorganization, disconnect, queue overflow, or identity mismatch
 revokes readiness. If a replica does not recover:
 
+For the event worker, an EVM/Base/Arbitrum reorganization is corrected in
+place. Keep the live process running while `/readyz` is 503; bounded queues
+backpressure ingestion until the matching reorg commit is durable. Intervene
+only when correction progress remains stalled after dependencies recover.
+
 1. Remove it from traffic.
 2. Verify RPC availability and canonical block/log access.
 3. Recheck deployment identity and runtime-code hash.
@@ -86,9 +91,9 @@ An invalid checkpoint is ignored automatically in favor of a canonical
 snapshot. Delete checkpoint data only after preserving it for diagnosis.
 
 The event worker resumes from its deployment-bound Redis cursor and backfills
-the cursor block inclusively. Stable event IDs make an ambiguous write or
+the cursor block inclusively. Stable `recordId` values make an ambiguous write or
 inclusive replay idempotent inside the worker. Downstream consumers must also
-deduplicate by `eventId`, reclaim abandoned pending entries with `XAUTOCLAIM`,
+deduplicate by `recordId`, reclaim abandoned pending entries with `XAUTOCLAIM`,
 and `XACK` only after their own side effect commits.
 
 For fork-aware delivery, consumers switch to the v2 contract in

@@ -1,7 +1,10 @@
 //! Canonical recovery followed by at-least-once live event persistence.
 
+#[path = "runtime/forks.rs"]
+mod forks;
 #[path = "runtime/persist.rs"]
 mod persist;
+use forks::ForkRuntime;
 
 use crate::{
     config::Config,
@@ -11,11 +14,12 @@ use crate::{
 };
 use lunarbase_client::{
     model::{
-        BackfillRequest, ChainCursor, ChainUpdate, ContractFilter, ContractLog, Network,
+        BackfillRequest, BlockRef, ChainCursor, ChainUpdate, ContractFilter, ContractLog, Network,
         SourceError,
     },
     source::ChainDataSource,
 };
+use lunarbase_source_evm::fork::{ForkError, ForkResolver};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::{
@@ -25,6 +29,8 @@ use tokio::{
 
 #[derive(Debug, Error)]
 pub(crate) enum RuntimeError {
+    #[error(transparent)]
+    Fork(#[from] ForkError),
     #[error(transparent)]
     Source(#[from] SourceError),
     #[error(transparent)]
@@ -40,8 +46,6 @@ pub(crate) enum RuntimeError {
     RecoveryLog(String),
     #[error("source pump stopped unexpectedly")]
     PumpStopped,
-    #[error("fork correction must be resolved before durable recovery")]
-    ForkCorrectionRequired,
     #[cfg(not(all(
         feature = "evm",
         feature = "base",
@@ -54,19 +58,23 @@ pub(crate) enum RuntimeError {
 
 impl RuntimeError {
     fn retryable_recovery(&self) -> bool {
-        matches!(self, Self::Source(_) | Self::RecoveryLog(_))
+        matches!(self, Self::Source(_) | Self::RecoveryLog(_) | Self::Fork(_))
+            || matches!(self, Self::Store(error) if error.retryable()
+                || matches!(error, StoreError::Journal(_) | StoreError::CorrectionBudget(_)
+                    | StoreError::QueueByteLimit))
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum Transition {
     Continue,
-    Recover,
+    Recover(Option<BlockRef>),
     Shutdown,
 }
 
 pub(crate) async fn run<S>(
     source: Arc<S>,
+    fork_resolver: Option<ForkResolver>,
     config: Arc<Config>,
     store: RedisEventStore,
     metrics: Arc<Metrics>,
@@ -108,8 +116,12 @@ where
         },
     );
 
+    let mut forks = fork_resolver
+        .map(|resolver| ForkRuntime::new(resolver, &config))
+        .transpose()?;
     let result = drive(
         source,
+        forks.as_mut(),
         &config,
         &filter,
         &store,
@@ -130,6 +142,7 @@ where
 #[allow(clippy::too_many_arguments)]
 async fn drive<S: ChainDataSource>(
     source: Arc<S>,
+    mut forks: Option<&mut ForkRuntime>,
     config: &Config,
     filter: &ContractFilter,
     store: &RedisEventStore,
@@ -138,13 +151,17 @@ async fn drive<S: ChainDataSource>(
     active: &mut watch::Receiver<bool>,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<(), RuntimeError> {
+    let mut recovery_target = None;
     loop {
         metrics.set_ready(false);
         if !wait_until_active(active, shutdown).await? {
             return Ok(());
         }
+        let attempted_target = recovery_target.clone();
         match recover(
             source.as_ref(),
+            forks.as_deref_mut(),
+            recovery_target.take(),
             config,
             filter,
             store,
@@ -156,9 +173,13 @@ async fn drive<S: ChainDataSource>(
         .await
         {
             Ok(Transition::Shutdown) => return Ok(()),
-            Ok(Transition::Recover) => continue,
+            Ok(Transition::Recover(target)) => {
+                recovery_target = target;
+                continue;
+            }
             Ok(Transition::Continue) => {}
             Err(error) => {
+                recovery_target = attempted_target;
                 metrics.recovery_failure();
                 if !error.retryable_recovery() {
                     return Err(error);
@@ -173,10 +194,35 @@ async fn drive<S: ChainDataSource>(
         if *active.borrow() && metrics.queues_empty() {
             metrics.set_ready(true);
         }
-        match consume_live(config, store, metrics, receiver, active, shutdown).await? {
-            Transition::Shutdown => return Ok(()),
-            Transition::Recover => continue,
-            Transition::Continue => unreachable!("live consumption has no finite success"),
+        match consume_live(
+            forks.as_deref_mut(),
+            config,
+            store,
+            metrics,
+            receiver,
+            active,
+            shutdown,
+        )
+        .await
+        {
+            Ok(Transition::Shutdown) => return Ok(()),
+            Ok(Transition::Recover(target)) => {
+                recovery_target = target;
+                continue;
+            }
+            Ok(Transition::Continue) => unreachable!("live consumption has no finite success"),
+            Err(error) => {
+                metrics.recovery_failure();
+                if !error.retryable_recovery() {
+                    return Err(error);
+                }
+                tracing::warn!(error = %error, "event worker paused for recovery");
+                if !sleep_or_shutdown(config.reconnect_delay, shutdown).await {
+                    return Ok(());
+                }
+                recovery_target = None;
+                continue;
+            }
         }
     }
 }
@@ -184,6 +230,8 @@ async fn drive<S: ChainDataSource>(
 #[allow(clippy::too_many_arguments)]
 async fn recover<S: ChainDataSource>(
     source: &S,
+    mut forks: Option<&mut ForkRuntime>,
+    target: Option<BlockRef>,
     config: &Config,
     filter: &ContractFilter,
     store: &RedisEventStore,
@@ -193,6 +241,20 @@ async fn recover<S: ChainDataSource>(
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<Transition, RuntimeError> {
     metrics.recovery();
+    if forks.is_none() && target.is_some() {
+        return Err(ForkError::AncestorOutsideWindow.into());
+    }
+    if let Some(forks) = forks.as_deref_mut()
+        && forks
+            .reconcile(source, target, config, filter, store, metrics, shutdown)
+            .await?
+            == Transition::Shutdown
+    {
+        return Ok(Transition::Shutdown);
+    }
+    if *shutdown.borrow() {
+        return Ok(Transition::Shutdown);
+    }
     let cursor = load_cursor_with_retry(store, config, metrics, shutdown).await?;
     if *shutdown.borrow() {
         return Ok(Transition::Shutdown);
@@ -224,6 +286,12 @@ async fn recover<S: ChainDataSource>(
         logs.sort_by_key(|log| log.cursor.event_order());
         for log in logs {
             validate_recovery_log(&log, config, page_start, page_end)?;
+            if cursor
+                .as_ref()
+                .is_some_and(|durable| log.cursor.event_order() <= durable.event_order())
+            {
+                continue;
+            }
             if persist::log(log, config, store, metrics, shutdown).await? == Transition::Shutdown {
                 return Ok(Transition::Shutdown);
             }
@@ -235,18 +303,28 @@ async fn recover<S: ChainDataSource>(
     }
 
     while let Ok(queued) = receiver.try_recv() {
-        match handle_update(queued.into_inner(), config, store, metrics, shutdown).await? {
+        match handle_update(
+            queued.into_inner(),
+            forks.as_deref_mut(),
+            config,
+            store,
+            metrics,
+            shutdown,
+        )
+        .await?
+        {
             Transition::Continue => {}
             transition => return Ok(transition),
         }
     }
     if !*active.borrow() {
-        return Ok(Transition::Recover);
+        return Ok(Transition::Recover(None));
     }
     Ok(Transition::Continue)
 }
 
 async fn consume_live(
+    mut forks: Option<&mut ForkRuntime>,
     config: &Config,
     store: &RedisEventStore,
     metrics: &Metrics,
@@ -260,7 +338,7 @@ async fn consume_live(
             () = wait_for_shutdown(shutdown) => return Ok(Transition::Shutdown),
             update = receiver.recv() => {
                 let update = update.ok_or(RuntimeError::PumpStopped)?.into_inner();
-                let transition = handle_update(update, config, store, metrics, shutdown).await?;
+                let transition = handle_update(update, forks.as_deref_mut(), config, store, metrics, shutdown).await?;
                 if transition != Transition::Continue {
                     return Ok(transition);
                 }
@@ -274,32 +352,53 @@ async fn consume_live(
 
 async fn handle_update(
     update: ChainUpdate,
+    forks: Option<&mut ForkRuntime>,
     config: &Config,
     store: &RedisEventStore,
     metrics: &Metrics,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<Transition, RuntimeError> {
     match update {
-        ChainUpdate::Head(head) => persist::head(head, config, store, metrics, shutdown).await,
-        ChainUpdate::Log(log) => persist::log(log, config, store, metrics, shutdown).await,
+        ChainUpdate::Head(head) => match forks {
+            Some(forks) => {
+                forks
+                    .observe_head(head, config, store, metrics, shutdown)
+                    .await
+            }
+            None => persist::head(head, config, store, metrics, shutdown).await,
+        },
+        ChainUpdate::Log(log) => {
+            if log.removed {
+                metrics.source_gap();
+                let target = (forks.is_none()
+                    || config.minimum_commitment == lunarbase_client::model::Commitment::Finalized)
+                    .then(|| BlockRef::new(log.cursor.clone(), None));
+                tracing::warn!(
+                    block = log.cursor.block_number,
+                    "provider removal triggered exact fork recovery"
+                );
+                return Ok(Transition::Recover(target));
+            }
+            persist::log(log, config, store, metrics, shutdown).await
+        }
         ChainUpdate::Gap { cursor, reason } => {
             if let Some(cursor) = cursor {
                 validate_cursor(&cursor, config.chain_id)?;
             }
             metrics.source_gap();
             tracing::warn!(reason, "event source requested canonical recovery");
-            Ok(Transition::Recover)
+            Ok(Transition::Recover(None))
         }
         ChainUpdate::Reorg { old_head, new_head } => {
             validate_cursor(&old_head.cursor, config.chain_id)?;
             validate_cursor(&new_head.cursor, config.chain_id)?;
             metrics.source_gap();
-            tracing::error!(
+            tracing::warn!(
                 old = old_head.cursor.block_number,
                 new = new_head.cursor.block_number,
-                "durable fork correction is required"
+                "durable fork correction scheduled"
             );
-            Err(RuntimeError::ForkCorrectionRequired)
+            Ok(Transition::Recover(Some(new_head)))
         }
     }
 }

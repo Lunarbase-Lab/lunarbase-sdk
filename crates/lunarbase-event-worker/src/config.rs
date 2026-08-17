@@ -75,6 +75,37 @@ pub(crate) struct Cli {
         default_value_t = 1_000
     )]
     backfill_page_blocks: u64,
+    /// Maximum unfinalized headers retained for fork resolution.
+    #[arg(
+        long,
+        env = "LUNARBASE_EVENT_FORK_WINDOW_BLOCKS",
+        default_value_t = 4_096
+    )]
+    fork_window_blocks: usize,
+    /// Maximum retained bytes charged to the fork header window.
+    #[arg(
+        long,
+        env = "LUNARBASE_EVENT_FORK_WINDOW_BYTES",
+        default_value_t = 2 * 1024 * 1024
+    )]
+    fork_window_bytes: usize,
+    /// Maximum old or replacement branch depth resolved by exact-hash RPC.
+    #[arg(long, env = "LUNARBASE_EVENT_FORK_MAX_DEPTH", default_value_t = 4_096)]
+    fork_max_depth: usize,
+    /// Maximum lifecycle records admitted to one atomic correction.
+    #[arg(
+        long,
+        env = "LUNARBASE_EVENT_CORRECTION_EVENT_BOUND",
+        default_value_t = 8_192
+    )]
+    correction_event_bound: usize,
+    /// Maximum serialized bytes admitted to one atomic correction.
+    #[arg(
+        long,
+        env = "LUNARBASE_EVENT_CORRECTION_BYTE_BOUND",
+        default_value_t = 16 * 1024 * 1024
+    )]
+    correction_byte_bound: usize,
     /// Maximum commands waiting for the dedicated blocking Redis connection.
     #[arg(long, env = "LUNARBASE_EVENT_REDIS_QUEUE_BOUND", default_value_t = 8)]
     redis_queue_bound: usize,
@@ -138,6 +169,11 @@ pub(crate) struct Config {
     pub source_queue_bound: usize,
     pub source_queue_byte_bound: usize,
     pub backfill_page_blocks: u64,
+    pub fork_window_blocks: usize,
+    pub fork_window_bytes: usize,
+    pub fork_max_depth: usize,
+    pub correction_event_bound: usize,
+    pub correction_byte_bound: usize,
     pub redis_queue_bound: usize,
     pub redis_queue_byte_bound: usize,
     pub reconnect_delay: Duration,
@@ -213,6 +249,13 @@ impl Cli {
             || self.source_queue_byte_bound < MIN_UPDATE_QUEUE_BYTE_CAPACITY
             || self.source_queue_byte_bound > u32::MAX as usize
             || self.backfill_page_blocks == 0
+            || self.fork_window_blocks == 0
+            || self.fork_window_bytes == 0
+            || self.fork_max_depth == 0
+            || self.correction_event_bound == 0
+            || self.correction_byte_bound == 0
+            || self.correction_byte_bound > u32::MAX as usize
+            || self.correction_byte_bound > self.redis_queue_byte_bound
             || self.redis_queue_bound == 0
             || self.redis_queue_byte_bound == 0
             || self.redis_queue_byte_bound > u32::MAX as usize
@@ -224,7 +267,7 @@ impl Cli {
         {
             return invalid(
                 "resource_bounds",
-                "all queue and timing bounds must be non-zero and the source byte queue must be at least 1024 bytes",
+                "bounds must be non-zero, correction bytes must fit the Redis queue, and the source byte queue must be at least 1024 bytes",
             );
         }
         Ok(Config {
@@ -242,6 +285,11 @@ impl Cli {
             source_queue_bound: self.source_queue_bound,
             source_queue_byte_bound: self.source_queue_byte_bound,
             backfill_page_blocks: self.backfill_page_blocks,
+            fork_window_blocks: self.fork_window_blocks,
+            fork_window_bytes: self.fork_window_bytes,
+            fork_max_depth: self.fork_max_depth,
+            correction_event_bound: self.correction_event_bound,
+            correction_byte_bound: self.correction_byte_bound,
             redis_queue_bound: self.redis_queue_bound,
             redis_queue_byte_bound: self.redis_queue_byte_bound,
             reconnect_delay: Duration::from_millis(self.reconnect_delay_milliseconds),

@@ -10,7 +10,7 @@ publish = false
 
 [features]
 default = ["base"]
-evm = ["dep:lunarbase-source-evm"]
+evm = []
 base = ["evm"]
 monad = ["dep:lunarbase-source-monad", "lunarbase-source-monad/protocol-v2"]
 monad-native = [
@@ -31,7 +31,7 @@ clap.workspace = true
 futures-util.workspace = true
 lunarbase-client.workspace = true
 lunarbase-source-arbitrum = { workspace = true, optional = true }
-lunarbase-source-evm = { workspace = true, optional = true }
+lunarbase-source-evm.workspace = true
 lunarbase-source-monad = { workspace = true, optional = true }
 lunarbase-source-monad-native = { workspace = true, optional = true }
 redis = { workspace = true, features = ["script", "streams"] }

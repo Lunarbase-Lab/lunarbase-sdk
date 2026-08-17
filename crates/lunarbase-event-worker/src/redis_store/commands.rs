@@ -116,7 +116,6 @@ if ARGV[2] == 'head' then
       redis.call('SET', KEYS[9], block_hash)
     end
   end
-  advance_cursor(ARGV[7], ARGV[8])
   return {'', existing_header and 0 or 1}
 end
 
@@ -197,6 +196,10 @@ impl DeploymentMetadata {
             delivery_mode,
         }
     }
+
+    pub(super) fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
 }
 
 pub(super) fn script() -> Script {
@@ -209,6 +212,7 @@ pub(super) fn initialize(
     group: &str,
     metadata: &DeploymentMetadata,
     script: &Script,
+    correction_script: &Script,
 ) -> Result<(), StoreError> {
     redis::cmd("PING")
         .query::<String>(connection)
@@ -238,6 +242,10 @@ pub(super) fn initialize(
         Err(error) => return Err(redis_error(error)),
     }
     script
+        .prepare_invoke()
+        .load(connection)
+        .map_err(redis_error)?;
+    correction_script
         .prepare_invoke()
         .load(connection)
         .map_err(redis_error)?;
