@@ -72,8 +72,16 @@ with `LUNARBASE_EVENT_SOURCE_QUEUE_BYTE_BOUND` and
 `LUNARBASE_EVENT_REDIS_QUEUE_BYTE_BOUND`. Saturation backpressures ingestion
 and revokes readiness. It never silently removes a required event.
 
-Provider retractions are persisted as `operation=removed` before the worker
-enters canonical recovery, so consumers can observe both lifecycle edges.
+Schema v1 persists a provider retraction it receives as `operation=removed`
+before canonical recovery. Providers do not guarantee that every retracted log
+will arrive, so this is not a complete multi-log fork correction.
+
+The fork-aware v2 contract is specified in
+[`docs/EVENT_DELIVERY.md`](../../docs/EVENT_DELIVERY.md). It separates
+immutable `logicalLogId` values from lifecycle `recordId` values and keeps
+reorganization manifests crash-resumable without copying raw log payloads into
+the branch journal. v1 remains the current wire format until the v2 migration
+is implemented.
 
 ## Redis schema v1
 

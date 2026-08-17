@@ -20,6 +20,8 @@ dedicated Redis resource so event I/O cannot contend with quote replicas.
 Unlike optional quote checkpoints, event Redis is required and startup fails
 unless `appendonly=yes` and `appendfsync=always`. Use persistent storage,
 `maxmemory-policy=noeviction`, capacity alerts, and tested restore procedures.
+The durable stream and fork journal contract is defined in
+[durable event delivery](EVENT_DELIVERY.md).
 
 ## Start
 
@@ -88,6 +90,12 @@ the cursor block inclusively. Stable event IDs make an ambiguous write or
 inclusive replay idempotent inside the worker. Downstream consumers must also
 deduplicate by `eventId`, reclaim abandoned pending entries with `XAUTOCLAIM`,
 and `XACK` only after their own side effect commits.
+
+For fork-aware delivery, consumers switch to the v2 contract in
+[EVENT_DELIVERY.md](EVENT_DELIVERY.md). A reorg is complete only after the
+matching `recordType=reorg, operation=commit` entry. A terminal gap means live
+materialization for that deployment must stop until the consumer is rebuilt
+from a chosen canonical block.
 
 ## Graceful shutdown
 

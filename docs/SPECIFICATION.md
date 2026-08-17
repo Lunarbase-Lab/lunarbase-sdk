@@ -148,6 +148,8 @@ restart but does not change the state of a running ready process.
 ## Guarantees
 
 - Quote math performs no network or persistence access.
+- Durable event delivery is a separate worker contract documented in
+  [EVENT_DELIVERY.md](EVENT_DELIVERY.md) and is not part of quote evaluation.
 - Rust and TypeScript use the same deterministic compatibility vectors.
 - A successful batch is evaluated from one state position.
 - The runtime fails closed when source continuity or deployment identity is

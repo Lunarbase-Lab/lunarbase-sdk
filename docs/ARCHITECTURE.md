@@ -53,6 +53,11 @@ queues do not share quote request execution. A slow Redis instance makes the
 event worker unready and eventually backpressures its own source instead of
 discarding accepted events.
 
+The fork-aware v2 event contract keeps raw payloads in the Redis Stream and
+stores only Stream-ID references in the non-finalized branch journal. See
+[durable event delivery](EVENT_DELIVERY.md) for lifecycle, reorganization, and
+consumer semantics.
+
 ## Consistency and recovery
 
 The client rejects cross-chain updates, cursor regressions, conflicting block
@@ -90,6 +95,8 @@ The event worker has its own readiness and resource limits. Its Redis Stream,
 stable event-ID registry, and monotonic cursor are updated atomically. Redis
 must use AOF with `appendfsync always`; downstream processors acknowledge
 consumer-group entries only after idempotent side effects commit.
+Fork-aware event delivery, lifecycle IDs, and Redis journal pruning are defined
+in [EVENT_DELIVERY.md](EVENT_DELIVERY.md).
 
 ## Verification
 
