@@ -1,5 +1,5 @@
 import { parseAddress, type Address } from "@lunarbase-lab/pmm-v2-math";
-import type { ChainCursor, ContractLog } from "@lunarbase-lab/pmm-v2-client";
+import type { BlockRef, ChainCursor, ContractLog } from "@lunarbase-lab/pmm-v2-client";
 import * as Hex from "ox/Hex";
 import { formatLog, type RpcLog } from "viem";
 import { RpcError } from "./error.js";
@@ -52,6 +52,28 @@ export function normalizeViemLog(
       logIndex: parseNormalizedLogIndex(log.logIndex, "log.logIndex"),
       commitment,
     },
+  };
+}
+
+/** Normalizes one exact-hash viem block response for bounded fork walking. */
+export function normalizeViemBlockRef(
+  block: { readonly number: bigint | null; readonly hash: unknown; readonly parentHash: unknown },
+  expectedHash: Hex.Hex,
+  chainId: bigint,
+  commitment: ChainCursor["commitment"],
+): BlockRef {
+  if (block.number === null) throw new RpcError("INVALID", "eth_getBlockByHash returned a pending block");
+  const blockHash = parseHash(block.hash, "block.hash");
+  if (blockHash !== expectedHash) throw new RpcError("INVALID", "block hash response mismatch");
+  return {
+    cursor: {
+      chainId,
+      blockNumber: block.number,
+      executionBlockNumber: block.number,
+      blockHash,
+      commitment,
+    },
+    parentHash: parseHash(block.parentHash, "block.parentHash"),
   };
 }
 

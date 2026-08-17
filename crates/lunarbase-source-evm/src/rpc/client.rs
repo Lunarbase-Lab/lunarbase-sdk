@@ -256,6 +256,20 @@ impl RpcHttpClient {
         normalize_block_ref(&value, chain_id, commitment, false)
     }
 
+    /// Resolves block identity and parent linkage by an exact block hash.
+    ///
+    /// This method is intended for rare fork resolution. Normal head and log
+    /// ingestion never performs a per-update HTTP lookup.
+    pub async fn block_ref_by_hash(
+        &self,
+        block_hash: B256,
+        chain_id: u64,
+        commitment: Commitment,
+    ) -> Result<BlockRef, RpcError> {
+        self.block_ref_by_hash_inner(block_hash, chain_id, commitment, false)
+            .await
+    }
+
     /// Resolves a block cursor only from an exact response with explicit execution context.
     pub async fn block_cursor_with_execution_context(
         &self,
@@ -277,17 +291,29 @@ impl RpcHttpClient {
         chain_id: u64,
         commitment: Commitment,
     ) -> Result<ChainCursor, RpcError> {
+        self.block_ref_by_hash_inner(block_hash, chain_id, commitment, true)
+            .await
+            .map(|block| block.cursor)
+    }
+
+    async fn block_ref_by_hash_inner(
+        &self,
+        block_hash: B256,
+        chain_id: u64,
+        commitment: Commitment,
+        require_execution_context: bool,
+    ) -> Result<BlockRef, RpcError> {
         let hash = format!("{block_hash:#x}");
         let result: Value = self.request("eth_getBlockByHash", (&hash, false)).await?;
-        validate_canonical_hex_u64(result.get("number"), "block.number")?;
-        validate_canonical_hex_u64(result.get("l1BlockNumber"), "block.l1BlockNumber")?;
-        let cursor = normalize_block_cursor(&result, chain_id, commitment, true)?;
-        if cursor.block_hash != Some(block_hash) {
-            return Err(RpcError::Invalid(
-                "execution-context block hash mismatch".into(),
-            ));
+        if require_execution_context {
+            validate_canonical_hex_u64(result.get("number"), "block.number")?;
+            validate_canonical_hex_u64(result.get("l1BlockNumber"), "block.l1BlockNumber")?;
         }
-        Ok(cursor)
+        let block = normalize_block_ref(&result, chain_id, commitment, require_execution_context)?;
+        if block.cursor.block_hash != Some(block_hash) {
+            return Err(RpcError::Invalid("block hash response mismatch".into()));
+        }
+        Ok(block)
     }
 
     async fn block_cursor_inner(

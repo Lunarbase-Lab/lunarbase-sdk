@@ -6,6 +6,7 @@ use lunarbase_client::model::{
     SourceError,
 };
 use lunarbase_client::protocol::proxy::{ERC1967_IMPLEMENTATION_SLOT, decode_implementation};
+use lunarbase_math::B256;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -241,6 +242,22 @@ impl RpcHttpBackend {
         };
         self.rpc
             .get_logs(&request, self.chain_id, commitment)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Resolves one exact block hash after verifying the HTTP chain identity.
+    ///
+    /// Fork walkers share this backend with subscription setup, so the common
+    /// case is only the lock-free verified-session check.
+    pub async fn block_ref_by_hash(
+        &self,
+        block_hash: B256,
+        commitment: Commitment,
+    ) -> Result<BlockRef, SourceError> {
+        self.ensure_chain_id().await?;
+        self.rpc
+            .block_ref_by_hash(block_hash, self.chain_id, commitment)
             .await
             .map_err(Into::into)
     }

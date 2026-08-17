@@ -25,6 +25,7 @@ import {
   ownContractFilter,
   ownDeploymentConfig,
   type BackfillRequest,
+  type BlockRef,
   type BootstrapSnapshot,
   type ChainCursor,
   type Checkpoint,
@@ -35,7 +36,7 @@ import {
 import { RpcError } from "./rpc/error.js";
 import { DEFAULT_HTTP_RPC_LIMITS, boundedFetcher, validateHttpLimits, type HttpRpcLimits } from "./rpc/http_limits.js";
 import { ChainVerification } from "./rpc/identity.js";
-import { normalizeViemLog, parseHash, parseHexU64 } from "./rpc/log.js";
+import { normalizeViemBlockRef, normalizeViemLog, parseHash, parseHexU64 } from "./rpc/log.js";
 
 export { RpcError };
 export { DEFAULT_HTTP_RPC_LIMITS, type HttpRpcLimits } from "./rpc/http_limits.js";
@@ -162,6 +163,20 @@ export class JsonRpcHttpClient {
       blockHash: block.hash ?? undefined,
       commitment,
     };
+  }
+
+  /**
+   * Resolves one exact block hash with parent linkage.
+   *
+   * Durable fork resolution uses this only after a parent discontinuity;
+   * normal head and log ingestion performs no auxiliary HTTP lookup.
+   */
+  async blockRefByHash(blockHash: Hex.Hex, chainId: bigint, commitment: ChainCursor["commitment"]): Promise<BlockRef> {
+    const expectedHash = parseHash(blockHash, "requested block hash");
+    const block = await this.remote(() =>
+      this.client.getBlock({ blockHash: expectedHash, includeTransactions: false }),
+    );
+    return normalizeViemBlockRef(block, expectedHash, chainId, commitment);
   }
 
   private async strictExecutionBlockCursor(
@@ -333,6 +348,12 @@ export class RpcHttpBackend {
     const ownedRequest = ownBackfillRequest(request);
     await this.ensureChainId();
     return this.rpc.getLogs(ownedRequest, this.chainId, CommitmentValue.Canonical);
+  }
+
+  /** Resolves one exact block hash after verifying HTTP chain identity. */
+  async blockRefByHash(blockHash: Hex.Hex, commitment: ChainCursor["commitment"]): Promise<BlockRef> {
+    await this.ensureChainId();
+    return this.rpc.blockRefByHash(blockHash, this.chainId, commitment);
   }
 
   /** Confirms checkpoint canonicality and the ERC-1967 implementation identity. */
