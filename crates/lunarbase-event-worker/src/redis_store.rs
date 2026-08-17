@@ -1,14 +1,19 @@
 //! Persistent Redis Stream writer isolated from the asynchronous source runtime.
 
+#[path = "redis_store/commands.rs"]
+mod commands;
+
 use crate::{
-    event::{DurableEvent, EventError, STREAM_SCHEMA_VERSION, decode_cursor},
+    event::{
+        DurableEvent, DurableHead, EventError, STREAM_SCHEMA_VERSION, commitment_name,
+        decode_cursor,
+    },
     metrics::Metrics,
 };
 use alloy_primitives::Address;
-use lunarbase_client::model::ChainCursor;
+use lunarbase_client::model::{ChainCursor, Commitment};
 use redis::Connection;
 use std::{
-    collections::HashMap,
     sync::Arc,
     thread::{self, JoinHandle},
     time::Duration,
@@ -16,28 +21,29 @@ use std::{
 use thiserror::Error;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 
-const APPEND_EVENT_LUA: &str = r#"
-local existing = redis.call('HGET', KEYS[4], ARGV[1])
-if existing then
-  return {existing, 0}
-end
-local stream_id = redis.call('XADD', KEYS[1], '*', unpack(ARGV, 4))
-redis.call('HSET', KEYS[4], ARGV[1], stream_id)
-local current_order = redis.call('GET', KEYS[3])
-if (not current_order) or ARGV[3] >= current_order then
-  redis.call('SET', KEYS[2], ARGV[2])
-  redis.call('SET', KEYS[3], ARGV[3])
-end
-return {stream_id, 1}
-"#;
-
 #[derive(Clone, Debug)]
 pub(crate) struct RedisKeys {
     pub stream: String,
     pub cursor: String,
     cursor_order: String,
-    event_ids: String,
+    resume: String,
+    record_ids: String,
+    log_state: String,
+    headers: String,
+    canonical_height: String,
+    canonical_head: String,
+    finalized_head: String,
+    reorg_manifest: String,
+    journal_usage: String,
     metadata: String,
+    block_prefix: String,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RedisDeployment {
+    pub chain_id: u64,
+    pub core: Address,
+    pub delivery_mode: Commitment,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -54,9 +60,22 @@ impl RedisKeys {
             stream: format!("{prefix}:stream"),
             cursor: format!("{prefix}:cursor"),
             cursor_order: format!("{prefix}:cursor-order"),
-            event_ids: format!("{prefix}:event-ids"),
+            resume: format!("{prefix}:resume"),
+            record_ids: format!("{prefix}:record-ids"),
+            log_state: format!("{prefix}:log-state"),
+            headers: format!("{prefix}:headers"),
+            canonical_height: format!("{prefix}:canonical-height"),
+            canonical_head: format!("{prefix}:canonical-head"),
+            finalized_head: format!("{prefix}:finalized-head"),
+            reorg_manifest: format!("{prefix}:reorg-manifest"),
+            journal_usage: format!("{prefix}:journal-usage"),
             metadata: format!("{prefix}:metadata"),
+            block_prefix: format!("{prefix}:block:"),
         }
+    }
+
+    pub(crate) fn block_logs(&self, block_hash: &str) -> String {
+        format!("{}{block_hash}:logs", self.block_prefix)
     }
 }
 
@@ -72,6 +91,8 @@ pub(crate) enum StoreError {
     Redis(String),
     #[error("Redis durability configuration: {0}")]
     Durability(String),
+    #[error("Redis journal invariant: {0}")]
+    Journal(String),
     #[error(transparent)]
     Event(#[from] EventError),
     #[error("Redis writer stopped")]
@@ -104,7 +125,8 @@ pub(crate) struct RedisWriter {
 enum Operation {
     Initialize,
     LoadCursor,
-    Append(Arc<DurableEvent>),
+    AppendEvent(Arc<DurableEvent>),
+    AppendHead(Arc<DurableHead>),
 }
 
 enum Response {
@@ -133,6 +155,8 @@ struct BlockingStore {
     connection: Option<Connection>,
     initialized: bool,
     keys: Arc<RedisKeys>,
+    metadata: commands::DeploymentMetadata,
+    script: redis::Script,
     group: String,
     timeout: Duration,
 }
@@ -142,14 +166,23 @@ impl RedisEventStore {
         url: String,
         namespace: &str,
         group: String,
-        chain_id: u64,
-        core: Address,
+        deployment: RedisDeployment,
         timeout: Duration,
         queue_limits: RedisQueueLimits,
         metrics: Arc<Metrics>,
     ) -> Result<(Self, RedisWriter), StoreError> {
         let client = redis::Client::open(url).map_err(redis_error)?;
-        let keys = Arc::new(RedisKeys::new(namespace, chain_id, core));
+        let keys = Arc::new(RedisKeys::new(
+            namespace,
+            deployment.chain_id,
+            deployment.core,
+        ));
+        let metadata = commands::DeploymentMetadata::new(
+            deployment.chain_id,
+            deployment.core,
+            commitment_name(deployment.delivery_mode),
+        );
+        let script = commands::script();
         let (sender, receiver) = mpsc::channel(queue_limits.capacity);
         let byte_budget = Arc::new(Semaphore::new(queue_limits.byte_capacity));
         let worker_keys = keys.clone();
@@ -161,6 +194,8 @@ impl RedisEventStore {
                     connection: None,
                     initialized: false,
                     keys: worker_keys,
+                    metadata,
+                    script,
                     group,
                     timeout,
                 }
@@ -204,11 +239,21 @@ impl RedisEventStore {
         }
     }
 
-    pub(crate) async fn append(
+    pub(crate) async fn append_event(
         &self,
         event: Arc<DurableEvent>,
     ) -> Result<AppendOutcome, StoreError> {
-        match self.request(Operation::Append(event)).await? {
+        match self.request(Operation::AppendEvent(event)).await? {
+            Response::Appended(outcome) => Ok(outcome),
+            _ => Err(StoreError::ChannelClosed),
+        }
+    }
+
+    pub(crate) async fn append_head(
+        &self,
+        head: Arc<DurableHead>,
+    ) -> Result<AppendOutcome, StoreError> {
+        match self.request(Operation::AppendHead(head)).await? {
             Response::Appended(outcome) => Ok(outcome),
             _ => Err(StoreError::ChannelClosed),
         }
@@ -290,7 +335,13 @@ impl BlockingStore {
         self.connect()?;
         let connection = self.connection.as_mut().ok_or(StoreError::ChannelClosed)?;
         if !self.initialized {
-            initialize(connection, &self.keys, &self.group)?;
+            commands::initialize(
+                connection,
+                &self.keys,
+                &self.group,
+                &self.metadata,
+                &self.script,
+            )?;
             self.initialized = true;
         }
         match operation {
@@ -300,8 +351,13 @@ impl BlockingStore {
                 .query::<Option<Vec<u8>>>(connection)
                 .map(Response::Cursor)
                 .map_err(redis_error),
-            Operation::Append(event) => {
-                append(connection, &self.keys, &event).map(Response::Appended)
+            Operation::AppendEvent(event) => {
+                commands::append_event(connection, &self.keys, &self.metadata, &self.script, &event)
+                    .map(Response::Appended)
+            }
+            Operation::AppendHead(head) => {
+                commands::append_head(connection, &self.keys, &self.metadata, &self.script, &head)
+                    .map(Response::Appended)
             }
         }
     }
@@ -329,106 +385,20 @@ impl BlockingStore {
 impl Operation {
     fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>().saturating_add(match self {
-            Self::Append(event) => event.retained_bytes(),
+            Self::AppendEvent(event) => event.retained_bytes(),
+            Self::AppendHead(head) => head.retained_bytes(),
             Self::Initialize | Self::LoadCursor => 0,
         })
     }
 }
 
-fn initialize(
-    connection: &mut Connection,
-    keys: &RedisKeys,
-    group: &str,
-) -> Result<(), StoreError> {
-    redis::cmd("PING")
-        .query::<String>(connection)
-        .map_err(redis_error)?;
-    verify_durability(connection)?;
-    let schema = redis::cmd("HGET")
-        .arg(&keys.metadata)
-        .arg("schemaVersion")
-        .query::<Option<String>>(connection)
-        .map_err(redis_error)?;
-    match schema {
-        Some(version) if version != STREAM_SCHEMA_VERSION.to_string() => {
-            return Err(StoreError::Durability(format!(
-                "stream schema v{version} cannot be opened as v{STREAM_SCHEMA_VERSION}"
-            )));
-        }
-        None => {
-            redis::cmd("HSET")
-                .arg(&keys.metadata)
-                .arg("schemaVersion")
-                .arg(STREAM_SCHEMA_VERSION)
-                .query::<usize>(connection)
-                .map_err(redis_error)?;
-        }
-        Some(_) => {}
-    }
-    match redis::cmd("XGROUP")
-        .arg("CREATE")
-        .arg(&keys.stream)
-        .arg(group)
-        .arg("0-0")
-        .arg("MKSTREAM")
-        .query::<String>(connection)
-    {
-        Ok(_) => Ok(()),
-        Err(error) if error.to_string().contains("BUSYGROUP") => Ok(()),
-        Err(error) => Err(redis_error(error)),
-    }
-}
-
-fn verify_durability(connection: &mut Connection) -> Result<(), StoreError> {
-    let values = redis::cmd("CONFIG")
-        .arg("GET")
-        .arg("append*")
-        .query::<Vec<String>>(connection)
-        .map_err(redis_error)?;
-    let config = values
-        .chunks_exact(2)
-        .map(|entry| (entry[0].to_ascii_lowercase(), entry[1].to_ascii_lowercase()))
-        .collect::<HashMap<_, _>>();
-    if config.get("appendonly").map(String::as_str) != Some("yes")
-        || config.get("appendfsync").map(String::as_str) != Some("always")
-    {
-        return Err(StoreError::Durability(
-            "require appendonly=yes and appendfsync=always".into(),
-        ));
-    }
-    Ok(())
-}
-
-fn append(
-    connection: &mut Connection,
-    keys: &RedisKeys,
-    event: &DurableEvent,
-) -> Result<AppendOutcome, StoreError> {
-    let mut command = redis::cmd("EVAL");
-    command
-        .arg(APPEND_EVENT_LUA)
-        .arg(4)
-        .arg(&keys.stream)
-        .arg(&keys.cursor)
-        .arg(&keys.cursor_order)
-        .arg(&keys.event_ids)
-        .arg(&event.event_id)
-        .arg(&event.cursor_json)
-        .arg(&event.cursor_order);
-    for (name, value) in &event.fields {
-        command.arg(name).arg(value);
-    }
-    let (stream_id, appended) = command
-        .query::<(String, i64)>(connection)
-        .map_err(redis_error)?;
-    Ok(AppendOutcome {
-        stream_id,
-        appended: appended == 1,
-    })
-}
-
 fn redis_error(error: redis::RedisError) -> StoreError {
-    StoreError::Redis(error.to_string())
+    let detail = error.to_string();
+    if detail.contains("LUNARBASE_") {
+        StoreError::Journal(detail)
+    } else {
+        StoreError::Redis(detail)
+    }
 }
 
 #[cfg(test)]

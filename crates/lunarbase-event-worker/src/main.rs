@@ -12,7 +12,7 @@ mod source;
 use clap::Parser;
 use config::Cli;
 use metrics::Metrics;
-use redis_store::{RedisEventStore, RedisQueueLimits, RedisWriter};
+use redis_store::{RedisDeployment, RedisEventStore, RedisQueueLimits, RedisWriter};
 use std::{error::Error, sync::Arc, time::Instant};
 use tokio::{
     sync::watch,
@@ -42,8 +42,11 @@ async fn run() -> Result<(), Box<dyn Error>> {
         config.redis_url.clone(),
         &config.redis_namespace,
         config.consumer_group.clone(),
-        config.chain_id,
-        config.core,
+        RedisDeployment {
+            chain_id: config.chain_id,
+            core: config.core,
+            delivery_mode: config.minimum_commitment,
+        },
         config.redis_timeout,
         RedisQueueLimits {
             capacity: config.redis_queue_bound,

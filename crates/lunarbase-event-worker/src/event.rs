@@ -1,19 +1,35 @@
-//! Versioned Redis Stream representation of one raw Core contract log.
+//! Versioned Redis Stream and block-journal representations.
 
-use alloy_primitives::{Address, keccak256};
-use lunarbase_client::model::{ChainCursor, Commitment, ContractLog};
-use lunarbase_client::protocol::abi::describe_core_event;
+use alloy_primitives::{Address, B256, keccak256};
+use lunarbase_client::model::{BlockRef, ChainCursor, Commitment, ContractLog};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub(crate) const STREAM_SCHEMA_VERSION: u16 = 1;
+pub(crate) const STREAM_SCHEMA_VERSION: u16 = 2;
+pub(crate) const ID_DOMAIN_VERSION: &str = "lunarbase-durable-v2";
+
+const LOG_ID_DOMAIN: &[u8] = b"lunarbase-durable-log-v2";
+const RECORD_ID_DOMAIN: &[u8] = b"lunarbase-durable-record-v2";
 
 #[derive(Clone, Debug)]
 pub(crate) struct DurableEvent {
-    pub event_id: String,
+    pub record_id: String,
+    pub logical_log_id: String,
+    pub block_hash: String,
     pub cursor_json: String,
     pub cursor_order: String,
     pub fields: Vec<(&'static str, String)>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DurableHead {
+    pub header_json: String,
+    pub block_hash: String,
+    pub parent_hash: String,
+    pub block_number: String,
+    pub commitment: &'static str,
+    pub cursor_json: String,
+    pub cursor_order: String,
 }
 
 #[derive(Debug, Error)]
@@ -22,6 +38,10 @@ pub(crate) enum EventError {
     Json(#[from] serde_json::Error),
     #[error("durable cursor belongs to another deployment")]
     CursorIdentity,
+    #[error("durable log has no stable EVM identity: {0}")]
+    StableIdentity(&'static str),
+    #[error("durable head has incomplete block identity")]
+    HeadIdentity,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -33,10 +53,30 @@ struct CursorEnvelope {
     cursor: ChainCursor,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HeaderEnvelope {
+    schema_version: u16,
+    chain_id: u64,
+    block_number: u64,
+    execution_block_number: u64,
+    block_hash: B256,
+    parent_hash: B256,
+}
+
+struct StableLogIdentity {
+    block_hash: B256,
+    transaction_hash: B256,
+    transaction_index: u32,
+    log_index: u32,
+}
+
 impl DurableEvent {
     pub(crate) fn retained_bytes(&self) -> usize {
-        self.event_id
+        self.record_id
             .len()
+            .saturating_add(self.logical_log_id.len())
+            .saturating_add(self.block_hash.len())
             .saturating_add(self.cursor_json.len())
             .saturating_add(self.cursor_order.len())
             .saturating_add(self.fields.iter().fold(0_usize, |total, (name, value)| {
@@ -45,55 +85,105 @@ impl DurableEvent {
             .saturating_add(std::mem::size_of::<Self>())
     }
 
+    pub(crate) fn journal_reference_bytes(&self) -> usize {
+        self.cursor_order
+            .len()
+            .saturating_add(self.logical_log_id.len())
+            .saturating_add(self.record_id.len())
+            .saturating_add(32)
+            .saturating_add(3)
+    }
+
     pub(crate) fn from_log(log: &ContractLog) -> Result<Self, EventError> {
-        let event_id = core_event_id(log);
-        let operation = if log.removed { "removed" } else { "applied" };
-        let (event_name, arguments, decode_error) = match describe_core_event(log) {
-            Ok(Some(description)) => (description.name, description.arguments, String::new()),
-            Ok(None) => ("Unknown", String::new(), String::new()),
-            Err(error) => ("Malformed", String::new(), error.to_string()),
-        };
-        let cursor_json = encode_cursor(&log.cursor, log.address)?;
-        let fields = vec![
-            ("schemaVersion", STREAM_SCHEMA_VERSION.to_string()),
-            ("eventId", event_id.clone()),
-            ("operation", operation.into()),
-            ("eventName", event_name.into()),
-            ("arguments", arguments),
-            ("decodeError", decode_error),
+        if log.removed {
+            return Err(EventError::StableIdentity(
+                "provider removals require resolved fork correction",
+            ));
+        }
+        if log.topics.is_empty() || log.topics.len() > 4 {
+            return Err(EventError::StableIdentity("topic0 is absent or invalid"));
+        }
+        let identity = stable_log_identity(log)?;
+        let logical_log_id = logical_log_id(log, &identity);
+        let record_id = origin_record_id(&logical_log_id);
+        let core = format!("{:#x}", log.address);
+        let cursor_json = encode_cursor(&log.cursor, &core)?;
+        let mut fields = Vec::with_capacity(12);
+        fields.extend([
             ("chainId", log.cursor.chain_id.to_string()),
-            ("core", format!("{:#x}", log.address)),
+            ("core", core),
+            ("commitment", commitment_name(log.cursor.commitment).into()),
             ("blockNumber", log.cursor.block_number.to_string()),
             (
                 "executionBlockNumber",
                 log.cursor.execution_block_number.to_string(),
             ),
-            ("blockHash", option_hash(log.cursor.block_hash)),
-            ("transactionHash", option_hash(log.transaction_hash)),
             (
-                "transactionIndex",
-                option_number(log.cursor.transaction_index),
+                "transactionHash",
+                format!("{:#x}", identity.transaction_hash),
             ),
-            ("logIndex", option_number(log.cursor.log_index)),
-            ("sourceSequence", option_number(log.cursor.source_sequence)),
-            ("sourceSubIndex", option_number(log.cursor.source_sub_index)),
-            ("commitment", commitment_name(log.cursor.commitment).into()),
-            ("removed", log.removed.to_string()),
-            (
-                "topic0",
-                log.topics
-                    .first()
-                    .map_or_else(String::new, |topic| format!("{topic:#x}")),
-            ),
+            ("transactionIndex", identity.transaction_index.to_string()),
+            ("logIndex", identity.log_index.to_string()),
+        ]);
+        if let Some(sequence) = log.cursor.source_sequence {
+            fields.push(("sourceSequence", sequence.to_string()));
+        }
+        if let Some(sub_index) = log.cursor.source_sub_index {
+            fields.push(("sourceSubIndex", sub_index.to_string()));
+        }
+        fields.extend([
             ("topics", serde_json::to_string(&log.topics)?),
             ("data", format!("{:#x}", log.data)),
-            ("rawLog", serde_json::to_string(log)?),
-        ];
+        ]);
+        let cursor_order = cursor_order(&log.cursor);
         Ok(Self {
-            event_id,
+            record_id,
+            logical_log_id,
+            block_hash: format!("{:#x}", identity.block_hash),
             cursor_json,
-            cursor_order: cursor_order(&log.cursor),
+            cursor_order,
             fields,
+        })
+    }
+}
+
+impl DurableHead {
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.header_json
+            .len()
+            .saturating_add(self.block_hash.len())
+            .saturating_add(self.parent_hash.len())
+            .saturating_add(self.block_number.len())
+            .saturating_add(self.cursor_json.len())
+            .saturating_add(self.cursor_order.len())
+            .saturating_add(std::mem::size_of::<Self>())
+    }
+
+    pub(crate) fn from_block(block: &BlockRef, core: Address) -> Result<Self, EventError> {
+        let block_hash = block.cursor.block_hash.ok_or(EventError::HeadIdentity)?;
+        let parent_hash = block.parent_hash.ok_or(EventError::HeadIdentity)?;
+        if block_hash == B256::ZERO
+            || block.cursor.transaction_index.is_some()
+            || block.cursor.log_index.is_some()
+        {
+            return Err(EventError::HeadIdentity);
+        }
+        let header_json = serde_json::to_string(&HeaderEnvelope {
+            schema_version: STREAM_SCHEMA_VERSION,
+            chain_id: block.cursor.chain_id,
+            block_number: block.cursor.block_number,
+            execution_block_number: block.cursor.execution_block_number,
+            block_hash,
+            parent_hash,
+        })?;
+        Ok(Self {
+            header_json,
+            block_hash: format!("{block_hash:#x}"),
+            parent_hash: format!("{parent_hash:#x}"),
+            block_number: block.cursor.block_number.to_string(),
+            commitment: commitment_name(block.cursor.commitment),
+            cursor_json: encode_cursor(&block.cursor, &format!("{core:#x}"))?,
+            cursor_order: cursor_order(&block.cursor),
         })
     }
 }
@@ -114,13 +204,98 @@ pub(crate) fn decode_cursor(
     Ok(envelope.cursor)
 }
 
-fn encode_cursor(cursor: &ChainCursor, core: Address) -> Result<String, serde_json::Error> {
-    serde_json::to_string(&CursorEnvelope {
+fn encode_cursor(cursor: &ChainCursor, core: &str) -> Result<String, serde_json::Error> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct BorrowedCursor<'a> {
+        schema_version: u16,
+        chain_id: u64,
+        core: &'a str,
+        cursor: &'a ChainCursor,
+    }
+
+    serde_json::to_string(&BorrowedCursor {
         schema_version: STREAM_SCHEMA_VERSION,
         chain_id: cursor.chain_id,
-        core: format!("{core:#x}"),
-        cursor: cursor.clone(),
+        core,
+        cursor,
     })
+}
+
+fn stable_log_identity(log: &ContractLog) -> Result<StableLogIdentity, EventError> {
+    let block_hash = log
+        .cursor
+        .block_hash
+        .filter(|hash| *hash != B256::ZERO)
+        .ok_or(EventError::StableIdentity("block hash is absent"))?;
+    let transaction_hash = log
+        .transaction_hash
+        .filter(|hash| *hash != B256::ZERO)
+        .ok_or(EventError::StableIdentity("transaction hash is absent"))?;
+    let transaction_index = log
+        .cursor
+        .transaction_index
+        .ok_or(EventError::StableIdentity("transaction index is absent"))?;
+    let log_index = log
+        .cursor
+        .log_index
+        .ok_or(EventError::StableIdentity("log index is absent"))?;
+    Ok(StableLogIdentity {
+        block_hash,
+        transaction_hash,
+        transaction_index,
+        log_index,
+    })
+}
+
+fn logical_log_id(log: &ContractLog, identity: &StableLogIdentity) -> String {
+    let mut preimage = [0_u8; LOG_ID_DOMAIN.len() + 100];
+    let mut offset = 0;
+    append_bytes(&mut preimage, &mut offset, LOG_ID_DOMAIN);
+    append_bytes(
+        &mut preimage,
+        &mut offset,
+        &log.cursor.chain_id.to_be_bytes(),
+    );
+    append_bytes(&mut preimage, &mut offset, log.address.as_slice());
+    append_bytes(&mut preimage, &mut offset, identity.block_hash.as_slice());
+    append_bytes(
+        &mut preimage,
+        &mut offset,
+        identity.transaction_hash.as_slice(),
+    );
+    append_bytes(
+        &mut preimage,
+        &mut offset,
+        &identity.transaction_index.to_be_bytes(),
+    );
+    append_bytes(
+        &mut preimage,
+        &mut offset,
+        &identity.log_index.to_be_bytes(),
+    );
+    debug_assert_eq!(offset, preimage.len());
+    encode_id(keccak256(preimage))
+}
+
+fn origin_record_id(logical_log_id: &str) -> String {
+    let mut preimage = [0_u8; RECORD_ID_DOMAIN.len() + 69 + 6];
+    let mut offset = 0;
+    append_bytes(&mut preimage, &mut offset, RECORD_ID_DOMAIN);
+    append_bytes(&mut preimage, &mut offset, logical_log_id.as_bytes());
+    append_bytes(&mut preimage, &mut offset, b"origin");
+    debug_assert_eq!(offset, preimage.len());
+    encode_id(keccak256(preimage))
+}
+
+fn append_bytes(target: &mut [u8], offset: &mut usize, value: &[u8]) {
+    let end = offset.saturating_add(value.len());
+    target[*offset..end].copy_from_slice(value);
+    *offset = end;
+}
+
+fn encode_id(digest: B256) -> String {
+    format!("v2:{digest:#x}")
 }
 
 fn cursor_order(cursor: &ChainCursor) -> String {
@@ -128,76 +303,7 @@ fn cursor_order(cursor: &ChainCursor) -> String {
     format!("{block:020}:{transaction:010}:{log:010}:{sequence:020}:{sub_index:010}")
 }
 
-pub(crate) fn core_event_id(log: &ContractLog) -> String {
-    let stable_position = log.cursor.log_index.is_some()
-        && (log.transaction_hash.is_some() || log.cursor.transaction_index.is_some());
-    let fallback_bytes = if stable_position {
-        0
-    } else {
-        log.topics.len() * 32 + log.data.len()
-    };
-    let mut preimage = Vec::with_capacity(192 + fallback_bytes);
-    preimage.extend_from_slice(b"lunarbase-core-event-v2");
-    preimage.extend_from_slice(&log.cursor.chain_id.to_be_bytes());
-    preimage.extend_from_slice(&log.cursor.block_number.to_be_bytes());
-    push_optional_hash(&mut preimage, log.cursor.block_hash);
-    push_optional_hash(&mut preimage, log.transaction_hash);
-    push_optional_u32(&mut preimage, log.cursor.transaction_index);
-    push_optional_u32(&mut preimage, log.cursor.log_index);
-    preimage.extend_from_slice(log.address.as_slice());
-    preimage.push(u8::from(log.removed));
-    if !stable_position {
-        push_optional_u64(&mut preimage, log.cursor.source_sequence);
-        push_optional_u32(&mut preimage, log.cursor.source_sub_index);
-        preimage.extend_from_slice(&(log.topics.len() as u64).to_be_bytes());
-        for topic in &log.topics {
-            preimage.extend_from_slice(topic.as_slice());
-        }
-        preimage.extend_from_slice(&(log.data.len() as u64).to_be_bytes());
-        preimage.extend_from_slice(&log.data);
-    }
-    format!("v2:{:#x}", keccak256(preimage))
-}
-
-fn push_optional_hash(payload: &mut Vec<u8>, value: Option<alloy_primitives::B256>) {
-    match value {
-        Some(value) => {
-            payload.push(1);
-            payload.extend_from_slice(value.as_slice());
-        }
-        None => payload.push(0),
-    }
-}
-
-fn push_optional_u32(payload: &mut Vec<u8>, value: Option<u32>) {
-    match value {
-        Some(value) => {
-            payload.push(1);
-            payload.extend_from_slice(&value.to_be_bytes());
-        }
-        None => payload.push(0),
-    }
-}
-
-fn push_optional_u64(payload: &mut Vec<u8>, value: Option<u64>) {
-    match value {
-        Some(value) => {
-            payload.push(1);
-            payload.extend_from_slice(&value.to_be_bytes());
-        }
-        None => payload.push(0),
-    }
-}
-
-fn option_hash(value: Option<alloy_primitives::B256>) -> String {
-    value.map_or_else(String::new, |hash| format!("{hash:#x}"))
-}
-
-fn option_number<T: std::fmt::Display>(value: Option<T>) -> String {
-    value.map_or_else(String::new, |number| number.to_string())
-}
-
-fn commitment_name(commitment: Commitment) -> &'static str {
+pub(crate) const fn commitment_name(commitment: Commitment) -> &'static str {
     match commitment {
         Commitment::Realtime => "realtime",
         Commitment::Canonical => "block-ordered",
@@ -207,60 +313,76 @@ fn commitment_name(commitment: Commitment) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{DurableEvent, core_event_id, decode_cursor};
+    use super::{DurableEvent, DurableHead, decode_cursor};
     use alloy_primitives::{Address, B256, Bytes};
-    use lunarbase_client::model::{ChainCursor, Commitment, ContractLog};
+    use lunarbase_client::model::{BlockRef, ChainCursor, Commitment, ContractLog};
 
     #[test]
-    fn stable_ids_distinguish_removal_and_fallback_payloads() {
-        let applied = log(false, None, 1);
-        let removed = log(true, None, 1);
-        let other_payload = log(false, None, 2);
-        assert_ne!(core_event_id(&applied), core_event_id(&removed));
-        assert_ne!(core_event_id(&applied), core_event_id(&other_payload));
-        assert_eq!(core_event_id(&applied).len(), 69);
+    fn logical_identity_is_operation_and_commitment_independent() {
+        let canonical = log(Commitment::Canonical, 1);
+        let mut realtime = canonical.clone();
+        realtime.cursor.commitment = Commitment::Realtime;
+        let canonical = DurableEvent::from_log(&canonical).unwrap();
+        let realtime = DurableEvent::from_log(&realtime).unwrap();
+        assert_eq!(canonical.logical_log_id, realtime.logical_log_id);
+        assert_eq!(canonical.record_id, realtime.record_id);
+        assert_eq!(canonical.logical_log_id.len(), 69);
     }
 
     #[test]
-    fn stable_ids_distinguish_absent_positions_from_zero() {
-        let absent = log(false, None, 1);
-        let mut zero = absent.clone();
-        zero.cursor.transaction_index = Some(0);
-        zero.cursor.log_index = Some(0);
-        assert_ne!(core_event_id(&absent), core_event_id(&zero));
-    }
-
-    #[test]
-    fn stream_event_round_trips_deployment_bound_cursor() {
-        let log = log(false, Some(3), 1);
+    fn schema_v2_omits_duplicate_payload_and_rejects_unstable_logs() {
+        let log = log(Commitment::Realtime, 1);
         let event = DurableEvent::from_log(&log).unwrap();
-        let cursor = decode_cursor(event.cursor_json.as_bytes(), 8453, log.address).unwrap();
-        assert_eq!(cursor, log.cursor);
-        assert!(
-            event
-                .fields
-                .iter()
-                .any(|(name, value)| { *name == "operation" && value == "applied" })
+        let names = event
+            .fields
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>();
+        assert!(!names.contains(&"rawLog"));
+        assert!(!names.contains(&"eventName"));
+        assert!(!names.contains(&"logicalLogId"));
+        assert_eq!(
+            decode_cursor(event.cursor_json.as_bytes(), 8453, log.address).unwrap(),
+            log.cursor
         );
+
+        let mut removed = log;
+        removed.removed = true;
+        assert!(DurableEvent::from_log(&removed).is_err());
     }
 
-    fn log(removed: bool, log_index: Option<u32>, payload: u8) -> ContractLog {
+    #[test]
+    fn head_journal_identity_excludes_commitment_promotion() {
+        let core = Address::new([4; 20]);
+        let block = BlockRef::new(
+            ChainCursor::block(8453, 41, Some(B256::new([2; 32])), Commitment::Canonical),
+            Some(B256::new([1; 32])),
+        );
+        let mut finalized = block.clone();
+        finalized.cursor.commitment = Commitment::Finalized;
+        let canonical = DurableHead::from_block(&block, core).unwrap();
+        let finalized = DurableHead::from_block(&finalized, core).unwrap();
+        assert_eq!(canonical.header_json, finalized.header_json);
+        assert_ne!(canonical.commitment, finalized.commitment);
+    }
+
+    fn log(commitment: Commitment, payload: u8) -> ContractLog {
         ContractLog {
             address: Address::new([4; 20]),
-            transaction_hash: log_index.map(|_| B256::new([3; 32])),
+            transaction_hash: Some(B256::new([3; 32])),
             topics: vec![B256::new([payload; 32])],
             data: Bytes::from(vec![payload; 64]),
-            removed,
+            removed: false,
             cursor: ChainCursor {
                 chain_id: 8453,
                 block_number: 41,
                 execution_block_number: 41,
                 block_hash: Some(B256::new([2; 32])),
-                transaction_index: log_index.map(|_| 2),
-                log_index,
+                transaction_index: Some(2),
+                log_index: Some(3),
                 source_sequence: Some(7),
                 source_sub_index: Some(1),
-                commitment: Commitment::Realtime,
+                commitment,
             },
         }
     }

@@ -34,7 +34,7 @@ lunarbase-source-arbitrum = { workspace = true, optional = true }
 lunarbase-source-evm = { workspace = true, optional = true }
 lunarbase-source-monad = { workspace = true, optional = true }
 lunarbase-source-monad-native = { workspace = true, optional = true }
-redis.workspace = true
+redis = { workspace = true, features = ["script", "streams"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

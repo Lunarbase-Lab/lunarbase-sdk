@@ -19,6 +19,7 @@ pub(crate) struct Metrics {
     redis_queue_byte_capacity: usize,
     persisted: AtomicU64,
     duplicates: AtomicU64,
+    journaled_headers: AtomicU64,
     redis_failures: AtomicU64,
     source_reconnects: AtomicU64,
     source_gaps: AtomicU64,
@@ -50,6 +51,7 @@ impl Metrics {
             redis_queue_byte_capacity,
             persisted: AtomicU64::new(0),
             duplicates: AtomicU64::new(0),
+            journaled_headers: AtomicU64::new(0),
             redis_failures: AtomicU64::new(0),
             source_reconnects: AtomicU64::new(0),
             source_gaps: AtomicU64::new(0),
@@ -106,6 +108,13 @@ impl Metrics {
         }
         self.redis_write_nanos
             .fetch_add(saturating_nanos(latency), Ordering::Relaxed);
+        self.last_persisted_block.store(block, Ordering::Relaxed);
+    }
+
+    pub(crate) fn header_journaled(&self, block: u64, duplicate: bool) {
+        if !duplicate {
+            self.journaled_headers.fetch_add(1, Ordering::Relaxed);
+        }
         self.last_persisted_block.store(block, Ordering::Relaxed);
     }
 
@@ -229,6 +238,11 @@ impl Metrics {
             &mut output,
             "lunarbase_event_worker_duplicates_total",
             duplicates,
+        );
+        counter(
+            &mut output,
+            "lunarbase_event_worker_journaled_headers_total",
+            self.journaled_headers.load(Ordering::Relaxed),
         );
         counter(
             &mut output,

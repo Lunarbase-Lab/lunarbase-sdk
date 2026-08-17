@@ -11,28 +11,33 @@ when Redis or a downstream consumer is slow: ingestion is backpressured and
 
 ## Durability contract
 
-Startup is fail-closed unless Redis reports both:
+Startup is fail-closed unless Redis reports all three settings:
 
 ```text
 appendonly yes
 appendfsync always
+maxmemory-policy noeviction
 ```
 
-Each Lua invocation atomically:
+The current wire format is schema v2. Each command uses a preloaded Lua script
+through `EVALSHA`; `NOSCRIPT` transparently reloads the same script. A normal
+log append atomically validates deployment metadata and canonical membership,
+deduplicates `recordId`, appends the Stream record, updates
+`logicalLogId` lifecycle state, writes a lightweight block-journal reference,
+and advances the recovery cursor. A block-head command atomically persists
+parent linkage, canonical-height mapping, canonical/finalized heads, and the
+cursor. No Redis read is required before a normal append.
 
-1. checks the stable event ID;
-2. appends a new Stream record when the ID has not been seen;
-3. records the ID for retry deduplication; and
-4. advances the deployment-bound recovery cursor monotonically.
+An ambiguous connection failure retries the same `recordId`. Redis therefore
+cannot expose a log without its deduplication, lifecycle, block reference, and
+cursor updates. Provider `removed` notifications are never persisted as a
+complete correction: they require resolved fork history. Until a fork is
+resolved, the worker fails closed and remains unready.
 
-An ambiguous connection failure retries the same stable ID. Redis therefore
-cannot expose an event without its dedup entry and cursor update. Applied and
-removed forms have different IDs and remain independently observable.
-
-Use a dedicated Redis resource with `maxmemory-policy noeviction`, persistent
-storage, capacity alerts, authentication, network isolation, and backups. The
-worker intentionally does not apply lossy `MAXLEN` trimming. Archive events
-and trim only behind the oldest required consumer-group position.
+Use a dedicated Redis resource with persistent storage, capacity alerts,
+authentication, network isolation, and backups. The worker intentionally does
+not apply lossy `MAXLEN` trimming. Archive events and trim only behind the
+oldest required consumer-group and fork-journal positions.
 
 ## Run
 
@@ -72,45 +77,35 @@ with `LUNARBASE_EVENT_SOURCE_QUEUE_BYTE_BOUND` and
 `LUNARBASE_EVENT_REDIS_QUEUE_BYTE_BOUND`. Saturation backpressures ingestion
 and revokes readiness. It never silently removes a required event.
 
-Schema v1 persists a provider retraction it receives as `operation=removed`
-before canonical recovery. Providers do not guarantee that every retracted log
-will arrive, so this is not a complete multi-log fork correction.
+The complete fork-aware contract is specified in
+[`docs/EVENT_DELIVERY.md`](../../docs/EVENT_DELIVERY.md).
 
-The fork-aware v2 contract is specified in
-[`docs/EVENT_DELIVERY.md`](../../docs/EVENT_DELIVERY.md). It separates
-immutable `logicalLogId` values from lifecycle `recordId` values and keeps
-reorganization manifests crash-resumable without copying raw log payloads into
-the branch journal. v1 remains the current wire format until the v2 migration
-is implemented.
+## Redis schema v2
 
-## Redis schema v1
+All keys share one Redis Cluster hash tag. The deployment has a Stream,
+metadata, cursor/resume state, record and lifecycle indexes, header and
+canonical-height journals, canonical/finalized heads, reorg state, usage
+accounting, and one lightweight log-reference list per retained block. Exact
+key names and retention invariants are documented in
+[`docs/EVENT_DELIVERY.md`](../../docs/EVENT_DELIVERY.md).
 
-All keys share one Redis Cluster hash tag:
+Every normal Stream entry contains:
 
-```text
-<namespace>:event:v1:{<chainId>:<core>}:stream
-<namespace>:event:v1:{<chainId>:<core>}:cursor
-<namespace>:event:v1:{<chainId>:<core>}:cursor-order
-<namespace>:event:v1:{<chainId>:<core>}:event-ids
-<namespace>:event:v1:{<chainId>:<core>}:metadata
-```
+- schema and identity: `schemaVersion`, `recordType`, `recordId`,
+  `logicalLogId`, `chainId`, and `core`;
+- lifecycle: `operation`, `lifecycleRevision`, and `commitment`;
+- stable EVM position: block/execution block, block/transaction hashes,
+  transaction/log indices, and optional source sequence/sub-index;
+- authoritative payload: `topics` and `data`.
 
-Every Stream entry contains:
-
-- schema and identity: `schemaVersion`, `eventId`, `chainId`, `core`;
-- lifecycle: `operation`, `commitment`, `removed`, `eventName`;
-- position: block/execution block, hashes, transaction/log indices, source
-  sequence and sub-index;
-- payload: `topic0`, `topics`, `data`, `rawLog`;
-- best-effort ABI description: `arguments` and `decodeError`.
-
-The raw log is authoritative. ABI formatting errors are stored, not used to
-discard the event.
+Schema v2 intentionally does not duplicate `rawLog`, `topic0`, decoded
+arguments, or ABI errors on the ingestion hot path. ABI enrichment belongs in
+an independent downstream consumer.
 
 ## Consumer groups
 
-The configured group is created from `0-0` with `MKSTREAM`. Consumers use the
-normal Redis at-least-once flow:
+The configured group is created from `0-0` with `MKSTREAM`. Consumers use
+the normal Redis at-least-once flow:
 
 ```text
 XREADGROUP GROUP lunarbase-processors consumer-1 BLOCK 5000 COUNT 100 \
@@ -119,5 +114,5 @@ XACK <stream-key> lunarbase-processors <stream-id>
 ```
 
 After a consumer crash, reclaim its pending entries with `XAUTOCLAIM`. A
-consumer must make its side effect idempotent by `eventId`, then acknowledge
-only after that side effect commits.
+consumer makes side effects idempotent by `recordId`, folds active membership
+by `logicalLogId`, and acknowledges only after its own transaction commits.

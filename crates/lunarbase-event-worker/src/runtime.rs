@@ -1,8 +1,10 @@
 //! Canonical recovery followed by at-least-once live event persistence.
 
+#[path = "runtime/persist.rs"]
+mod persist;
+
 use crate::{
     config::Config,
-    event::DurableEvent,
     metrics::Metrics,
     pump::{self, PumpRuntime, QueuedUpdate},
     redis_store::{RedisEventStore, StoreError},
@@ -14,7 +16,7 @@ use lunarbase_client::{
     },
     source::ChainDataSource,
 };
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 use thiserror::Error;
 use tokio::{
     sync::{mpsc, watch},
@@ -38,6 +40,8 @@ pub(crate) enum RuntimeError {
     RecoveryLog(String),
     #[error("source pump stopped unexpectedly")]
     PumpStopped,
+    #[error("fork correction must be resolved before durable recovery")]
+    ForkCorrectionRequired,
     #[cfg(not(all(
         feature = "evm",
         feature = "base",
@@ -220,7 +224,7 @@ async fn recover<S: ChainDataSource>(
         logs.sort_by_key(|log| log.cursor.event_order());
         for log in logs {
             validate_recovery_log(&log, config, page_start, page_end)?;
-            if persist_log(log, config, store, metrics, shutdown).await? == Transition::Shutdown {
+            if persist::log(log, config, store, metrics, shutdown).await? == Transition::Shutdown {
                 return Ok(Transition::Shutdown);
             }
         }
@@ -276,12 +280,8 @@ async fn handle_update(
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<Transition, RuntimeError> {
     match update {
-        ChainUpdate::Head(head) => {
-            validate_cursor(&head.cursor, config.chain_id)?;
-            metrics.observe_head(head.cursor.block_number);
-            Ok(Transition::Continue)
-        }
-        ChainUpdate::Log(log) => persist_log(log, config, store, metrics, shutdown).await,
+        ChainUpdate::Head(head) => persist::head(head, config, store, metrics, shutdown).await,
+        ChainUpdate::Log(log) => persist::log(log, config, store, metrics, shutdown).await,
         ChainUpdate::Gap { cursor, reason } => {
             if let Some(cursor) = cursor {
                 validate_cursor(&cursor, config.chain_id)?;
@@ -294,53 +294,12 @@ async fn handle_update(
             validate_cursor(&old_head.cursor, config.chain_id)?;
             validate_cursor(&new_head.cursor, config.chain_id)?;
             metrics.source_gap();
-            tracing::warn!(
+            tracing::error!(
                 old = old_head.cursor.block_number,
                 new = new_head.cursor.block_number,
-                "event source reorg"
+                "durable fork correction is required"
             );
-            Ok(Transition::Recover)
-        }
-    }
-}
-
-async fn persist_log(
-    log: ContractLog,
-    config: &Config,
-    store: &RedisEventStore,
-    metrics: &Metrics,
-    shutdown: &mut watch::Receiver<bool>,
-) -> Result<Transition, RuntimeError> {
-    validate_log_identity(&log, config)?;
-    metrics.observe_head(log.cursor.block_number);
-    if log.cursor.commitment < config.minimum_commitment {
-        return Ok(Transition::Continue);
-    }
-    let event = Arc::new(DurableEvent::from_log(&log).map_err(StoreError::from)?);
-    loop {
-        let started = Instant::now();
-        let result = tokio::select! {
-            biased;
-            () = wait_for_shutdown(shutdown) => return Ok(Transition::Shutdown),
-            result = store.append(event.clone()) => result,
-        };
-        match result {
-            Ok(outcome) => {
-                metrics.persisted(
-                    log.cursor.block_number,
-                    !outcome.appended,
-                    started.elapsed(),
-                );
-                return Ok(Transition::Continue);
-            }
-            Err(error) if error.retryable() => {
-                metrics.redis_failure();
-                tracing::warn!(error = %error, event_id = %event.event_id, "Redis event append will retry");
-                if !sleep_or_shutdown(config.reconnect_delay, shutdown).await {
-                    return Ok(Transition::Shutdown);
-                }
-            }
-            Err(error) => return Err(error.into()),
+            Err(RuntimeError::ForkCorrectionRequired)
         }
     }
 }
