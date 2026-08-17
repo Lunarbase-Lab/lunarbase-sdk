@@ -2238,6 +2238,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
  "axum",
+ "bytes",
  "clap",
  "futures-util",
  "lunarbase-pmm-v2-client",

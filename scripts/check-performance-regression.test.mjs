@@ -57,13 +57,74 @@ test("rejects allocation growth and an idle mixed-load publisher", () => {
     writeAllocation(baseline, allocationReport());
     writeAllocation(current, allocationReport({ countPerQuote: 1.01 }));
     writeTimingSeries(baseline, "mixed", 900_000, 12_000, 70_000_000);
-    writeTimingSeries(current, "mixed", 900_000, 12_000, 70_000_000, 0);
+    writeTimingSeries(current, "mixed", 900_000, 12_000, 70_000_000, {
+      publishedUpdates: 2_000,
+      appliedUpdates: 1_999,
+    });
 
     const result = runChecker(baseline, current);
 
     assert.equal(result.status, 1);
     assert.match(result.stderr, /allocation count\/quote regressed 1\.00%/);
     assert.match(result.stderr, /mixed run did not apply every published update/);
+  });
+});
+
+test("rejects short runs and latency samples outside the bounded contract", () => {
+  withReports(({ baseline, current }) => {
+    writeTimingSeries(baseline, "timing", 1_000_000, 10_000, 64_000_000);
+    writeTimingSeries(current, "timing", 1_000_000, 10_000, 64_000_000, {
+      timingDurationNs: 100_000_000,
+      latencySamples: 100,
+    });
+
+    const result = runChecker(baseline, current);
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /timing run is shorter than its sustained minimum/);
+    assert.match(result.stderr, /latency sample count is outside its bounded contract/);
+  });
+});
+
+test("rejects mixed volume and achieved-rate gaps", () => {
+  withReports(({ baseline, current }) => {
+    writeTimingSeries(baseline, "mixed", 900_000, 12_000, 70_000_000);
+    writeTimingSeries(current, "mixed", 900_000, 12_000, 70_000_000, {
+      publishedUpdates: 1_000,
+      eventDurationNs: 4_000_000_000,
+    });
+
+    const result = runChecker(baseline, current);
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /published fewer than the required updates/);
+    assert.match(result.stderr, /missed its achieved-rate threshold/);
+  });
+});
+
+test("rejects reducer lag hidden by final drain", () => {
+  withReports(({ baseline, current }) => {
+    writeTimingSeries(baseline, "mixed", 900_000, 12_000, 70_000_000);
+    writeTimingSeries(current, "mixed", 900_000, 12_000, 70_000_000, {
+      appliedDuringMeasurement: 1_000,
+    });
+
+    const result = runChecker(baseline, current);
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /reducer lagged below the during-measurement apply floor/);
+  });
+});
+
+test("includes the environment fingerprint in benchmark identity", () => {
+  withReports(({ baseline, current }) => {
+    writeTimingSeries(baseline, "timing", 1_000_000, 10_000, 64_000_000);
+    writeTimingSeries(current, "timing", 1_000_000, 10_000, 64_000_000, { cpuModel: "different CPU" });
+
+    const result = runChecker(baseline, current);
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /benchmark configuration or target changed/);
   });
 });
 
@@ -80,22 +141,21 @@ function withReports(callback) {
   }
 }
 
-function writeTimingSeries(directory, mode, throughput, p99, rss, publishedUpdates = 100) {
+function writeTimingSeries(directory, mode, throughput, p99, rss, options = {}) {
   for (let run = 1; run <= 10; run += 1) {
-    writeReport(
-      directory,
-      `${mode}-${run}.json`,
-      timingReport(mode, throughput + run, p99 + run, rss + run, publishedUpdates),
-    );
+    writeReport(directory, `${mode}-${run}.json`, timingReport(mode, throughput + run, p99 + run, rss + run, options));
   }
 }
 
-function timingReport(mode, throughput, p99, rss, publishedUpdates) {
+function timingReport(mode, throughput, p99, rss, options) {
+  const publishedUpdates = options.publishedUpdates ?? 2_000;
   return {
-    ...identity(mode, 128),
+    ...identity(mode, 128, options.cpuModel),
     timing: {
+      durationNs: options.timingDurationNs ?? 2_100_000_000,
+      callsPerSecond: throughput / 16,
       quotesPerSecond: throughput,
-      latencyNs: { p99 },
+      latencyNs: { p99, samples: options.latencySamples ?? 32_768 },
     },
     allocations: null,
     eventLoad:
@@ -103,8 +163,10 @@ function timingReport(mode, throughput, p99, rss, publishedUpdates) {
         ? {
             configuredEventsPerSecond: 1_000,
             publishedUpdates,
-            appliedUpdates: publishedUpdates,
-            durationNs: 1_000_000,
+            publishedDuringMeasurement: options.publishedDuringMeasurement ?? publishedUpdates,
+            appliedDuringMeasurement: options.appliedDuringMeasurement ?? publishedUpdates,
+            appliedUpdates: options.appliedUpdates ?? publishedUpdates,
+            durationNs: options.eventDurationNs ?? 2_100_000_000,
           }
         : null,
     rssBytes: { peak: rss },
@@ -133,20 +195,40 @@ function allocationReport(overrides = {}) {
   };
 }
 
-function identity(mode, concurrency) {
+function identity(mode, concurrency, cpuModel = "AMD Ryzen benchmark fixture") {
+  const measuredCalls = mode === "allocations" ? 4_096 : 65_536;
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     scenarioId: `${mode}-lanes15-pairs100-batch16-c${concurrency}`,
     mode,
     buildProfile: "release",
     target: "x86_64-linux",
     allocatorInstrumented: mode === "allocations",
+    environment: {
+      cpuModel,
+      logicalCpus: 16,
+      rustcVersion: "rustc 1.97.1 (fixture)",
+      cargoVersion: "cargo 1.97.1 (fixture)",
+      harnessId: "lunarbase-quote-hot-path-v2",
+    },
+    measurementPolicy: {
+      minimumDurationNs: 2_000_000_000,
+      minimumLatencySamples: 32_768,
+      latencySampleCapacity: 65_536,
+      minimumMeasuredQuotes: 262_144,
+      allocationCalls: 4_096,
+      minimumMixedUpdates: 1_500,
+      minimumMixedRateBps: 8_000,
+      minimumMixedAppliedDuringBps: 8_000,
+      mixedPublisherRuntime: "dedicated-deadline",
+    },
     lanes: 15,
     pairs: 100,
     batchSize: 16,
     concurrency,
     warmupCalls: 1024,
-    measuredQuotes: 262_144,
+    measuredCalls,
+    measuredQuotes: measuredCalls * 16,
   };
 }
 

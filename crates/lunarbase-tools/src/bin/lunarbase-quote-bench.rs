@@ -1,14 +1,24 @@
 //! Reproducible in-process benchmark for the connected quote hot path.
 
+#[path = "lunarbase_quote_bench/model.rs"]
+mod model;
+#[path = "lunarbase_quote_bench/sampling.rs"]
+mod sampling;
+
 use clap::{Parser, ValueEnum};
 use lunarbase_client::indexer::errors::IndexerError;
 use lunarbase_client::prelude::ConnectedQuoteClient;
 use lunarbase_math::{QuoteOutcome, QuoteRequest};
 use lunarbase_tools::support::quote_benchmark::{fixture, rotating_batches};
 use lunarbase_tools::support::quote_mixed::{
-    MixedLoadReport, SyntheticSource, UpdateBus, spawn_mixed_publisher, wait_for_reducer_sequence,
+    SyntheticSource, UpdateBus, spawn_mixed_publisher, wait_for_reducer_sequence,
 };
-use serde::Serialize;
+use model::{
+    AllocationReport, BUILD_PROFILE, BUILD_TARGET, BenchmarkReport, LatencyReport,
+    MeasurementPolicy, MemoryReport, REPORT_SCHEMA_VERSION, TimingReport, duration_ns,
+    environment_report, process_memory, validate_mixed_load,
+};
+use sampling::{LatencySampler, distributed, percentile};
 use std::hint::black_box;
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
@@ -34,6 +44,12 @@ struct Arguments {
     concurrency: usize,
     #[arg(long, default_value_t = 1_048_576)]
     measured_quotes: usize,
+    #[arg(long, default_value_t = 2_000)]
+    minimum_duration_ms: u64,
+    #[arg(long, default_value_t = 32_768)]
+    minimum_latency_samples: usize,
+    #[arg(long, default_value_t = 65_536)]
+    latency_sample_capacity: usize,
     #[arg(long, default_value_t = 4_096)]
     allocation_calls: usize,
     #[arg(long, default_value_t = 4_096)]
@@ -42,6 +58,12 @@ struct Arguments {
     mode: BenchmarkMode,
     #[arg(long, default_value_t = 1_000)]
     mixed_events_per_second: u64,
+    #[arg(long, default_value_t = 1_500)]
+    minimum_mixed_updates: u64,
+    #[arg(long, default_value_t = 8_000)]
+    minimum_mixed_rate_bps: u16,
+    #[arg(long, default_value_t = 8_000)]
+    minimum_mixed_applied_during_bps: u16,
 }
 
 #[derive(Debug, Error)]
@@ -56,79 +78,18 @@ enum BenchmarkError {
     Json(#[from] serde_json::Error),
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BenchmarkReport {
-    schema_version: u8,
-    scenario_id: String,
-    mode: &'static str,
-    build_profile: &'static str,
-    target: String,
-    allocator_instrumented: bool,
-    lanes: usize,
-    pairs: usize,
-    batch_size: usize,
-    concurrency: usize,
-    warmup_calls: usize,
-    measured_calls: usize,
-    measured_quotes: usize,
-    timing: Option<TimingReport>,
-    allocations: Option<AllocationReport>,
-    event_load: Option<MixedLoadReport>,
-    rss_bytes: MemoryReport,
-    checksum: u64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TimingReport {
-    duration_ns: u64,
-    calls_per_second: f64,
-    quotes_per_second: f64,
-    latency_ns: LatencyReport,
-}
-
-#[derive(Debug, Serialize)]
-struct LatencyReport {
-    p50: u64,
-    p95: u64,
-    p99: u64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AllocationReport {
-    count_total: u64,
-    count_current: i64,
-    count_max: u64,
-    bytes_total: u64,
-    bytes_current: i64,
-    bytes_max: u64,
-    count_per_call: f64,
-    bytes_per_call: f64,
-    count_per_quote: f64,
-    bytes_per_quote: f64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct MemoryReport {
-    before_fixture: Option<u64>,
-    ready: Option<u64>,
-    after: Option<u64>,
-    peak: Option<u64>,
-}
-
 #[derive(Debug)]
 struct TimingResult {
     report: TimingReport,
     checksum: u64,
+    measured_calls: usize,
 }
 
 #[derive(Debug)]
 struct WorkerResult {
     latencies: Vec<u64>,
     checksum: u64,
+    calls: usize,
 }
 
 #[tokio::main]
@@ -179,25 +140,51 @@ async fn run(arguments: Arguments) -> Result<(), BenchmarkError> {
                     None,
                     None,
                     timing.checksum,
-                    measured_calls(&arguments),
+                    timing.measured_calls,
                 )
             })
         }
         BenchmarkMode::Mixed => {
             let initial_sequence = update_cursor.source_sequence.unwrap_or(0);
-            let publisher = spawn_mixed_publisher(
-                updates,
-                core_address,
-                lane_asset,
-                lane_slot0,
-                update_cursor,
-                arguments.mixed_events_per_second,
-            );
-            wait_for_reducer_sequence(&client, initial_sequence.saturating_add(1))
-                .await
-                .map_err(BenchmarkError::Invalid)?;
+            let publisher_runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .thread_name("quote-bench-publisher")
+                .enable_time()
+                .build()
+                .map_err(|error| BenchmarkError::Invalid(error.to_string()))?;
+            let publisher = {
+                let _entered = publisher_runtime.enter();
+                spawn_mixed_publisher(
+                    updates,
+                    core_address,
+                    lane_asset,
+                    lane_slot0,
+                    update_cursor,
+                    arguments.mixed_events_per_second,
+                )
+            };
+            if let Err(error) =
+                wait_for_reducer_sequence(&client, initial_sequence.saturating_add(1)).await
+            {
+                let _ = publisher.finish().await;
+                publisher_runtime.shutdown_background();
+                return Err(BenchmarkError::Invalid(error));
+            }
             let timing = run_timing(&arguments, client.clone(), batches.clone());
+            let applied_during_measurement = client.health().map(|health| {
+                health
+                    .cursor
+                    .and_then(|cursor| cursor.source_sequence)
+                    .unwrap_or(0)
+            });
+            let published_during_measurement = publisher.published_updates();
             let mut event_load = publisher.finish().await;
+            publisher_runtime.shutdown_background();
+            event_load.published_during_measurement = published_during_measurement;
+            event_load.applied_during_measurement = applied_during_measurement?
+                .saturating_sub(initial_sequence)
+                .min(published_during_measurement);
+            let timing = timing?;
             let expected_sequence = initial_sequence.saturating_add(event_load.published_updates);
             let applied_sequence = wait_for_reducer_sequence(&client, expected_sequence)
                 .await
@@ -205,15 +192,21 @@ async fn run(arguments: Arguments) -> Result<(), BenchmarkError> {
             event_load.applied_updates = applied_sequence
                 .saturating_sub(initial_sequence)
                 .min(event_load.published_updates);
-            timing.map(|timing| {
-                (
-                    Some(timing.report),
-                    None,
-                    Some(event_load),
-                    timing.checksum,
-                    measured_calls(&arguments),
-                )
-            })
+            validate_mixed_load(
+                &event_load,
+                arguments.minimum_duration_ms,
+                arguments.minimum_mixed_updates,
+                arguments.minimum_mixed_rate_bps,
+                arguments.minimum_mixed_applied_during_bps,
+            )
+            .map_err(BenchmarkError::Invalid)?;
+            Ok((
+                Some(timing.report),
+                None,
+                Some(event_load),
+                timing.checksum,
+                timing.measured_calls,
+            ))
         }
         BenchmarkMode::Allocations => measure_allocations(
             client.clone(),
@@ -236,20 +229,28 @@ async fn run(arguments: Arguments) -> Result<(), BenchmarkError> {
     shutdown?;
     let (after, peak) = process_memory();
     let report = BenchmarkReport {
-        schema_version: 1,
+        schema_version: REPORT_SCHEMA_VERSION,
         scenario_id: scenario_id(&arguments),
         mode: match arguments.mode {
             BenchmarkMode::Timing => "timing",
             BenchmarkMode::Mixed => "mixed",
             BenchmarkMode::Allocations => "allocations",
         },
-        build_profile: if cfg!(debug_assertions) {
-            "debug"
-        } else {
-            "release"
-        },
-        target: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+        build_profile: BUILD_PROFILE,
+        target: BUILD_TARGET.to_owned(),
         allocator_instrumented: cfg!(feature = "allocation-stats"),
+        environment: environment_report(),
+        measurement_policy: MeasurementPolicy {
+            minimum_duration_ns: arguments.minimum_duration_ms.saturating_mul(1_000_000),
+            minimum_latency_samples: arguments.minimum_latency_samples,
+            latency_sample_capacity: arguments.latency_sample_capacity,
+            minimum_measured_quotes: arguments.measured_quotes,
+            allocation_calls: arguments.allocation_calls,
+            minimum_mixed_updates: arguments.minimum_mixed_updates,
+            minimum_mixed_rate_bps: arguments.minimum_mixed_rate_bps,
+            minimum_mixed_applied_during_bps: arguments.minimum_mixed_applied_during_bps,
+            mixed_publisher_runtime: "dedicated-deadline",
+        },
         lanes: arguments.lanes,
         pairs: arguments.pairs,
         batch_size: arguments.batch_size,
@@ -274,14 +275,20 @@ async fn run(arguments: Arguments) -> Result<(), BenchmarkError> {
 
 fn validate_arguments(arguments: &Arguments) -> Result<(), BenchmarkError> {
     if arguments.concurrency == 0
+        || arguments.batch_size == 0
         || arguments.measured_quotes == 0
         || arguments.allocation_calls == 0
         || arguments.warmup_calls == 0
         || arguments.mixed_events_per_second == 0
+        || arguments.minimum_duration_ms == 0
+        || arguments.minimum_latency_samples == 0
+        || arguments.latency_sample_capacity < arguments.minimum_latency_samples
+        || arguments.minimum_mixed_updates == 0
+        || !(1..=10_000).contains(&arguments.minimum_mixed_rate_bps)
+        || !(1..=10_000).contains(&arguments.minimum_mixed_applied_during_bps)
     {
         return Err(BenchmarkError::Invalid(
-            "concurrency, measured quotes, allocation calls, and warmup calls must be non-zero"
-                .into(),
+            "benchmark bounds must be non-zero, sample capacity must cover the minimum, and mixed rate bps must be in 1..=10000".into(),
         ));
     }
     match arguments.mode {
@@ -334,6 +341,7 @@ fn run_timing(
     batches: Arc<Vec<Vec<QuoteRequest>>>,
 ) -> Result<TimingResult, BenchmarkError> {
     let calls = measured_calls(arguments);
+    let minimum_duration = Duration::from_millis(arguments.minimum_duration_ms);
     let barrier = Arc::new(Barrier::new(arguments.concurrency + 1));
     let workers = (0..arguments.concurrency)
         .map(|worker| {
@@ -344,33 +352,46 @@ fn run_timing(
                 calls / arguments.concurrency + usize::from(worker < calls % arguments.concurrency);
             let concurrency = arguments.concurrency;
             let batch_size = arguments.batch_size;
+            let minimum_samples =
+                distributed(arguments.minimum_latency_samples, concurrency, worker);
+            let sample_capacity =
+                distributed(arguments.latency_sample_capacity, concurrency, worker);
             std::thread::spawn(move || -> Result<WorkerResult, BenchmarkError> {
-                let mut latencies = Vec::with_capacity(worker_calls);
+                let mut latencies = LatencySampler::new(sample_capacity);
                 let mut checksum = 0u64;
                 barrier.wait();
-                for iteration in 0..worker_calls {
+                let worker_started = Instant::now();
+                let mut iteration = 0usize;
+                while iteration < worker_calls
+                    || iteration < minimum_samples
+                    || worker_started.elapsed() < minimum_duration
+                {
                     let batch = &batches[(worker + iteration * concurrency) % batches.len()];
                     let request_started = Instant::now();
                     checksum = checksum.wrapping_add(evaluate(&client, batch, batch_size)?);
                     latencies.push(duration_ns(request_started.elapsed()));
+                    iteration = iteration.saturating_add(1);
                 }
                 Ok(WorkerResult {
-                    latencies,
+                    latencies: latencies.into_vec(),
                     checksum,
+                    calls: iteration,
                 })
             })
         })
         .collect::<Vec<_>>();
     let measurement_started = Instant::now();
     barrier.wait();
-    let mut latencies = Vec::with_capacity(calls);
+    let mut latencies = Vec::with_capacity(arguments.latency_sample_capacity);
     let mut checksum = 0u64;
+    let mut actual_calls = 0usize;
     for worker in workers {
         let result = worker
             .join()
             .map_err(|_| BenchmarkError::WorkerPanicked)??;
         latencies.extend(result.latencies);
         checksum = checksum.wrapping_add(result.checksum);
+        actual_calls = actual_calls.saturating_add(result.calls);
     }
     let elapsed = measurement_started.elapsed();
     latencies.sort_unstable();
@@ -378,15 +399,17 @@ fn run_timing(
     Ok(TimingResult {
         report: TimingReport {
             duration_ns: duration_ns(elapsed),
-            calls_per_second: calls as f64 / seconds,
-            quotes_per_second: calls.saturating_mul(arguments.batch_size) as f64 / seconds,
+            calls_per_second: actual_calls as f64 / seconds,
+            quotes_per_second: actual_calls.saturating_mul(arguments.batch_size) as f64 / seconds,
             latency_ns: LatencyReport {
                 p50: percentile(&latencies, 0.50),
                 p95: percentile(&latencies, 0.95),
                 p99: percentile(&latencies, 0.99),
+                samples: latencies.len(),
             },
         },
         checksum,
+        measured_calls: actual_calls,
     })
 }
 
@@ -482,46 +505,4 @@ fn scenario_id(arguments: &Arguments) -> String {
         "{mode}-lanes{}-pairs{}-batch{}-c{}",
         arguments.lanes, arguments.pairs, arguments.batch_size, arguments.concurrency
     )
-}
-
-fn percentile(sorted: &[u64], quantile: f64) -> u64 {
-    if sorted.is_empty() {
-        return 0;
-    }
-    let index = (((sorted.len() - 1) as f64) * quantile).round() as usize;
-    sorted[index]
-}
-
-fn duration_ns(duration: Duration) -> u64 {
-    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
-}
-
-fn process_memory() -> (Option<u64>, Option<u64>) {
-    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
-        return (None, None);
-    };
-    (
-        status_bytes(&status, "VmRSS:"),
-        status_bytes(&status, "VmHWM:"),
-    )
-}
-
-fn status_bytes(status: &str, name: &str) -> Option<u64> {
-    status.lines().find_map(|line| {
-        let value = line.strip_prefix(name)?.split_whitespace().next()?;
-        value.parse::<u64>().ok()?.checked_mul(1_024)
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{duration_ns, percentile, status_bytes};
-    use std::time::Duration;
-
-    #[test]
-    fn report_helpers_use_stable_integer_units() {
-        assert_eq!(percentile(&[10, 20, 30, 40], 0.50), 30);
-        assert_eq!(duration_ns(Duration::from_micros(7)), 7_000);
-        assert_eq!(status_bytes("VmRSS:\t  42 kB\n", "VmRSS:"), Some(43_008));
-    }
 }

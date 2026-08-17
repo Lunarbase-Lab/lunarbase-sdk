@@ -6,7 +6,7 @@
 
 SHELL := /bin/sh
 
-.NOTPARALLEL: ci pre-push release-check performance-baseline performance-capture performance-gate
+.NOTPARALLEL: ci pre-push release-check performance-baseline performance-capture performance-gate indexer-benchmark
 
 CARGO ?= cargo
 PNPM ?= pnpm
@@ -41,7 +41,7 @@ PNPM_CMD := $(shell if command -v corepack >/dev/null 2>&1; then printf '%s' "co
 .PHONY: help install hooks-install build build-rust build-ts build-math-ts build-release build-indexer build-event-worker run run-indexer run-event-worker \
 	check check-rust check-ts check-network-feature check-network-features check-monad-native \
 	fmt fmt-rust fmt-ts fmt-check fmt-check-rust fmt-check-ts lint lint-rust lint-ts \
-	test test-rust test-ts test-runtime test-monad-lifecycle test-process-e2e audit audit-rust audit-rust-ci audit-ts load performance-baseline performance-capture performance-gate quote-benchmark quote-allocation-benchmark monad-live-validate docs docs-rust ffi \
+	test test-rust test-ts test-runtime test-monad-lifecycle test-process-e2e audit audit-rust audit-rust-ci audit-ts load indexer-benchmark performance-baseline performance-capture performance-gate quote-benchmark quote-allocation-benchmark monad-live-validate docs docs-rust ffi \
 	quote-logger quote-logger-rust quote-logger-ts activity-actor activity-actor-inspect activity-actor-wallet monad-parser-smoke docker-build docker-image-check docker-build-monad-native docker-up docker-down release-artifacts release-check release-version-check release-check-rust release-check-ts source-size-check repository-check public-api-check check-scripts check-ci-tools verify ci-rust ci-ts ci-supply-chain ci pre-push clean check-pnpm
 
 help:
@@ -60,6 +60,7 @@ help:
 	@echo "  make test-monad-lifecycle  Test protocol-v2 proposals, resume, and gaps"
 	@echo "  make test-process-e2e  Run real-process RPC/WS/Redis/multi-replica scenarios"
 	@echo "  make load           Benchmark 15 lanes / 100 pairs by default"
+	@echo "  make indexer-benchmark  Run the fresh-process release HTTP matrix"
 	@echo "  make performance-baseline  Run the reproducible quote timing/allocation matrix"
 	@echo "  make performance-capture PERF_OUTPUT=...  Capture repeated release reports"
 	@echo "  make performance-gate PERF_BASELINE=... PERF_CURRENT=...  Compare reports"
@@ -217,7 +218,18 @@ load:
 	$(CARGO) run -p lunarbase-tools --bin lunarbase-load -- \
 		--indexer-url "$${INDEXER_URL:-http://127.0.0.1:8080}" \
 		--lanes "$${LANES:-15}" --pairs "$${PAIRS:-100}" \
-		--requests "$${REQUESTS:-20000}" --concurrency "$${CONCURRENCY:-128}"
+		--batch-size "$${BATCH_SIZE:-1}" --requests "$${REQUESTS:-20000}" \
+		--warmup-requests "$${WARMUP_REQUESTS:-1024}" \
+		--concurrency "$${CONCURRENCY:-128}" $${PID:+--pid "$$PID"}
+
+indexer-benchmark:
+	$(CARGO) build --locked --release -p lunarbase-indexer -p lunarbase-tools
+	target/release/lunarbase-indexer-bench \
+		--indexer-bin target/release/lunarbase-indexer \
+		--lanes "$${LANES:-15,64}" --batch-sizes "$${BATCH_SIZES:-1,16,256}" \
+		--pairs "$${PAIRS:-100}" --requests "$${REQUESTS:-20000}" \
+		--warmup-requests "$${WARMUP_REQUESTS:-1024}" \
+		--concurrency "$${CONCURRENCY:-128}"
 
 performance-baseline: quote-benchmark quote-allocation-benchmark
 

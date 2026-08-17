@@ -8,6 +8,8 @@ pub(super) const EMPTY_CODE_HASH: &str =
     "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470";
 
 mod assertions;
+/// Deterministic process-level quote throughput and memory matrix.
+pub mod benchmark;
 /// Process fixtures, mock chain, Redis process, and temporary workspace.
 pub mod environment;
 mod helpers;

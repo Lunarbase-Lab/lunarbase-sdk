@@ -123,12 +123,30 @@ Run the load tool against staging with deployment-specific vectors:
 cargo run -p lunarbase-tools --bin lunarbase-load -- \
   --indexer-url http://127.0.0.1:8080 \
   --vectors /absolute/path/to/vectors.json \
-  --requests 20000 --concurrency 128
+  --pairs 100 --batch-size 16 --requests 20000 --concurrency 128 \
+  --pid INDEXER_PID
 ```
 
 Record throughput, p95 and p99 latency, memory, indexed block progress, and
 recovery behavior. Repeat with the same provider limits and replica resources
 used in production.
+
+For a self-contained HTTP/API baseline, build and run the real release process
+against deterministic local RPC/WS fixtures:
+
+```sh
+make indexer-benchmark > /var/tmp/lunarbase-indexer-process.json
+```
+
+The command uses a fresh indexer for every 15/64-lane, batch-1/16/256 scenario,
+128 fixed load workers, 100 direct/routed exact-in/out pairs, a warmup phase,
+full response validation, and graceful SIGTERM. It reports calls/s, quotes/s,
+p50/p95/p99, and `/proc` VmRSS/VmHWM before and after measured load. Override
+`REQUESTS`, `WARMUP_REQUESTS`, or `CONCURRENCY` only when recording those values
+alongside the artifact. The fixture inherits the production queue defaults
+(4096 updates and 64 MiB), and the JSON embeds target, build profile, CPU model,
+logical CPU count, rustc, and Cargo versions. Compare artifacts only when this
+fingerprint is identical.
 
 Before and after quote-path changes, run the deterministic in-process matrix:
 
@@ -176,6 +194,12 @@ unrelated services on it. Set the repository variable
 `LUNARBASE_PERFORMANCE_BASELINE_REF` to a reviewed immutable commit that contains
 the same performance schema and capture tooling. Moving the baseline requires a
 separate reviewed decision; the release job never updates it automatically.
+
+Performance schema and harness v2 are intentionally incompatible with existing
+v1 baseline artifacts. After this change is merged, capture and review a fresh
+v2 baseline artifact on the dedicated runner, then update the release
+environment's `LUNARBASE_PERFORMANCE_BASELINE_REF` to the full 40-character SHA
+of that reviewed baseline commit before publishing a release.
 
 The process E2E gate starts dedicated quote and event-worker connections, kills
 the event worker during ingestion, verifies inclusive replay without duplicate

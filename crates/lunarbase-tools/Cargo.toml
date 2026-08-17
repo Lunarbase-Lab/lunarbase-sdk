@@ -19,6 +19,7 @@ allocation-counter = { version = "=0.8.1", optional = true }
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true
 axum.workspace = true
+bytes.workspace = true
 clap.workspace = true
 futures-util.workspace = true
 lunarbase-client.workspace = true

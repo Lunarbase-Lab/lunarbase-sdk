@@ -127,6 +127,10 @@ pub struct MixedLoadReport {
     pub configured_events_per_second: u64,
     /// Updates accepted by the synthetic source channel.
     pub published_updates: u64,
+    /// Updates published before the quote timing window ended.
+    pub published_during_measurement: u64,
+    /// Those updates already visible at the reducer cursor when timing ended.
+    pub applied_during_measurement: u64,
     /// Published updates observed at the reducer cursor before reporting.
     pub applied_updates: u64,
     /// Measured publisher lifetime.
@@ -143,6 +147,11 @@ pub struct MixedPublisher {
 }
 
 impl MixedPublisher {
+    /// Returns the updates published so far without stopping the producer.
+    pub fn published_updates(&self) -> u64 {
+        self.published.load(Ordering::Relaxed)
+    }
+
     /// Stops publication and returns stable integer counters.
     pub async fn finish(self) -> MixedLoadReport {
         let _ = self.stop.send(true);
@@ -150,6 +159,8 @@ impl MixedPublisher {
         MixedLoadReport {
             configured_events_per_second: self.rate,
             published_updates: self.published.load(Ordering::Relaxed),
+            published_during_measurement: 0,
+            applied_during_measurement: 0,
             applied_updates: 0,
             duration_ns: u64::try_from(self.started.elapsed().as_nanos()).unwrap_or(u64::MAX),
         }
@@ -171,7 +182,7 @@ pub fn spawn_mixed_publisher(
     let task = tokio::spawn(async move {
         let period = Duration::from_nanos(1_000_000_000_u64.div_ceil(events_per_second));
         let mut ticker = interval(period);
-        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Burst);
         let mut sequence = cursor.source_sequence.unwrap_or(0);
         loop {
             tokio::select! {
