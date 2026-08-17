@@ -47,7 +47,7 @@ test("queue and deadline paths release abort listeners", async () => {
   const tracked = new TrackedAbortSignal();
   const queue = new BoundedUpdateQueue(2, 1024);
   const pending = queue.next(tracked.signal);
-  queue.push({ kind: "Head", cursor: cursor() });
+  queue.push({ kind: "Head", head: { cursor: cursor() } });
   assert.equal((await pending)?.kind, "Head");
   assert.equal(tracked.listeners, 0);
 

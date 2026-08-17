@@ -45,6 +45,9 @@ BlockRef {
 Every production log MUST have a block hash, transaction hash, transaction
 index, and log index. Missing stable coordinates are a continuity failure; the
 worker MUST stop ingestion and become unready instead of inventing an identity.
+Parent linkage is carried once by the block head and persisted in the header
+journal. A realtime log may arrive before its head, so `parentHash` is optional
+on a log record and MUST NOT be populated through an HTTP request per log.
 
 All hexadecimal values use lowercase canonical `0x` encoding. Decimal values
 have no leading zeroes, except the value zero itself.

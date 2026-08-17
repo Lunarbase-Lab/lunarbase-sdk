@@ -70,6 +70,14 @@ export interface ChainCursor {
   commitment: Commitment;
 }
 
+/** Block identity and parent linkage carried by head-level updates. */
+export interface BlockRef {
+  /** Ordered source position and execution height for this block. */
+  readonly cursor: ChainCursor;
+  /** Hash of the parent block or proposal, when supplied by the source. */
+  readonly parentHash?: Hex;
+}
+
 /** Provider-neutral Core log. */
 export interface ContractLog {
   /** Contract that emitted the log. */
@@ -104,9 +112,9 @@ export interface BackfillRequest {
 
 /** Complete update vocabulary accepted by the ordered reducer. */
 export type ChainUpdate =
-  | { kind: "Head"; cursor: ChainCursor }
+  | { kind: "Head"; head: BlockRef }
   | { kind: "Log"; log: ContractLog }
-  | { kind: "Reorg"; oldHead: ChainCursor; newHead: ChainCursor }
+  | { kind: "Reorg"; oldHead: BlockRef; newHead: BlockRef }
   | { kind: "Gap"; cursor?: ChainCursor; reason: string };
 
 /** Conservatively charges one normalized log to bounded runtime queues. */
@@ -123,9 +131,9 @@ export function chainUpdateRetainedBytes(update: ChainUpdate): number {
     case "Gap":
       return 192 + TEXT_ENCODER.encode(update.reason).byteLength;
     case "Head":
-      return 192;
+      return 384;
     case "Reorg":
-      return 320;
+      return 704;
   }
 }
 

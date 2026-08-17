@@ -2,7 +2,8 @@
 
 use crate::rpc::client::RpcHttpClient;
 use lunarbase_client::model::{
-    BackfillRequest, ChainCursor, Checkpoint, Commitment, ContractLog, Network, SourceError,
+    BackfillRequest, BlockRef, ChainCursor, Checkpoint, Commitment, ContractLog, Network,
+    SourceError,
 };
 use lunarbase_client::protocol::proxy::{ERC1967_IMPLEMENTATION_SLOT, decode_implementation};
 use std::sync::{
@@ -203,6 +204,26 @@ impl RpcHttpBackend {
         };
         self.rpc
             .block_cursor(&self.snapshot_tag, self.chain_id, commitment)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Returns the configured canonical block with parent linkage.
+    pub(crate) async fn snapshot_block_ref(
+        &self,
+        network: Network,
+    ) -> Result<BlockRef, SourceError> {
+        if network != self.network {
+            return Err(SourceError::NetworkMismatch);
+        }
+        self.ensure_chain_id().await?;
+        let commitment = if self.snapshot_tag.as_ref() == "finalized" {
+            Commitment::Finalized
+        } else {
+            Commitment::Canonical
+        };
+        self.rpc
+            .block_ref(&self.snapshot_tag, self.chain_id, commitment)
             .await
             .map_err(Into::into)
     }

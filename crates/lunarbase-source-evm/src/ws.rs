@@ -329,19 +329,20 @@ impl ChainDataSource for EvmRpcSource {
                     }
                     if config.delivery_mode == EvmDeliveryMode::Finalized {
                         last_head = Some(head);
-                        let finalized = match http.snapshot_cursor(http.network()).await {
-                            Ok(cursor) => cursor,
+                        let finalized_head = match http.snapshot_block_ref(http.network()).await {
+                            Ok(head) => head,
                             Err(error) => {
                                 yield Err(error);
                                 break;
                             }
                         };
+                        let finalized = finalized_head.cursor.clone();
                         let previous = finalized_watermark
                             .as_ref()
                             .expect("finalized mode initializes its watermark");
                         match validate_finalized_advance(previous, &finalized) {
                             Ok(false) => {
-                                yield Ok(ChainUpdate::Head(finalized));
+                                yield Ok(ChainUpdate::Head(finalized_head));
                                 continue;
                             }
                             Err(error) => {
@@ -379,7 +380,7 @@ impl ChainDataSource for EvmRpcSource {
                                 yield Ok(ChainUpdate::Log(log));
                             }
                         }
-                        yield Ok(ChainUpdate::Head(finalized.clone()));
+                        yield Ok(ChainUpdate::Head(finalized_head));
                         finalized_watermark = Some(finalized);
                         continue;
                     }
@@ -403,8 +404,8 @@ impl ChainDataSource for EvmRpcSource {
                         }
                         if head_discontinuity(previous, &head, config.progressive_heads) {
                             yield Ok(ChainUpdate::Reorg {
-                                old_head: previous.cursor.clone(),
-                                new_head: head.cursor.clone(),
+                                old_head: previous.clone(),
+                                new_head: head.clone(),
                             });
                             reorder = match CursorReorderBuffer::with_limits(
                                 config.reorder_capacity,
@@ -422,7 +423,7 @@ impl ChainDataSource for EvmRpcSource {
                     }
                     last_head = Some(head.clone());
                     if config.delivery_mode == EvmDeliveryMode::Realtime {
-                        yield Ok(ChainUpdate::Head(head.cursor));
+                        yield Ok(ChainUpdate::Head(head));
                         continue;
                     }
                     if config.holds_standard_logs_until_successor()
@@ -437,7 +438,7 @@ impl ChainDataSource for EvmRpcSource {
                         yield Err(error);
                         break;
                     }
-                    if let Err(error) = reorder.push(ChainUpdate::Head(head.cursor.clone())) {
+                    if let Err(error) = reorder.push(ChainUpdate::Head(head.clone())) {
                         yield Err(error);
                         break;
                     }

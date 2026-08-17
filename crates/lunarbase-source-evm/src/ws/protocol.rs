@@ -2,15 +2,10 @@
 
 use crate::rpc::client::RpcError;
 use crate::rpc::codec::{parse_rpc_head, validate_canonical_hex_u64};
-use lunarbase_client::model::{ChainCursor, Commitment, ContractFilter};
-use lunarbase_math::B256;
+use lunarbase_client::model::{BlockRef, ChainCursor, Commitment, ContractFilter};
 use serde_json::{Value, json};
 
-#[derive(Clone, Debug)]
-pub(crate) struct WsHead {
-    pub(crate) cursor: ChainCursor,
-    pub(crate) parent_hash: Option<B256>,
-}
+pub(crate) type WsHead = BlockRef;
 
 pub(crate) fn subscription_request(id: u64, filter: &ContractFilter, kind: &str) -> String {
     let mut options = serde_json::Map::new();
@@ -54,7 +49,7 @@ pub(crate) fn parse_ws_head_with_execution_context(
         validate_canonical_hex_u64(value.get("l1BlockNumber"), "head.l1BlockNumber")?;
     }
     let head = parse_rpc_head(value)?;
-    Ok(WsHead {
+    Ok(BlockRef {
         cursor: ChainCursor {
             chain_id,
             block_number: head.number,

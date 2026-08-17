@@ -1,6 +1,8 @@
 //! Monad execution-event model and normalization.
 
-use lunarbase_client::model::{ChainCursor, ChainUpdate, Commitment, ContractLog, SourceError};
+use lunarbase_client::model::{
+    BlockRef, ChainCursor, ChainUpdate, Commitment, ContractLog, SourceError,
+};
 use lunarbase_client::source::SourceStream;
 use lunarbase_math::{Address, B256, Bytes};
 
@@ -25,6 +27,8 @@ pub struct ExecutionHead {
     pub block_number: u64,
     /// Block identifier supplied by the execution source, when available.
     pub block_hash: Option<B256>,
+    /// Parent block or proposal identifier, when supplied by the source.
+    pub parent_hash: Option<B256>,
     /// Lifecycle confidence represented by this notification.
     pub commitment: Commitment,
 }
@@ -164,8 +168,8 @@ impl MonadExecutionNormalizer {
             ExecutionEvent::Head(head) => Ok(Some(self.normalize_head(head))),
             ExecutionEvent::Log(log) => self.normalize_log(log),
             ExecutionEvent::Reorg { old_head, new_head } => Ok(Some(ChainUpdate::Reorg {
-                old_head: self.head_cursor(old_head),
-                new_head: self.head_cursor(new_head),
+                old_head: self.head_ref(old_head),
+                new_head: self.head_ref(new_head),
             })),
             ExecutionEvent::Gap { cursor, reason } => {
                 self.tracker.rewind();
@@ -204,20 +208,23 @@ impl MonadExecutionNormalizer {
 
     /// Converts a Monad block lifecycle event into a normalized head.
     pub fn normalize_head(&self, head: ExecutionHead) -> ChainUpdate {
-        ChainUpdate::Head(self.head_cursor(head))
+        ChainUpdate::Head(self.head_ref(head))
     }
 
-    fn head_cursor(&self, head: ExecutionHead) -> ChainCursor {
-        ChainCursor {
-            chain_id: self.chain_id,
-            block_number: head.block_number,
-            execution_block_number: head.block_number,
-            block_hash: head.block_hash,
-            transaction_index: None,
-            log_index: None,
-            source_sequence: Some(head.sequence),
-            source_sub_index: None,
-            commitment: head.commitment,
+    fn head_ref(&self, head: ExecutionHead) -> BlockRef {
+        BlockRef {
+            cursor: ChainCursor {
+                chain_id: self.chain_id,
+                block_number: head.block_number,
+                execution_block_number: head.block_number,
+                block_hash: head.block_hash,
+                transaction_index: None,
+                log_index: None,
+                source_sequence: Some(head.sequence),
+                source_sub_index: None,
+                commitment: head.commitment,
+            },
+            parent_hash: head.parent_hash,
         }
     }
 

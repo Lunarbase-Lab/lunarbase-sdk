@@ -5,6 +5,7 @@ import {
   Network as NetworkValue,
   ownContractFilter,
   type BackfillRequest,
+  type BlockRef,
   type BootstrapSnapshot,
   type ChainCursor,
   type ChainDataSource,
@@ -30,7 +31,7 @@ import { gap, parseHead } from "./ws/protocol.js";
 const STANDARD_LOG_GRACE_MILLISECONDS = 2_000;
 const STANDARD_HEAD_DEADLINE = Symbol("standard-head-deadline");
 
-type ParsedHead = { cursor: ChainCursor; parentHash?: Hex };
+type ParsedHead = BlockRef;
 type OpenStandardHead = { readonly observedAt: number; readonly head: ParsedHead };
 
 export { BoundedFrameQueue, defaultWebSocketFactory } from "./ws/connection.js";
@@ -283,14 +284,18 @@ export class EvmRpcSource implements ChainDataSource {
         }
         if (lastHead && sameHead(lastHead, lastParentHash, parsed)) continue;
         sourceSequence += 1n;
-        parsed.cursor = { ...parsed.cursor, sourceSequence };
+        parsed.cursor.sourceSequence = sourceSequence;
         if (standardLogs && firstStandardHeadBlock === undefined) firstStandardHeadBlock = parsed.cursor.blockNumber;
         if (lastHead && parsed.cursor.blockNumber > lastHead.blockNumber + 1n) {
           yield gap("RPC WebSocket skipped one or more block heads; canonical recovery required", lastHead);
           return;
         }
         if (lastHead && headDiscontinuity(lastHead, lastParentHash, parsed, this.config.progressiveHeads)) {
-          yield { kind: "Reorg", oldHead: lastHead, newHead: parsed.cursor };
+          yield {
+            kind: "Reorg",
+            oldHead: { cursor: lastHead, parentHash: lastParentHash },
+            newHead: parsed,
+          };
           reorder = new CursorReorderBuffer(this.config.reorderCapacity, this.config.reorderByteCapacity);
           openStandardHeads.clear();
           firstStandardHeadBlock = parsed.cursor.blockNumber;
@@ -314,7 +319,7 @@ export class EvmRpcSource implements ChainDataSource {
         }
 
         try {
-          reorder.push({ kind: "Head", cursor: parsed.cursor });
+          reorder.push({ kind: "Head", head: parsed });
         } catch (error) {
           yield gap(`RPC reorder buffer failed: ${message(error)}`, lastHead);
           return;
@@ -452,8 +457,8 @@ function drainCompletedBlock(
   for (const update of reorder.drainThrough(head.cursor)) {
     if (
       update.kind === "Head" &&
-      update.cursor.blockNumber === head.cursor.blockNumber &&
-      sameHash(update.cursor.blockHash, blockHash)
+      update.head.cursor.blockNumber === head.cursor.blockNumber &&
+      sameHash(update.head.cursor.blockHash, blockHash)
     ) {
       completedHead = update;
       continue;
@@ -480,7 +485,8 @@ function drainCompletedBlock(
       throw new Error(`buffered gap at block ${block} cannot complete RPC block ${head.cursor.blockNumber}`);
     }
     const kind = update.kind.toLowerCase();
-    const cursor = update.kind === "Log" ? update.log.cursor : update.kind === "Reorg" ? update.newHead : update.cursor;
+    const cursor =
+      update.kind === "Log" ? update.log.cursor : update.kind === "Reorg" ? update.newHead.cursor : update.head.cursor;
     throw new Error(
       `buffered RPC ${kind} at block ${cursor.blockNumber} hash ${String(cursor.blockHash)} does not match completed block ${head.cursor.blockNumber} hash ${blockHash}`,
     );

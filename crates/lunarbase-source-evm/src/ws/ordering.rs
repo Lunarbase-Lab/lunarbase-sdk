@@ -56,7 +56,7 @@ pub(super) fn take_ready_standard_head(
 pub(super) fn promote_updates(updates: &mut [ChainUpdate], commitment: Commitment) {
     for update in updates {
         match update {
-            ChainUpdate::Head(cursor) => cursor.commitment = commitment,
+            ChainUpdate::Head(head) => head.cursor.commitment = commitment,
             ChainUpdate::Log(log) => log.cursor.commitment = commitment,
             ChainUpdate::Reorg { .. } | ChainUpdate::Gap { .. } => {}
         }
@@ -144,11 +144,11 @@ pub(super) fn drain_completed_block(
     let mut completed_head = None;
     for update in reorder.drain_through(&head.cursor) {
         match update {
-            ChainUpdate::Head(cursor)
-                if cursor.block_number == head.cursor.block_number
-                    && cursor.block_hash == Some(block_hash) =>
+            ChainUpdate::Head(block)
+                if block.cursor.block_number == head.cursor.block_number
+                    && block.cursor.block_hash == Some(block_hash) =>
             {
-                completed_head = Some(ChainUpdate::Head(cursor));
+                completed_head = Some(ChainUpdate::Head(block));
             }
             ChainUpdate::Log(log)
                 if log.cursor.block_number == head.cursor.block_number
@@ -165,9 +165,9 @@ pub(super) fn drain_completed_block(
             }
             other => {
                 let (kind, cursor) = match &other {
-                    ChainUpdate::Head(cursor) => ("head", cursor),
+                    ChainUpdate::Head(head) => ("head", &head.cursor),
                     ChainUpdate::Log(log) => ("log", &log.cursor),
-                    ChainUpdate::Reorg { new_head, .. } => ("reorg", new_head),
+                    ChainUpdate::Reorg { new_head, .. } => ("reorg", &new_head.cursor),
                     ChainUpdate::Gap { cursor, .. } => {
                         let block = cursor.as_ref().map_or(0, |cursor| cursor.block_number);
                         return Err(SourceError::Gap(format!(

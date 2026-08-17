@@ -11,6 +11,8 @@ export interface ExecutionHead {
   readonly blockNumber: bigint;
   /** Block identifier supplied by the execution source, when available. */
   readonly blockHash?: Hex;
+  /** Parent block or proposal identifier, when supplied by the source. */
+  readonly parentHash?: Hex;
   /** Lifecycle confidence represented by the notification. */
   readonly commitment: Commitment;
 }
@@ -92,13 +94,16 @@ export class MonadExecutionNormalizer {
     if (event.kind === "Head")
       return {
         kind: "Head",
-        cursor: {
-          chainId: this.chainId,
-          blockNumber: event.head.blockNumber,
-          executionBlockNumber: event.head.blockNumber,
-          blockHash: event.head.blockHash,
-          sourceSequence: event.head.sequence,
-          commitment: event.head.commitment,
+        head: {
+          cursor: {
+            chainId: this.chainId,
+            blockNumber: event.head.blockNumber,
+            executionBlockNumber: event.head.blockNumber,
+            blockHash: event.head.blockHash,
+            sourceSequence: event.head.sequence,
+            commitment: event.head.commitment,
+          },
+          parentHash: event.head.parentHash,
         },
       };
     const log = event.log;

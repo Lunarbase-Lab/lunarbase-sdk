@@ -11,7 +11,7 @@ function head(blockNumber: bigint): ChainUpdate {
     executionBlockNumber: blockNumber,
     commitment: Commitment.Realtime,
   };
-  return { kind: "Head", cursor };
+  return { kind: "Head", head: { cursor } };
 }
 
 test("runtime queue replaces byte overflow with one explicit recovery gap", () => {

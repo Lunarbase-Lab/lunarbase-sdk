@@ -25,6 +25,7 @@ pub(super) enum LifecycleInput {
     Start {
         id: B256,
         block_number: u64,
+        parent_hash: B256,
     },
     End {
         block_hash: B256,
@@ -107,6 +108,7 @@ fn decode_payload(
             LifecycleInput::Start {
                 id: B256::new(start.block_tag.id.bytes),
                 block_number: start.block_tag.block_number,
+                parent_hash: B256::new(start.parent_eth_hash.bytes),
             }
         }
         ExecEventRef::BlockEnd(end) => LifecycleInput::End {

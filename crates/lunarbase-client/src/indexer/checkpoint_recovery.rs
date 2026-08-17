@@ -84,7 +84,10 @@ pub(super) async fn recover_checkpoint<S: ChainDataSource>(
             page_start = page_end.saturating_add(1);
         }
     }
-    indexer.apply_core_update(ChainUpdate::Head(head.clone()))?;
+    indexer.apply_core_update(ChainUpdate::Head(crate::model::BlockRef::new(
+        head.clone(),
+        None,
+    )))?;
     indexer.set_canonical_floor(head);
     indexer.reducer.publish_ready();
     Ok(())

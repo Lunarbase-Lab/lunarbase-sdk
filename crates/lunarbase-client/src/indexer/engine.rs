@@ -261,8 +261,8 @@ impl QuoteIndexer {
                     return Err(error.into());
                 }
             }
-            ChainUpdate::Head(cursor) => {
-                if let Err(error) = self.reducer.observe_head(cursor) {
+            ChainUpdate::Head(head) => {
+                if let Err(error) = self.reducer.observe_head(head.cursor) {
                     self.reducer.mark_not_ready();
                     return Err(error.into());
                 }
@@ -543,9 +543,9 @@ fn canonical_floor_covers_log(
 
 fn update_cursor(update: &ChainUpdate) -> Option<&ChainCursor> {
     match update {
-        ChainUpdate::Head(cursor) => Some(cursor),
+        ChainUpdate::Head(head) => Some(&head.cursor),
         ChainUpdate::Log(log) => Some(&log.cursor),
-        ChainUpdate::Reorg { new_head, .. } => Some(new_head),
+        ChainUpdate::Reorg { new_head, .. } => Some(&new_head.cursor),
         ChainUpdate::Gap { cursor, .. } => cursor.as_ref(),
     }
 }

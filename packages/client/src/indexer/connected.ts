@@ -341,7 +341,7 @@ async function restoreCheckpoint(
       pageStart = pageEnd + 1n;
     }
   }
-  indexer.applyCoreUpdate({ kind: "Head", cursor: head });
+  indexer.applyCoreUpdate({ kind: "Head", head: { cursor: head } });
   indexer.setCanonicalFloor(head);
   return indexer;
 }

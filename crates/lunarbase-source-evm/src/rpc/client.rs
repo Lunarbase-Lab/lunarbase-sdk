@@ -4,7 +4,9 @@ use crate::rpc::codec::{parse_filtered_rpc_log, parse_rpc_head, validate_canonic
 use crate::rpc::http::bounded_http_request;
 use alloy_primitives::{Bytes, U64, keccak256};
 use alloy_rpc_client::RpcClient;
-use lunarbase_client::model::{BackfillRequest, ChainCursor, Commitment, ContractLog, SourceError};
+use lunarbase_client::model::{
+    BackfillRequest, BlockRef, ChainCursor, Commitment, ContractLog, SourceError,
+};
 use lunarbase_math::Address;
 use lunarbase_math::B256;
 use serde::Serialize;
@@ -242,6 +244,18 @@ impl RpcHttpClient {
             .await
     }
 
+    /// Resolves one block cursor together with its parent linkage.
+    pub async fn block_ref(
+        &self,
+        block_tag: &str,
+        chain_id: u64,
+        commitment: Commitment,
+    ) -> Result<BlockRef, RpcError> {
+        let tag = validate_block_tag(block_tag)?;
+        let value: Value = self.request("eth_getBlockByNumber", (tag, false)).await?;
+        normalize_block_ref(&value, chain_id, commitment, false)
+    }
+
     /// Resolves a block cursor only from an exact response with explicit execution context.
     pub async fn block_cursor_with_execution_context(
         &self,
@@ -393,6 +407,16 @@ fn normalize_block_cursor(
     commitment: Commitment,
     require_execution_context: bool,
 ) -> Result<ChainCursor, RpcError> {
+    normalize_block_ref(value, chain_id, commitment, require_execution_context)
+        .map(|block| block.cursor)
+}
+
+fn normalize_block_ref(
+    value: &Value,
+    chain_id: u64,
+    commitment: Commitment,
+    require_execution_context: bool,
+) -> Result<BlockRef, RpcError> {
     let head = parse_rpc_head(value)?;
     let execution_block_number = match head.l1_block_number {
         Some(block_number) => block_number,
@@ -403,16 +427,19 @@ fn normalize_block_cursor(
         }
         None => head.number,
     };
-    Ok(ChainCursor {
-        chain_id,
-        block_number: head.number,
-        execution_block_number,
-        block_hash: head.hash,
-        transaction_index: None,
-        log_index: None,
-        source_sequence: None,
-        source_sub_index: None,
-        commitment,
+    Ok(BlockRef {
+        cursor: ChainCursor {
+            chain_id,
+            block_number: head.number,
+            execution_block_number,
+            block_hash: head.hash,
+            transaction_index: None,
+            log_index: None,
+            source_sequence: None,
+            source_sub_index: None,
+            commitment,
+        },
+        parent_hash: head.parent_hash,
     })
 }
 

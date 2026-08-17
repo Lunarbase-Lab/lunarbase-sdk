@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 mod decode;
 mod output;
+mod reorg;
 pub(crate) use decode::RawExecRecord;
 use decode::{LifecycleInput, decode_record};
 use output::{head, materialize_log};
@@ -38,6 +39,7 @@ pub(super) struct ProposalLifecycle {
 struct ActiveProposal {
     id: B256,
     block_number: u64,
+    parent_hash: B256,
     next_log_index: u32,
     logs: Vec<ExecutionLog>,
     log_bytes: usize,
@@ -55,6 +57,7 @@ enum ProposalState {
 struct Proposal {
     block_number: u64,
     block_hash: B256,
+    parent_hash: B256,
     last_sequence: u64,
     state: ProposalState,
     logs: Vec<ExecutionLog>,
@@ -105,7 +108,11 @@ impl ProposalLifecycle {
             self.synchronized = true;
         }
         match input {
-            LifecycleInput::Start { id, block_number } => self.start(sequence, id, block_number),
+            LifecycleInput::Start {
+                id,
+                block_number,
+                parent_hash,
+            } => self.start(sequence, id, block_number, parent_hash),
             LifecycleInput::End { block_hash } => self.end(sequence, block_number, block_hash),
             LifecycleInput::Qc { id, block_number } => self.qc(sequence, id, block_number),
             LifecycleInput::Finalized { id, block_number } => {
@@ -146,6 +153,7 @@ impl ProposalLifecycle {
         sequence: u64,
         id: B256,
         block_number: u64,
+        parent_hash: B256,
     ) -> Result<Vec<ExecutionEvent>, SourceError> {
         if self.active.is_some() {
             return Err(SourceError::Gap(
@@ -166,6 +174,7 @@ impl ProposalLifecycle {
                 id,
                 block_number,
                 None,
+                Some(parent_hash),
                 Commitment::Realtime,
                 &mut output,
             );
@@ -173,6 +182,7 @@ impl ProposalLifecycle {
                 sequence,
                 block_number,
                 None,
+                Some(parent_hash),
                 Commitment::Realtime,
             )));
             self.published.insert(block_number, id);
@@ -180,6 +190,7 @@ impl ProposalLifecycle {
         self.active = Some(ActiveProposal {
             id,
             block_number,
+            parent_hash,
             next_log_index: 0,
             logs: Vec::new(),
             log_bytes: 0,
@@ -283,6 +294,7 @@ impl ProposalLifecycle {
             Proposal {
                 block_number,
                 block_hash,
+                parent_hash: active.parent_hash,
                 last_sequence: sequence,
                 state: ProposalState::Proposed,
                 logs: active.logs,
@@ -297,6 +309,7 @@ impl ProposalLifecycle {
                 sequence,
                 block_number,
                 Some(block_hash),
+                Some(active.parent_hash),
                 active.published_commitment.unwrap_or(Commitment::Realtime),
             ))]),
             MonadDeliveryMode::Finalized => Ok(Vec::new()),
@@ -391,6 +404,7 @@ impl ProposalLifecycle {
             sequence,
             proposal.block_number,
             Some(proposal.block_hash),
+            Some(proposal.parent_hash),
             Commitment::Finalized,
         );
         self.remove_proposal(id);
@@ -409,6 +423,7 @@ impl ProposalLifecycle {
         })?;
         let block_number = proposal.block_number;
         let block_hash = proposal.block_hash;
+        let parent_hash = proposal.parent_hash;
         let branch_changed = self.published.get(&block_number).copied() != Some(id);
         let mut output = Vec::new();
         self.switch_branch(
@@ -416,6 +431,7 @@ impl ProposalLifecycle {
             id,
             block_number,
             Some(block_hash),
+            Some(parent_hash),
             commitment,
             &mut output,
         );
@@ -446,54 +462,11 @@ impl ProposalLifecycle {
             sequence,
             block_number,
             Some(block_hash),
+            Some(parent_hash),
             commitment,
         )));
         self.published.insert(block_number, id);
         Ok(output)
-    }
-
-    fn switch_branch(
-        &self,
-        sequence: u64,
-        id: B256,
-        block_number: u64,
-        block_hash: Option<B256>,
-        commitment: Commitment,
-        output: &mut Vec<ExecutionEvent>,
-    ) {
-        let Some(previous_id) = self.published.get(&block_number).copied() else {
-            return;
-        };
-        if previous_id == id {
-            return;
-        }
-        let Some(previous) = self.proposals.get(&previous_id) else {
-            return;
-        };
-        if self.emit_removed_logs {
-            output.extend(previous.logs.iter().cloned().map(|log| {
-                ExecutionEvent::Log(materialize_log(
-                    log,
-                    Some(sequence),
-                    previous.block_hash,
-                    previous
-                        .published_commitment
-                        .unwrap_or(Commitment::Realtime),
-                    true,
-                ))
-            }));
-        }
-        output.push(ExecutionEvent::Reorg {
-            old_head: head(
-                previous.last_sequence,
-                block_number,
-                Some(previous.block_hash),
-                previous
-                    .published_commitment
-                    .unwrap_or(Commitment::Realtime),
-            ),
-            new_head: head(sequence, block_number, block_hash, commitment),
-        });
     }
 
     fn remove_proposal(&mut self, id: B256) {

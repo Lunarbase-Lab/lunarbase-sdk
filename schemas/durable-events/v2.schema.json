@@ -166,7 +166,6 @@
           "blockNumber",
           "executionBlockNumber",
           "blockHash",
-          "parentHash",
           "transactionHash",
           "transactionIndex",
           "logIndex",

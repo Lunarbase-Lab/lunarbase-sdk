@@ -148,6 +148,7 @@ fn block_head(block: &Arc<ExecutedBlock>, sequence: u64, commitment: Commitment)
         sequence,
         block_number: block.start.block_tag.block_number,
         block_hash: Some(B256::new(block.end.eth_block_hash.bytes)),
+        parent_hash: Some(B256::new(block.start.parent_eth_hash.bytes)),
         commitment,
     }
 }

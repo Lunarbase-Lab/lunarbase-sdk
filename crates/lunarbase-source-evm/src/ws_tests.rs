@@ -13,8 +13,8 @@ use alloy_rpc_client::RpcClient;
 use alloy_transport::mock::Asserter;
 use lunarbase_client::{
     model::{
-        ChainCursor, ChainUpdate, Commitment, ContractFilter, ContractLog, DeploymentConfig,
-        MATH_COMPATIBILITY_VERSION, Network,
+        BlockRef, ChainCursor, ChainUpdate, Commitment, ContractFilter, ContractLog,
+        DeploymentConfig, MATH_COMPATIBILITY_VERSION, Network,
     },
     source::ChainDataSource,
     state::ordering::CursorReorderBuffer,
@@ -100,14 +100,14 @@ fn delivery_modes_expose_distinct_commitment_and_ordering_policies() {
 fn completed_updates_are_promoted_only_after_block_ordering() {
     let mut updates = vec![
         ChainUpdate::Log(rpc_log(42, B256::new([0x11; 32]), 2, 3)),
-        ChainUpdate::Head(cursor(42, None, None)),
+        ChainUpdate::Head(BlockRef::new(cursor(42, None, None), None)),
     ];
     promote_updates(&mut updates, Commitment::Canonical);
     assert!(
         matches!(&updates[0], ChainUpdate::Log(log) if log.cursor.commitment == Commitment::Canonical)
     );
     assert!(
-        matches!(&updates[1], ChainUpdate::Head(cursor) if cursor.commitment == Commitment::Canonical)
+        matches!(&updates[1], ChainUpdate::Head(head) if head.cursor.commitment == Commitment::Canonical)
     );
 }
 
@@ -290,12 +290,8 @@ fn successor_grace_accepts_late_log_and_releases_at_deadline_without_a_third_hea
     );
 
     let mut reorder = CursorReorderBuffer::new(4).unwrap();
-    reorder
-        .push(ChainUpdate::Head(head.cursor.clone()))
-        .unwrap();
-    reorder
-        .push(ChainUpdate::Head(successor.cursor.clone()))
-        .unwrap();
+    reorder.push(ChainUpdate::Head(head.clone())).unwrap();
+    reorder.push(ChainUpdate::Head(successor.clone())).unwrap();
     reorder
         .push(ChainUpdate::Log(rpc_log(42, hash, 5, 8)))
         .unwrap();
@@ -318,7 +314,7 @@ fn successor_grace_accepts_late_log_and_releases_at_deadline_without_a_third_hea
         ChainUpdate::Log(log)
             if log.cursor.transaction_index == Some(5) && log.cursor.log_index == Some(8)
     ));
-    assert!(matches!(&updates[2], ChainUpdate::Head(cursor) if cursor.block_number == 42));
+    assert!(matches!(&updates[2], ChainUpdate::Head(head) if head.cursor.block_number == 42));
     assert_eq!(open_heads.len(), 1, "the successor remains open");
     assert_eq!(reorder.len(), 1, "the successor remains buffered");
 }
@@ -335,9 +331,7 @@ fn completed_block_rejects_a_log_from_another_hash_before_publication() {
     )
     .unwrap();
     let mut reorder = CursorReorderBuffer::new(2).unwrap();
-    reorder
-        .push(ChainUpdate::Head(head.cursor.clone()))
-        .unwrap();
+    reorder.push(ChainUpdate::Head(head.clone())).unwrap();
     reorder
         .push(ChainUpdate::Log(rpc_log(42, B256::new([0x33; 32]), 2, 3)))
         .unwrap();
@@ -364,9 +358,7 @@ fn first_completed_head_retains_an_earlier_startup_log_for_handoff() {
     reorder
         .push(ChainUpdate::Log(rpc_log(42, B256::new([0x11; 32]), 2, 3)))
         .unwrap();
-    reorder
-        .push(ChainUpdate::Head(head.cursor.clone()))
-        .unwrap();
+    reorder.push(ChainUpdate::Head(head.clone())).unwrap();
 
     let retained = drain_completed_block(&mut reorder, &head, true).unwrap();
     assert!(matches!(

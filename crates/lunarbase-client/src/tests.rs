@@ -6,8 +6,8 @@ use crate::indexer::client_types::{ClientConnectConfig, CoreEventSinkPolicy};
 use crate::indexer::engine::QuoteIndexer;
 use crate::indexer::errors::IndexerError;
 use crate::model::{
-    BackfillRequest, ChainCursor, ChainUpdate, Checkpoint, Commitment, ContractFilter, ContractLog,
-    DeploymentConfig, MATH_COMPATIBILITY_VERSION, Network, SourceError,
+    BackfillRequest, BlockRef, ChainCursor, ChainUpdate, Checkpoint, Commitment, ContractFilter,
+    ContractLog, DeploymentConfig, MATH_COMPATIBILITY_VERSION, Network, SourceError,
 };
 use crate::protocol::abi::{TOPIC_LANE_ADDED, quote_critical_topics};
 use crate::source::{ChainDataSource, SourceStream};
@@ -271,7 +271,10 @@ async fn subscription_event_during_snapshot_is_applied_after_handoff() {
     wait_until(|| source.subscribe_calls.load(Ordering::Relaxed) == 1).await;
     let log = unknown_log(101);
     source.publish(ChainUpdate::Log(log.clone()));
-    source.publish(ChainUpdate::Head(cursor(101, Commitment::Realtime)));
+    source.publish(ChainUpdate::Head(BlockRef::new(
+        cursor(101, Commitment::Realtime),
+        None,
+    )));
     assert!(
         tokio::time::timeout(Duration::from_millis(20), event_receiver.recv())
             .await
@@ -493,7 +496,7 @@ fn same_height_handoff_with_another_hash_fails_closed() {
     conflicting.source_sequence = Some(1);
 
     assert!(matches!(
-        indexer.apply_handoff(vec![ChainUpdate::Head(conflicting)]),
+        indexer.apply_handoff(vec![ChainUpdate::Head(BlockRef::new(conflicting, None))]),
         Err(IndexerError::Reducer(
             crate::state::reducer::ReducerError::BlockHashMismatch
         ))

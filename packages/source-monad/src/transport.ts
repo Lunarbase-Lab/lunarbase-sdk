@@ -206,6 +206,7 @@ export class MonadParserSource implements ChainDataSource, ExecutionEventReader 
               sequence: head.sourceSequence ?? 0n,
               blockNumber: head.blockNumber,
               blockHash: head.blockHash,
+              parentHash: parserParentHash(result),
               commitment: head.commitment,
             },
           };
@@ -426,6 +427,11 @@ function parserHeadHash(value: Record<string, unknown>): Hex.Hex | undefined {
     header?.blockTag && typeof header.blockTag === "object" ? (header.blockTag as Record<string, unknown>) : undefined;
   const candidate = value.blockHash ?? blockTag?.id;
   return candidate === undefined || candidate === null ? undefined : parseHash(candidate, "head.blockHash");
+}
+
+function parserParentHash(value: Record<string, unknown>): Hex.Hex | undefined {
+  const candidate = value.parentHash;
+  return candidate === undefined || candidate === null ? undefined : parseHash(candidate, "head.parentHash");
 }
 
 function parseParserLog(

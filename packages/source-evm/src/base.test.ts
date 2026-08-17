@@ -51,7 +51,10 @@ test("Base treats changing same-height Flashblock heads as progress", async () =
   });
   const update = (await second).value;
   assert.equal(update?.kind, "Head");
-  if (update?.kind === "Head") assert.equal(update.cursor.sourceSequence, 2n);
+  if (update?.kind === "Head") {
+    assert.equal(update.head.cursor.sourceSequence, 2n);
+    assert.equal(update.head.parentHash, `0x${"22".repeat(32)}`);
+  }
   abort.abort();
   await iterator.return?.();
   assert.equal(socket.closeCalls, 1);

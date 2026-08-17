@@ -128,9 +128,9 @@ impl CursorReorderBuffer {
 
 fn update_key(update: &ChainUpdate) -> CursorKey {
     match update {
-        ChainUpdate::Head(cursor) => cursor_key(cursor, 0),
+        ChainUpdate::Head(head) => cursor_key(&head.cursor, 0),
         ChainUpdate::Log(log) => cursor_key(&log.cursor, 1),
-        ChainUpdate::Reorg { new_head, .. } => cursor_key(new_head, 2),
+        ChainUpdate::Reorg { new_head, .. } => cursor_key(&new_head.cursor, 2),
         ChainUpdate::Gap { cursor, .. } => cursor
             .as_ref()
             .map_or((u64::MAX, 0, 0, 0, 0, 3), |cursor| cursor_key(cursor, 3)),
@@ -167,7 +167,7 @@ fn cursor_key(cursor: &ChainCursor, rank: u8) -> CursorKey {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{ChainCursor, ChainUpdate, Commitment, ContractLog};
+    use crate::model::{BlockRef, ChainCursor, ChainUpdate, Commitment, ContractLog};
     use crate::state::ordering::CursorReorderBuffer;
     use lunarbase_math::{Address, Bytes};
 
@@ -185,23 +185,27 @@ mod tests {
         }
     }
 
+    fn head(cursor: ChainCursor) -> ChainUpdate {
+        ChainUpdate::Head(BlockRef::new(cursor, None))
+    }
+
     #[test]
     fn reorders_unique_updates_without_eviction() {
         let mut buffer = CursorReorderBuffer::new(3).unwrap();
-        let later = ChainUpdate::Head(cursor(11, None, None));
-        let earlier = ChainUpdate::Head(cursor(10, None, None));
+        let later = head(cursor(11, None, None));
+        let earlier = head(cursor(10, None, None));
         buffer.push(later.clone()).unwrap();
         buffer.push(earlier.clone()).unwrap();
         assert_eq!(
             buffer.drain_all(),
-            vec![ChainUpdate::Head(cursor(10, None, None)), later,]
+            vec![head(cursor(10, None, None)), later,]
         );
     }
 
     #[test]
     fn repeated_cursor_requires_canonical_recovery() {
         let mut buffer = CursorReorderBuffer::new(3).unwrap();
-        let update = ChainUpdate::Head(cursor(10, None, None));
+        let update = head(cursor(10, None, None));
         buffer.push(update.clone()).unwrap();
         assert!(buffer.push(update).is_err());
         assert!(buffer.is_poisoned());
@@ -219,12 +223,10 @@ mod tests {
             cursor: cursor(10, Some(3), Some(7)),
         });
         buffer.push(log.clone()).unwrap();
-        buffer
-            .push(ChainUpdate::Head(cursor(10, None, None)))
-            .unwrap();
+        buffer.push(head(cursor(10, None, None))).unwrap();
         assert_eq!(
             buffer.drain_through(&cursor(10, None, None)),
-            vec![ChainUpdate::Head(cursor(10, None, None)), log]
+            vec![head(cursor(10, None, None)), log]
         );
         assert!(buffer.is_empty());
     }
@@ -232,25 +234,15 @@ mod tests {
     #[test]
     fn overflow_poison_is_sticky() {
         let mut buffer = CursorReorderBuffer::new(1).unwrap();
-        buffer
-            .push(ChainUpdate::Head(cursor(1, None, None)))
-            .unwrap();
-        assert!(
-            buffer
-                .push(ChainUpdate::Head(cursor(2, None, None)))
-                .is_err()
-        );
+        buffer.push(head(cursor(1, None, None))).unwrap();
+        assert!(buffer.push(head(cursor(2, None, None))).is_err());
         assert!(buffer.is_poisoned());
-        assert!(
-            buffer
-                .push(ChainUpdate::Head(cursor(3, None, None)))
-                .is_err()
-        );
+        assert!(buffer.push(head(cursor(3, None, None))).is_err());
     }
 
     #[test]
     fn byte_budget_is_released_on_drain_and_overflow_fails_closed() {
-        let first = ChainUpdate::Head(cursor(1, None, None));
+        let first = head(cursor(1, None, None));
         let bytes = first.retained_bytes();
         let mut buffer = CursorReorderBuffer::with_limits(10, bytes).unwrap();
         buffer.push(first.clone()).unwrap();
@@ -258,14 +250,8 @@ mod tests {
         assert_eq!(buffer.drain_all(), vec![first]);
         assert_eq!(buffer.retained_bytes(), 0);
 
-        buffer
-            .push(ChainUpdate::Head(cursor(2, None, None)))
-            .unwrap();
-        assert!(
-            buffer
-                .push(ChainUpdate::Head(cursor(3, None, None)))
-                .is_err()
-        );
+        buffer.push(head(cursor(2, None, None))).unwrap();
+        assert!(buffer.push(head(cursor(3, None, None))).is_err());
         assert!(buffer.is_poisoned());
     }
 }

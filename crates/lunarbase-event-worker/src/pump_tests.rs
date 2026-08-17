@@ -1,7 +1,7 @@
 use super::{PumpRuntime, send};
 use crate::metrics::Metrics;
 use alloy_primitives::{Address, B256, Bytes};
-use lunarbase_client::model::{ChainCursor, ChainUpdate, Commitment, ContractLog};
+use lunarbase_client::model::{BlockRef, ChainCursor, ChainUpdate, Commitment, ContractLog};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{Semaphore, mpsc, watch};
 
@@ -33,14 +33,19 @@ async fn oversized_update_becomes_a_terminal_gap_instead_of_disappearing() {
 async fn saturated_queue_backpressures_and_preserves_both_updates() {
     let metrics = Arc::new(Metrics::new(1, 1024, 1, 1024));
     let (sender, mut receiver) = mpsc::channel(1);
-    let first_update = ChainUpdate::Head(cursor(1));
+    let first_update = ChainUpdate::Head(BlockRef::new(cursor(1), None));
     let (mut runtime, shutdown_guard) = runtime(metrics.clone(), first_update.retained_bytes());
     assert!(send(&sender, first_update, &mut runtime).await);
 
     let second_sender = sender.clone();
     let second = tokio::spawn(async move {
         let _shutdown_guard = shutdown_guard;
-        send(&second_sender, ChainUpdate::Head(cursor(2)), &mut runtime).await
+        send(
+            &second_sender,
+            ChainUpdate::Head(BlockRef::new(cursor(2), None)),
+            &mut runtime,
+        )
+        .await
     });
     tokio::task::yield_now().await;
     assert!(!second.is_finished());
@@ -53,8 +58,8 @@ async fn saturated_queue_backpressures_and_preserves_both_updates() {
     let first = receiver.recv().await.unwrap().into_inner();
     assert!(second.await.unwrap());
     let second = receiver.recv().await.unwrap().into_inner();
-    assert!(matches!(first, ChainUpdate::Head(cursor) if cursor.block_number == 1));
-    assert!(matches!(second, ChainUpdate::Head(cursor) if cursor.block_number == 2));
+    assert!(matches!(first, ChainUpdate::Head(head) if head.cursor.block_number == 1));
+    assert!(matches!(second, ChainUpdate::Head(head) if head.cursor.block_number == 2));
 }
 
 fn runtime(metrics: Arc<Metrics>, byte_capacity: usize) -> (PumpRuntime, watch::Sender<bool>) {

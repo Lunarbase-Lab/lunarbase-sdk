@@ -385,6 +385,7 @@ fn convert_event(
                 sequence,
                 start.block_tag.block_number,
                 None,
+                Some(B256::new(start.parent_eth_hash.bytes)),
                 Commitment::Realtime,
             ))
         }
@@ -392,11 +393,13 @@ fn convert_event(
             sequence,
             required_block_number(block_number)?,
             Some(B256::new(end.eth_block_hash.bytes)),
+            None,
             Commitment::Realtime,
         )),
         ExecEvent::BlockQC(qc) => Some(head(
             sequence,
             qc.block_tag.block_number,
+            None,
             None,
             Commitment::Canonical,
         )),
@@ -404,11 +407,13 @@ fn convert_event(
             sequence,
             tag.block_number,
             None,
+            None,
             Commitment::Finalized,
         )),
         ExecEvent::BlockVerified(verified) => Some(head(
             sequence,
             verified.block_number,
+            None,
             None,
             Commitment::Finalized,
         )),
@@ -473,12 +478,14 @@ fn head(
     sequence: u64,
     block_number: u64,
     block_hash: Option<B256>,
+    parent_hash: Option<B256>,
     commitment: Commitment,
 ) -> ExecutionEvent {
     ExecutionEvent::Head(ExecutionHead {
         sequence,
         block_number,
         block_hash,
+        parent_hash,
         commitment,
     })
 }

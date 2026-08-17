@@ -25,12 +25,14 @@ pub(super) fn head(
     sequence: u64,
     block_number: u64,
     block_hash: Option<B256>,
+    parent_hash: Option<B256>,
     commitment: Commitment,
 ) -> ExecutionHead {
     ExecutionHead {
         sequence,
         block_number,
         block_hash,
+        parent_hash,
         commitment,
     }
 }

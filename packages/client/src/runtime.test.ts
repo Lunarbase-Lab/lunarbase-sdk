@@ -326,7 +326,7 @@ test("handoff never covers an older update from another chain", () => {
     executionBlockNumber: cursor().executionBlockNumber - 1n,
   };
 
-  assert.throws(() => indexer.replayHandoff([{ kind: "Head", cursor: foreign }], cursor()), {
+  assert.throws(() => indexer.replayHandoff([{ kind: "Head", head: { cursor: foreign } }], cursor()), {
     code: "REDUCER",
   });
   assert.equal(indexer.health().ready, false);
@@ -341,7 +341,7 @@ test("same-height handoff with another block hash fails closed", () => {
     sourceSequence: 1n,
   };
 
-  assert.throws(() => indexer.replayHandoff([{ kind: "Head", cursor: conflicting }], cursor()), {
+  assert.throws(() => indexer.replayHandoff([{ kind: "Head", head: { cursor: conflicting } }], cursor()), {
     code: "REDUCER",
   });
   assert.equal(indexer.health().ready, false);

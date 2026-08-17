@@ -111,18 +111,20 @@ async fn realtime_stream_emits_reorg_before_the_replacement_head() {
     let reorg = stream.next().await.unwrap().unwrap();
     let replacement = stream.next().await.unwrap().unwrap();
 
-    assert!(
-        matches!(&original, ChainUpdate::Head(cursor) if cursor.block_hash == Some(B256::new([0x11; 32])))
-    );
+    assert!(matches!(&original, ChainUpdate::Head(head)
+            if head.cursor.block_hash == Some(B256::new([0x11; 32]))
+                && head.parent_hash == Some(B256::new([0x22; 32]))));
     assert!(matches!(
         &reorg,
         ChainUpdate::Reorg { old_head, new_head }
-            if old_head.block_hash == Some(B256::new([0x11; 32]))
-                && new_head.block_hash == Some(B256::new([0x33; 32]))
+            if old_head.cursor.block_hash == Some(B256::new([0x11; 32]))
+                && old_head.parent_hash == Some(B256::new([0x22; 32]))
+                && new_head.cursor.block_hash == Some(B256::new([0x33; 32]))
+                && new_head.parent_hash == Some(B256::new([0x44; 32]))
     ));
-    assert!(
-        matches!(&replacement, ChainUpdate::Head(cursor) if cursor.block_hash == Some(B256::new([0x33; 32])))
-    );
+    assert!(matches!(&replacement, ChainUpdate::Head(head)
+            if head.cursor.block_hash == Some(B256::new([0x33; 32]))
+                && head.parent_hash == Some(B256::new([0x44; 32]))));
     server.await.unwrap();
 }
 
@@ -158,7 +160,7 @@ async fn finalized_stream_advances_with_bounded_http_pages() {
     let update = stream.next().await.unwrap().unwrap();
 
     assert!(
-        matches!(update, ChainUpdate::Head(cursor) if cursor.block_number == 17 && cursor.commitment == Commitment::Finalized)
+        matches!(update, ChainUpdate::Head(head) if head.cursor.block_number == 17 && head.cursor.commitment == Commitment::Finalized)
     );
     assert!(
         asserter.read_q().is_empty(),

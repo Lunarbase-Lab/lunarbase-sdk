@@ -120,7 +120,7 @@ export class QuoteIndexer {
           break;
         }
         case "Head":
-          this.reducer.observeHead(update.cursor);
+          this.reducer.observeHead(update.head.cursor);
           break;
         case "Reorg":
           throw new IndexerError("GAP", "reorg requires canonical recovery");

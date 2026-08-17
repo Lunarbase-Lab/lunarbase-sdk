@@ -27,7 +27,6 @@ const logFields = [
   "blockNumber",
   "executionBlockNumber",
   "blockHash",
-  "parentHash",
   "transactionHash",
   "transactionIndex",
   "logIndex",
@@ -79,7 +78,7 @@ function validateRecord(record) {
     assert.match(record.logicalLogId, idPattern);
     assert.match(record.lifecycleRevision, positivePattern);
     assert.match(record.blockHash, hashPattern);
-    assert.match(record.parentHash, hashPattern);
+    if (record.parentHash !== undefined) assert.match(record.parentHash, hashPattern);
     assert.match(record.transactionHash, hashPattern);
     const topics = JSON.parse(record.topics);
     assert.ok(topics.length >= 1 && topics.length <= 4);

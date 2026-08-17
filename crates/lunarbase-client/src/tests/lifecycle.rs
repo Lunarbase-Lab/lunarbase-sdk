@@ -31,7 +31,10 @@ async fn reducer_publication_updates_state_freshness_separately_from_ingestion()
     assert_ne!(initial.last_state_update_unix_millis, 0);
     assert_eq!(initial.last_source_update_unix_millis, 0);
 
-    source.publish(ChainUpdate::Head(cursor(101, Commitment::Realtime)));
+    source.publish(ChainUpdate::Head(BlockRef::new(
+        cursor(101, Commitment::Realtime),
+        None,
+    )));
     wait_until(|| {
         client
             .health()
@@ -52,7 +55,10 @@ async fn graceful_shutdown_returns_state_after_the_reducer_stops() {
     let client = ConnectedQuoteClient::connect(config(), source.clone(), None)
         .await
         .unwrap();
-    source.publish(ChainUpdate::Head(cursor(101, Commitment::Realtime)));
+    source.publish(ChainUpdate::Head(BlockRef::new(
+        cursor(101, Commitment::Realtime),
+        None,
+    )));
     wait_until(|| client.runtime_stats().last_source_update_unix_millis != 0).await;
 
     let checkpoint = client

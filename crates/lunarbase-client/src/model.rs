@@ -140,6 +140,31 @@ impl ChainCursor {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+/// Block identity and parent linkage carried by every head-level update.
+///
+/// Some proposal transports announce a height before the final EVM block hash
+/// is known. Those sources leave either hash absent and later publish a
+/// complete `BlockRef`; fork-aware durable consumers fail closed until both
+/// hashes are available.
+pub struct BlockRef {
+    /// Ordered source position and execution height for this block.
+    pub cursor: ChainCursor,
+    /// Hash of the parent block or proposal, when supplied by the source.
+    #[serde(default)]
+    pub parent_hash: Option<B256>,
+}
+
+impl BlockRef {
+    /// Creates a block reference without changing cursor ordering semantics.
+    pub const fn new(cursor: ChainCursor, parent_hash: Option<B256>) -> Self {
+        Self {
+            cursor,
+            parent_hash,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 /// Normalized EVM contract log independent of its transport.
 pub struct ContractLog {
     /// Contract that emitted the log.
@@ -177,15 +202,15 @@ impl ContractLog {
 /// Complete normalized update vocabulary consumed by the reducer.
 pub enum ChainUpdate {
     /// Advances chain position without changing quote-critical contract state.
-    Head(ChainCursor),
+    Head(BlockRef),
     /// Applies one contract log at its normalized event position.
     Log(ContractLog),
     /// Signals that the previous head was replaced by another branch.
     Reorg {
         /// Last head observed on the abandoned branch.
-        old_head: ChainCursor,
+        old_head: BlockRef,
         /// First known head on the replacement branch.
-        new_head: ChainCursor,
+        new_head: BlockRef,
     },
     /// Signals missing or unordered source data that requires canonical recovery.
     Gap {

@@ -1,6 +1,7 @@
 use super::*;
 
 const BLOCK: u64 = 77;
+const PARENT: u8 = 0x70;
 
 fn key(byte: u8) -> B256 {
     B256::new([byte; 32])
@@ -37,11 +38,11 @@ fn lifecycle_with_removals(
 #[test]
 fn published_competing_branch_emits_removals_before_reorg() {
     let mut lifecycle = lifecycle_with_removals(MonadDeliveryMode::BlockOrdered, true);
-    lifecycle.start(1, key(1), BLOCK).unwrap();
+    lifecycle.start(1, key(1), BLOCK, key(PARENT)).unwrap();
     matching_log(&mut lifecycle, 2, 0xaa);
     lifecycle.end(3, Some(BLOCK), key(0xa1)).unwrap();
 
-    lifecycle.start(4, key(2), BLOCK).unwrap();
+    lifecycle.start(4, key(2), BLOCK, key(PARENT)).unwrap();
     matching_log(&mut lifecycle, 5, 0xbb);
     let switched = lifecycle.end(6, Some(BLOCK), key(0xb2)).unwrap();
     assert!(matches!(
@@ -75,10 +76,20 @@ fn matching_log(lifecycle: &mut ProposalLifecycle, sequence: u64, byte: u8) -> V
 #[test]
 fn finalized_mode_publishes_only_selected_proposal_and_releases_budgets() {
     let mut lifecycle = lifecycle(MonadDeliveryMode::Finalized);
-    assert!(lifecycle.start(1, key(1), BLOCK).unwrap().is_empty());
+    assert!(
+        lifecycle
+            .start(1, key(1), BLOCK, key(PARENT))
+            .unwrap()
+            .is_empty()
+    );
     assert!(matching_log(&mut lifecycle, 2, 0xaa).is_empty());
     assert!(lifecycle.end(3, Some(BLOCK), key(0xa1)).unwrap().is_empty());
-    assert!(lifecycle.start(4, key(2), BLOCK).unwrap().is_empty());
+    assert!(
+        lifecycle
+            .start(4, key(2), BLOCK, key(PARENT))
+            .unwrap()
+            .is_empty()
+    );
     assert!(matching_log(&mut lifecycle, 5, 0xbb).is_empty());
     assert!(lifecycle.end(6, Some(BLOCK), key(0xb2)).unwrap().is_empty());
 
@@ -95,6 +106,7 @@ fn finalized_mode_publishes_only_selected_proposal_and_releases_budgets() {
         &output[1],
         ExecutionEvent::Head(head)
             if head.block_hash == Some(key(0xb2))
+                && head.parent_hash == Some(key(PARENT))
                 && head.commitment == Commitment::Finalized
     ));
     assert_eq!(lifecycle.proposals.len(), 1);
@@ -107,7 +119,7 @@ fn finalized_mode_publishes_only_selected_proposal_and_releases_budgets() {
 #[test]
 fn block_ordered_mode_announces_competing_proposal_reorg_before_logs() {
     let mut lifecycle = lifecycle(MonadDeliveryMode::BlockOrdered);
-    lifecycle.start(1, key(1), BLOCK).unwrap();
+    lifecycle.start(1, key(1), BLOCK, key(PARENT)).unwrap();
     matching_log(&mut lifecycle, 2, 0xaa);
     let first = lifecycle.end(3, Some(BLOCK), key(0xa1)).unwrap();
     assert!(matches!(
@@ -115,7 +127,7 @@ fn block_ordered_mode_announces_competing_proposal_reorg_before_logs() {
         [ExecutionEvent::Log(_), ExecutionEvent::Head(_)]
     ));
 
-    lifecycle.start(4, key(2), BLOCK).unwrap();
+    lifecycle.start(4, key(2), BLOCK, key(PARENT)).unwrap();
     matching_log(&mut lifecycle, 5, 0xbb);
     let second = lifecycle.end(6, Some(BLOCK), key(0xb2)).unwrap();
     assert!(matches!(
@@ -131,7 +143,7 @@ fn block_ordered_mode_announces_competing_proposal_reorg_before_logs() {
 #[test]
 fn realtime_mode_never_buffers_matching_payloads() {
     let mut lifecycle = lifecycle(MonadDeliveryMode::Realtime);
-    let start = lifecycle.start(1, key(1), BLOCK).unwrap();
+    let start = lifecycle.start(1, key(1), BLOCK, key(PARENT)).unwrap();
     assert!(matches!(start.as_slice(), [ExecutionEvent::Head(_)]));
     let output = matching_log(&mut lifecycle, 2, 0xaa);
     assert!(matches!(output.as_slice(), [ExecutionEvent::Log(_)]));
@@ -142,14 +154,14 @@ fn realtime_mode_never_buffers_matching_payloads() {
 #[test]
 fn realtime_event_worker_retracts_an_abandoned_published_log() {
     let mut lifecycle = lifecycle_with_removals(MonadDeliveryMode::Realtime, true);
-    lifecycle.start(1, key(1), BLOCK).unwrap();
+    lifecycle.start(1, key(1), BLOCK, key(PARENT)).unwrap();
     assert!(matches!(
         matching_log(&mut lifecycle, 2, 0xaa).as_slice(),
         [ExecutionEvent::Log(log)] if !log.removed
     ));
     lifecycle.end(3, Some(BLOCK), key(0xa1)).unwrap();
 
-    let switched = lifecycle.start(4, key(2), BLOCK).unwrap();
+    let switched = lifecycle.start(4, key(2), BLOCK, key(PARENT)).unwrap();
     assert!(matches!(
         switched.as_slice(),
         [
@@ -173,7 +185,7 @@ fn pending_log_byte_budget_fails_closed() {
             max_bytes: 32,
         },
     );
-    lifecycle.start(1, key(1), BLOCK).unwrap();
+    lifecycle.start(1, key(1), BLOCK, key(PARENT)).unwrap();
     let error = lifecycle
         .log(
             2,

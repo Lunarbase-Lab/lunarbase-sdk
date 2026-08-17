@@ -197,10 +197,10 @@ impl ArbitrumNitroSource {
 
     async fn enrich_update(&self, update: ChainUpdate) -> Result<ChainUpdate, SourceError> {
         match update {
-            ChainUpdate::Head(cursor) => self
-                .with_nitro_execution_context(cursor)
-                .await
-                .map(ChainUpdate::Head),
+            ChainUpdate::Head(mut head) => {
+                head.cursor = self.with_nitro_execution_context(head.cursor).await?;
+                Ok(ChainUpdate::Head(head))
+            }
             ChainUpdate::Log(mut log) => {
                 log.cursor = self.with_nitro_execution_context(log.cursor).await?;
                 Ok(ChainUpdate::Log(log))

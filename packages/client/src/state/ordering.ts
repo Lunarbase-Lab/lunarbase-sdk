@@ -94,11 +94,11 @@ function cursorKey(cursor: ChainCursor, rank: number): CursorKey {
 function updateKey(update: ChainUpdate): CursorKey {
   switch (update.kind) {
     case "Head":
-      return cursorKey(update.cursor, 0);
+      return cursorKey(update.head.cursor, 0);
     case "Log":
       return cursorKey(update.log.cursor, 1);
     case "Reorg":
-      return cursorKey(update.newHead, 2);
+      return cursorKey(update.newHead.cursor, 2);
     case "Gap":
       return update.cursor ? cursorKey(update.cursor, 3) : [(1n << 256n) - 1n, 0n, 0n, 0n, 0n, 3];
   }

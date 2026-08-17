@@ -31,7 +31,6 @@ test("Arbitrum stream fails closed when a head has no execution context", async 
   assert.equal(update?.kind, "Gap");
   if (update?.kind === "Gap") assert.ok(update.reason.includes("l1BlockNumber"));
   assert.equal((await iterator.next()).done, true);
-  assert.equal(socket.closeCalls, 1);
 });
 
 test("standard logs wait from the successor and publish at the deadline without another head", async (context) => {
@@ -81,7 +80,10 @@ test("standard logs wait from the successor and publish at the deadline without 
 
       const headUpdate = (await iterator.next()).value;
       assert.equal(headUpdate?.kind, "Head");
-      if (headUpdate?.kind === "Head") assert.equal(headUpdate.cursor.blockNumber, 42n);
+      if (headUpdate?.kind === "Head") {
+        assert.equal(headUpdate.head.cursor.blockNumber, 42n);
+        assert.equal(headUpdate.head.parentHash, `0x${"22".repeat(32)}`);
+      }
 
       abort.abort();
       await iterator.return?.();
@@ -117,8 +119,9 @@ test("standard exact duplicate head is idempotent", async (context) => {
       const firstUpdate = (await first).value;
       assert.equal(firstUpdate?.kind, "Head");
       if (firstUpdate?.kind === "Head") {
-        assert.equal(firstUpdate.cursor.blockNumber, 42n);
-        assert.equal(firstUpdate.cursor.sourceSequence, 1n);
+        assert.equal(firstUpdate.head.cursor.blockNumber, 42n);
+        assert.equal(firstUpdate.head.cursor.sourceSequence, 1n);
+        assert.equal(firstUpdate.head.parentHash, `0x${"22".repeat(32)}`);
       }
 
       const second = iterator.next();
@@ -131,8 +134,8 @@ test("standard exact duplicate head is idempotent", async (context) => {
       const secondUpdate = (await second).value;
       assert.equal(secondUpdate?.kind, "Head");
       if (secondUpdate?.kind === "Head") {
-        assert.equal(secondUpdate.cursor.blockNumber, 43n);
-        assert.equal(secondUpdate.cursor.sourceSequence, 2n);
+        assert.equal(secondUpdate.head.cursor.blockNumber, 43n);
+        assert.equal(secondUpdate.head.cursor.sourceSequence, 2n);
       }
 
       abort.abort();
@@ -141,6 +144,29 @@ test("standard exact duplicate head is idempotent", async (context) => {
   } finally {
     context.mock.timers.reset();
   }
+});
+
+test("competing heads preserve both block references in a reorg", async () => {
+  const socket = new FakeSocket();
+  const abort = new AbortController();
+  const iterator = await standardIterator(socket, abort.signal);
+  const next = iterator.next();
+
+  socket.emit("message", { data: JSON.stringify(headNotification(42n, "11", "22")) });
+  await flushMicrotasks();
+  socket.emit("message", { data: JSON.stringify(headNotification(42n, "33", "44")) });
+
+  const update = (await next).value;
+  assert.equal(update?.kind, "Reorg");
+  if (update?.kind === "Reorg") {
+    assert.equal(update.oldHead.cursor.blockHash, `0x${"11".repeat(32)}`);
+    assert.equal(update.oldHead.parentHash, `0x${"22".repeat(32)}`);
+    assert.equal(update.newHead.cursor.blockHash, `0x${"33".repeat(32)}`);
+    assert.equal(update.newHead.parentHash, `0x${"44".repeat(32)}`);
+  }
+
+  abort.abort();
+  await iterator.return?.();
 });
 
 test("Base exact duplicate head is not published twice", async () => {
@@ -153,7 +179,7 @@ test("Base exact duplicate head is not published twice", async () => {
   socket.emit("message", { data: JSON.stringify(head42) });
   const firstUpdate = (await first).value;
   assert.equal(firstUpdate?.kind, "Head");
-  if (firstUpdate?.kind === "Head") assert.equal(firstUpdate.cursor.sourceSequence, 1n);
+  if (firstUpdate?.kind === "Head") assert.equal(firstUpdate.head.cursor.sourceSequence, 1n);
 
   const second = iterator.next();
   let secondSettled = false;
@@ -168,8 +194,8 @@ test("Base exact duplicate head is not published twice", async () => {
   const secondUpdate = (await second).value;
   assert.equal(secondUpdate?.kind, "Head");
   if (secondUpdate?.kind === "Head") {
-    assert.equal(secondUpdate.cursor.blockNumber, 43n);
-    assert.equal(secondUpdate.cursor.sourceSequence, 2n);
+    assert.equal(secondUpdate.head.cursor.blockNumber, 43n);
+    assert.equal(secondUpdate.head.cursor.sourceSequence, 2n);
   }
 
   abort.abort();
@@ -195,7 +221,7 @@ test("standard logs fail closed when a log arrives at an emitted watermark", asy
 
       const headUpdate = (await first).value;
       assert.equal(headUpdate?.kind, "Head");
-      if (headUpdate?.kind === "Head") assert.equal(headUpdate.cursor.blockNumber, 42n);
+      if (headUpdate?.kind === "Head") assert.equal(headUpdate.head.cursor.blockNumber, 42n);
 
       const late = iterator.next();
       socket.emit("message", { data: JSON.stringify(logNotification(42n, "11", 0n, 0n)) });

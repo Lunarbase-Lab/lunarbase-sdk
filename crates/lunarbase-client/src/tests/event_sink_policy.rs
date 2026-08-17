@@ -45,7 +45,10 @@ async fn event_observer_filters_logs_below_the_minimum_commitment() {
 
     let realtime_log = unknown_log(101);
     source.publish(ChainUpdate::Log(realtime_log));
-    source.publish(ChainUpdate::Head(cursor(102, Commitment::Realtime)));
+    source.publish(ChainUpdate::Head(BlockRef::new(
+        cursor(102, Commitment::Realtime),
+        None,
+    )));
     wait_until(|| client.health().unwrap().cursor.unwrap().block_number == 102).await;
     assert!(event_receiver.try_recv().is_err());
 

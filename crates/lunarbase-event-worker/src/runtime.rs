@@ -276,9 +276,9 @@ async fn handle_update(
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<Transition, RuntimeError> {
     match update {
-        ChainUpdate::Head(cursor) => {
-            validate_cursor(&cursor, config.chain_id)?;
-            metrics.observe_head(cursor.block_number);
+        ChainUpdate::Head(head) => {
+            validate_cursor(&head.cursor, config.chain_id)?;
+            metrics.observe_head(head.cursor.block_number);
             Ok(Transition::Continue)
         }
         ChainUpdate::Log(log) => persist_log(log, config, store, metrics, shutdown).await,
@@ -291,12 +291,12 @@ async fn handle_update(
             Ok(Transition::Recover)
         }
         ChainUpdate::Reorg { old_head, new_head } => {
-            validate_cursor(&old_head, config.chain_id)?;
-            validate_cursor(&new_head, config.chain_id)?;
+            validate_cursor(&old_head.cursor, config.chain_id)?;
+            validate_cursor(&new_head.cursor, config.chain_id)?;
             metrics.source_gap();
             tracing::warn!(
-                old = old_head.block_number,
-                new = new_head.block_number,
+                old = old_head.cursor.block_number,
+                new = new_head.cursor.block_number,
                 "event source reorg"
             );
             Ok(Transition::Recover)

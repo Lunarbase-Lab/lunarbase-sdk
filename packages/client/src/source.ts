@@ -5,11 +5,11 @@ import type { ChainCursor, ChainUpdate } from "./model.js";
 export function updateCursor(update: ChainUpdate): ChainCursor | undefined {
   switch (update.kind) {
     case "Head":
-      return update.cursor;
+      return update.head.cursor;
     case "Log":
       return update.log.cursor;
     case "Reorg":
-      return update.newHead;
+      return update.newHead.cursor;
     case "Gap":
       return update.cursor;
   }
