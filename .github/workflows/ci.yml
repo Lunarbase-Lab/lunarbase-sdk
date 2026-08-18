@@ -15,6 +15,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y clang cmake libhugetlbfs-dev
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
@@ -31,6 +32,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - run: sudo apt-get update && sudo apt-get install -y clang cmake libhugetlbfs-dev
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
       - run: make check-network-feature NETWORK="${{ matrix.network }}"
