@@ -352,7 +352,10 @@ async fn stop_redis(backend: RedisBackend) {
             let _ = child.wait().await;
         }
         RedisBackend::Docker(name) => {
-            let _ = Command::new("docker").args(["kill", &name]).output().await;
+            let _ = Command::new("docker")
+                .args(["rm", "--force", &name])
+                .output()
+                .await;
         }
     }
 }

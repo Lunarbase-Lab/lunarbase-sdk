@@ -486,7 +486,13 @@ function drainCompletedBlock(
     }
     const kind = update.kind.toLowerCase();
     const cursor =
-      update.kind === "Log" ? update.log.cursor : update.kind === "Reorg" ? update.newHead.cursor : update.head.cursor;
+      update.kind === "Log"
+        ? update.log.cursor
+        : update.kind === "Reorg"
+          ? update.newHead.cursor
+          : update.kind === "Correction"
+            ? update.correction.newTip.cursor
+            : update.head.cursor;
     throw new Error(
       `buffered RPC ${kind} at block ${cursor.blockNumber} hash ${String(cursor.blockHash)} does not match completed block ${head.cursor.blockNumber} hash ${blockHash}`,
     );

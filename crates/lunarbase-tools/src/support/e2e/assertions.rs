@@ -259,7 +259,7 @@ async fn stream_length(redis_url: &str) -> Result<usize, E2eError> {
 }
 
 fn event_stream_key() -> String {
-    format!("lunarbase-e2e:event:v1:{{8453:{CORE}}}:stream")
+    format!("lunarbase-e2e:event:v2:{{8453:{CORE}}}:stream")
 }
 
 fn metric_value(body: &str, metric: &str) -> Option<u64> {

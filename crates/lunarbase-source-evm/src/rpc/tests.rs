@@ -1,5 +1,5 @@
 use crate::rpc::backend::RpcHttpBackend;
-use crate::rpc::client::{RpcHttpClient, RpcHttpLimits, backfill_filter};
+use crate::rpc::client::{RpcHttpClient, RpcHttpLimits, admit_log, backfill_filter};
 use crate::rpc::codec::{parse_filtered_rpc_log, parse_rpc_log};
 use crate::rpc::snapshot::RpcSnapshotProvider;
 use alloy_primitives::{Bytes, keccak256};
@@ -7,8 +7,8 @@ use alloy_rpc_client::RpcClient;
 use alloy_sol_types::SolCall;
 use alloy_transport::mock::Asserter;
 use lunarbase_client::model::{
-    BackfillRequest, ChainCursor, Checkpoint, Commitment, ContractFilter, DeploymentConfig,
-    MATH_COMPATIBILITY_VERSION, Network, QuoteEvent,
+    BackfillRequest, ChainCursor, Checkpoint, Commitment, ContractFilter, ContractLog,
+    DeploymentConfig, MATH_COMPATIBILITY_VERSION, Network, QuoteEvent,
 };
 use lunarbase_client::protocol::abi::{core, quote_critical_topics};
 use lunarbase_client::state::reducer::QuoteReducer;
@@ -96,6 +96,29 @@ async fn backfill_rejects_a_foreign_contract_address() {
         .unwrap_err();
 
     assert!(error.to_string().contains("RPC log address mismatch"));
+}
+
+#[test]
+fn bounded_backfill_retains_only_the_visible_tail_slice() {
+    let backing = Bytes::from(vec![0x35; 1 << 20]);
+    let data = backing.slice(backing.len() - 1..);
+    drop(backing);
+    let log = ContractLog {
+        data,
+        ..parse_rpc_log(&rpc_log_value(), 97, Commitment::Canonical).unwrap()
+    };
+    let mut logs = Vec::new();
+    let mut bytes = 0;
+    let limits = RpcHttpLimits {
+        max_backfill_bytes: 1024,
+        ..RpcHttpLimits::default()
+    };
+
+    admit_log(&mut logs, &mut bytes, log, limits).unwrap();
+    assert_eq!(logs[0].data.as_ref(), [0x35]);
+    assert!(bytes <= limits.max_backfill_bytes);
+    let data: Vec<u8> = logs.pop().unwrap().data.into();
+    assert_eq!(data.capacity(), data.len());
 }
 
 #[tokio::test]

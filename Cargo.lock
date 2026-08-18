@@ -2080,7 +2080,7 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "lunarbase-event-worker"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "alloy-primitives",
  "axum",
@@ -2102,7 +2102,7 @@ dependencies = [
 
 [[package]]
 name = "lunarbase-indexer"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "axum",
  "clap",
@@ -2124,9 +2124,11 @@ dependencies = [
 
 [[package]]
 name = "lunarbase-pmm-v2-client"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
+ "alloy-primitives",
  "alloy-sol-types",
+ "arc-swap",
  "async-stream",
  "futures-core",
  "futures-util",
@@ -2139,7 +2141,7 @@ dependencies = [
 
 [[package]]
 name = "lunarbase-pmm-v2-math"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "alloy-primitives",
  "serde",
@@ -2149,7 +2151,7 @@ dependencies = [
 
 [[package]]
 name = "lunarbase-pmm-v2-source-arbitrum"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "alloy-primitives",
  "axum",
@@ -2162,7 +2164,7 @@ dependencies = [
 
 [[package]]
 name = "lunarbase-pmm-v2-source-evm"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "alloy-primitives",
  "alloy-rpc-client",
@@ -2184,7 +2186,7 @@ dependencies = [
 
 [[package]]
 name = "lunarbase-pmm-v2-source-monad"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "async-stream",
  "futures-util",
@@ -2203,7 +2205,7 @@ dependencies = [
 
 [[package]]
 name = "lunarbase-quote-logger"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "clap",
  "dotenvy",
@@ -2218,7 +2220,7 @@ dependencies = [
 
 [[package]]
 name = "lunarbase-source-monad-native"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "async-stream",
  "lunarbase-pmm-v2-client",
@@ -2232,7 +2234,7 @@ dependencies = [
 
 [[package]]
 name = "lunarbase-tools"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "allocation-counter",
  "alloy-primitives",

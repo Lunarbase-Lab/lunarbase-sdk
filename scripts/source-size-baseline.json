@@ -1,6 +1,5 @@
 {
   "crates/lunarbase-client/src/tests.rs": 624,
-  "crates/lunarbase-client/src/indexer/tasks.rs": 618,
   "crates/lunarbase-client/src/protocol/abi.rs": 612,
   "examples/typescript/activity-actor/src/main.ts": 596,
   "examples/typescript/activity-actor/src/actor.ts": 580

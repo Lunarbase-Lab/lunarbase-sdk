@@ -134,6 +134,64 @@ test("checkpoint validation rejects foreign checkpoint identity without RPC", as
   assert.equal(calls, 0);
 });
 
+test("checkpoint validation binds both block and execution identity before contract reads", async () => {
+  const implementation = parseAddress("0x00000000000000000000000000000000000000aa");
+  const implementationWord = `0x${"0".repeat(24)}${implementation.slice(2)}` as `0x${string}`;
+  const implementationCodeHash = `0x${"22".repeat(32)}` as `0x${string}`;
+  const checkpoint = {
+    ...checkpointIdentity(97n, 97n),
+    core: CORE,
+    expectedImplementation: implementation,
+    expectedImplementationCodeHash: implementationCodeHash,
+    cursor: {
+      chainId: 97n,
+      blockNumber: 42n,
+      executionBlockNumber: 42n,
+      blockHash: BLOCK_HASH,
+      commitment: Commitment.Canonical,
+    },
+  } as Checkpoint;
+  const canonicalCursor = { ...checkpoint.cursor };
+  const cases = [
+    { name: "exact identity", cursor: canonicalCursor, valid: true, identityReads: 2 },
+    {
+      name: "different block number",
+      cursor: { ...canonicalCursor, blockNumber: 43n },
+      valid: false,
+      identityReads: 0,
+    },
+    {
+      name: "different execution block number",
+      cursor: { ...canonicalCursor, executionBlockNumber: 43n },
+      valid: false,
+      identityReads: 0,
+    },
+  ] as const;
+
+  for (const scenario of cases) {
+    let identityReads = 0;
+    const rpc = {
+      chainId: async () => 97n,
+      blockCursor: async () => scenario.cursor,
+      getStorageAtHash: async () => {
+        identityReads += 1;
+        return implementationWord;
+      },
+      runtimeCodeHashAtHash: async () => {
+        identityReads += 1;
+        return implementationCodeHash;
+      },
+    } as unknown as JsonRpcHttpClient;
+
+    assert.equal(
+      await new RpcHttpBackend(rpc, Network.Evm, 97n).validateCheckpoint(checkpoint),
+      scenario.valid,
+      scenario.name,
+    );
+    assert.equal(identityReads, scenario.identityReads, scenario.name);
+  }
+});
+
 test("queued reconnect verification invalidates the backend cache synchronously", async () => {
   const requests: RpcRequest[] = [];
   let chainChecks = 0;

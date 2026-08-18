@@ -9,6 +9,8 @@ use std::{
 #[derive(Debug)]
 pub(crate) struct Metrics {
     ready: AtomicBool,
+    /// Versioned transport activity lease; bit zero is the active flag.
+    source_activity: AtomicU64,
     source_queue_depth: AtomicUsize,
     source_queue_capacity: usize,
     source_queue_bytes: AtomicUsize,
@@ -44,6 +46,7 @@ impl Metrics {
     ) -> Self {
         Self {
             ready: AtomicBool::new(false),
+            source_activity: AtomicU64::new(0),
             source_queue_depth: AtomicUsize::new(0),
             source_queue_capacity,
             source_queue_bytes: AtomicUsize::new(0),
@@ -77,6 +80,50 @@ impl Metrics {
 
     pub(crate) fn is_ready(&self) -> bool {
         self.ready.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn source_connected(&self) {
+        self.advance_source_activity(true);
+    }
+
+    pub(crate) fn source_disconnected(&self) {
+        self.advance_source_activity(false);
+        self.set_ready(false);
+    }
+
+    pub(crate) fn source_lease(&self) -> Option<u64> {
+        let lease = self.source_activity.load(Ordering::Acquire);
+        (lease & 1 == 1).then_some(lease)
+    }
+
+    /// Publishes readiness only if no disconnect/reconnect crossed the lease.
+    pub(crate) fn publish_ready_if(&self, lease: u64) -> bool {
+        if self.source_activity.load(Ordering::Acquire) != lease || lease & 1 == 0 {
+            return false;
+        }
+        self.ready.store(true, Ordering::Release);
+        if self.source_activity.load(Ordering::Acquire) == lease {
+            true
+        } else {
+            self.ready.store(false, Ordering::Release);
+            false
+        }
+    }
+
+    fn advance_source_activity(&self, active: bool) {
+        let mut current = self.source_activity.load(Ordering::Acquire);
+        loop {
+            let next = current.wrapping_add(2) & !1 | u64::from(active);
+            match self.source_activity.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     pub(crate) fn source_enqueued(&self, bytes: usize) {
@@ -342,10 +389,24 @@ fn update_age(last_millis: u64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::update_age;
+    use super::{Metrics, update_age};
 
     #[test]
     fn missing_source_update_renders_as_prometheus_nan() {
         assert!(update_age(0).is_nan());
+    }
+
+    #[test]
+    fn disconnect_or_reconnect_invalidates_a_readiness_lease() {
+        let metrics = Metrics::new(1, 1024, 1, 1024);
+        metrics.source_connected();
+        let lease = metrics.source_lease().unwrap();
+        metrics.source_disconnected();
+        assert!(!metrics.publish_ready_if(lease));
+        assert!(!metrics.is_ready());
+
+        metrics.source_connected();
+        assert_ne!(metrics.source_lease(), Some(lease));
+        assert!(!metrics.publish_ready_if(lease));
     }
 }

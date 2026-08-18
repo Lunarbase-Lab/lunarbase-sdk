@@ -24,9 +24,9 @@ pub struct ClientQuote {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-/// Batch evaluated under one shared state read guard and cursor.
+/// Batch evaluated under one immutable state snapshot and cursor.
 pub struct ClientBatchQuote {
-    /// Results evaluated under one shared state read guard.
+    /// Results evaluated under one immutable state snapshot.
     pub outcomes: Vec<QuoteOutcome>,
     /// Single normalized state position shared by every result.
     pub cursor: ChainCursor,

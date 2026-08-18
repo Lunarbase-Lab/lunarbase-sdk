@@ -132,17 +132,33 @@ test("correct-Core foreign-chain removed log is rejected before removed handling
   assert.equal(indexer.health().ready, false);
 });
 
-test("connected reducer recovers without applying a foreign Core log", async () => {
+test("connected reducer terminates on a permanently invalid foreign Core log", async () => {
   const source = new MockSource();
   const client = await ConnectedQuoteClient.connect(connectConfig(), source);
-  source.snapshotFailures = 1;
+  try {
+    source.publish({ kind: "Log", log: foreignLaneRemovedLog(101n, false) });
+    await waitUntil(() => !client.health().ready);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        assert.rejects(client.recover(), (error: unknown) => {
+          const code = (error as { code?: string }).code;
+          return code === "INVALID_REQUEST" || code === "SOURCE";
+        }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("terminal recover promise did not settle")), 2_000);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+    assert.equal(source.snapshotCalls, 1);
 
-  source.publish({ kind: "Log", log: foreignLaneRemovedLog(101n, false) });
-  await waitUntil(() => !client.health().ready);
-  await waitUntil(() => source.snapshotCalls >= 3 && client.health().ready);
-
-  assert.equal(client.checkpoint()?.state.lanes.has(ASSET), true);
-  await client.shutdown();
+    assert.equal(client.health().ready, false);
+    assert.equal(client.checkpoint(), undefined);
+  } finally {
+    await client.shutdown();
+  }
 });
 
 test("checkpoint recovery validates foreign-chain backfill before cursor skip", async () => {

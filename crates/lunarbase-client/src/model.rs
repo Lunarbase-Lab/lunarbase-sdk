@@ -13,6 +13,13 @@ pub const MIN_UPDATE_QUEUE_BYTE_CAPACITY: usize = 1024;
 use std::collections::HashSet;
 use thiserror::Error;
 
+mod correction;
+mod retention;
+pub use correction::{
+    ChainCorrection, MAX_CORRECTION_BRANCH_BLOCKS, MAX_CORRECTION_LOGS,
+    MAX_CORRECTION_RETAINED_BYTES,
+};
+
 /// Current durable checkpoint schema.
 pub const SCHEMA_VERSION: u16 = 6;
 
@@ -124,17 +131,21 @@ impl ChainCursor {
     /// them to the common reducer. `source_sequence` is considered only when
     /// transaction and log coordinates are unavailable.
     pub fn event_order(&self) -> (u64, u32, u32, u64, u32) {
-        let transport_order = if self.transaction_index.is_none() && self.log_index.is_none() {
-            self.source_sequence.unwrap_or(0)
-        } else {
-            0
-        };
+        let (transport_order, transport_sub_index) =
+            if self.transaction_index.is_none() && self.log_index.is_none() {
+                (
+                    self.source_sequence.unwrap_or(0),
+                    self.source_sub_index.unwrap_or(0),
+                )
+            } else {
+                (0, 0)
+            };
         (
             self.block_number,
             self.transaction_index.unwrap_or(0),
             self.log_index.unwrap_or(0),
             transport_order,
-            self.source_sub_index.unwrap_or(0),
+            transport_sub_index,
         )
     }
 }
@@ -183,15 +194,16 @@ pub struct ContractLog {
 }
 
 impl ContractLog {
-    /// Returns a conservative retained-memory charge for queue budgeting.
+    /// Returns the retained-memory charge used for queue budgeting.
     ///
-    /// Shared byte buffers are charged to every queued owner deliberately: a
-    /// producer cannot use reference-counted clones to bypass a byte limit.
+    /// Retention boundaries call [`Self::normalize_for_retention`] before
+    /// admitting this charge, so `data.len()` then describes an exact-size
+    /// owned allocation rather than a slice of a larger backing buffer.
     pub fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             .saturating_add(
                 self.topics
-                    .len()
+                    .capacity()
                     .saturating_mul(std::mem::size_of::<B256>()),
             )
             .saturating_add(self.data.len())
@@ -212,6 +224,8 @@ pub enum ChainUpdate {
         /// First known head on the replacement branch.
         new_head: BlockRef,
     },
+    /// Atomically replaces a bounded optimistic branch without interrupting quotes.
+    Correction(Box<ChainCorrection>),
     /// Signals missing or unordered source data that requires canonical recovery.
     Gap {
         /// Last trustworthy or first affected source position, when known.
@@ -222,13 +236,16 @@ pub enum ChainUpdate {
 }
 
 impl ChainUpdate {
-    /// Returns a conservative retained-memory charge for bounded handoff queues.
+    /// Returns the retained-memory charge for bounded handoff queues.
+    ///
+    /// Queueing APIs normalize dynamic byte buffers before retaining an update.
     pub fn retained_bytes(&self) -> usize {
         let dynamic = match self {
             Self::Log(log) => log
                 .retained_bytes()
                 .saturating_sub(std::mem::size_of::<ContractLog>()),
-            Self::Gap { reason, .. } => reason.len(),
+            Self::Gap { reason, .. } => reason.capacity(),
+            Self::Correction(correction) => correction.retained_bytes(),
             Self::Head(_) | Self::Reorg { .. } => 0,
         };
         std::mem::size_of::<Self>().saturating_add(dynamic)

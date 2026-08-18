@@ -94,6 +94,22 @@ pub struct CanonicalWindow {
     retained_bytes: usize,
 }
 
+/// Validated append token that can be committed without another fallible check.
+#[derive(Clone, Debug)]
+pub struct PreparedHead {
+    expected_tip: Option<BlockRef>,
+    block: BlockRef,
+    next_retained_bytes: usize,
+    append: bool,
+}
+
+/// Validated progressive-tip token committed only after durable persistence.
+#[derive(Clone, Debug)]
+pub struct PreparedTipReplacement {
+    expected_tip: BlockRef,
+    block: BlockRef,
+}
+
 impl CanonicalWindow {
     /// Creates an empty bounded window without preallocating its maximum size.
     pub fn new(limits: ForkWindowLimits) -> Result<Self, ForkError> {
@@ -140,11 +156,22 @@ impl CanonicalWindow {
 
     /// Appends one contiguous block. Exact duplicate tips are ignored.
     pub fn push_head(&mut self, block: BlockRef) -> Result<bool, ForkError> {
+        let prepared = self.prepare_head(block)?;
+        Ok(self.commit_head(prepared))
+    }
+
+    /// Validates an append without mutating the window or allocating a journal copy.
+    pub fn prepare_head(&self, block: BlockRef) -> Result<PreparedHead, ForkError> {
         validate_complete(&block)?;
         if let Some(tip) = self.tip() {
             validate_same_chain(tip, &block)?;
             if tip == &block {
-                return Ok(false);
+                return Ok(PreparedHead {
+                    expected_tip: Some(tip.clone()),
+                    block,
+                    next_retained_bytes: self.retained_bytes,
+                    append: false,
+                });
             }
             if block.cursor.block_number != tip.cursor.block_number.saturating_add(1)
                 || block.parent_hash != tip.cursor.block_hash
@@ -153,13 +180,41 @@ impl CanonicalWindow {
             }
         }
         self.preflight(self.len().saturating_add(1))?;
-        self.blocks.push_back(block);
-        self.retained_bytes = self.retained_bytes.saturating_add(block_charge());
-        Ok(true)
+        Ok(PreparedHead {
+            expected_tip: self.tip().cloned(),
+            block,
+            next_retained_bytes: self.retained_bytes.saturating_add(block_charge()),
+            append: true,
+        })
+    }
+
+    /// Commits a token produced against the current unchanged window.
+    pub fn commit_head(&mut self, prepared: PreparedHead) -> bool {
+        assert_eq!(
+            self.tip(),
+            prepared.expected_tip.as_ref(),
+            "prepared head was committed against a changed canonical window"
+        );
+        if !prepared.append {
+            return false;
+        }
+        self.blocks.push_back(prepared.block);
+        self.retained_bytes = prepared.next_retained_bytes;
+        true
     }
 
     /// Replaces a same-height progressive tip sharing the same parent.
     pub fn replace_progressive_tip(&mut self, block: BlockRef) -> Result<(), ForkError> {
+        let prepared = self.prepare_progressive_tip(block)?;
+        self.commit_progressive_tip(prepared);
+        Ok(())
+    }
+
+    /// Validates a progressive replacement without mutating the window.
+    pub fn prepare_progressive_tip(
+        &self,
+        block: BlockRef,
+    ) -> Result<PreparedTipReplacement, ForkError> {
         validate_complete(&block)?;
         let Some(tip) = self.tip() else {
             return Err(ForkError::Disconnected);
@@ -177,8 +232,20 @@ impl CanonicalWindow {
         {
             return Err(ForkError::Disconnected);
         }
-        *self.blocks.back_mut().expect("tip checked above") = block;
-        Ok(())
+        Ok(PreparedTipReplacement {
+            expected_tip: tip.clone(),
+            block,
+        })
+    }
+
+    /// Commits a progressive token produced against the current unchanged window.
+    pub fn commit_progressive_tip(&mut self, prepared: PreparedTipReplacement) {
+        assert_eq!(
+            self.tip(),
+            Some(&prepared.expected_tip),
+            "prepared tip was committed against a changed canonical window"
+        );
+        *self.blocks.back_mut().expect("prepared tip requires a tip") = prepared.block;
     }
 
     /// Advances finality and prunes only history strictly older than the boundary.

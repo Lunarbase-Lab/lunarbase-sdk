@@ -124,40 +124,16 @@ impl ChainDataSource for MockSource {
 
     async fn canonical_head(&self) -> Result<ChainCursor, SourceError> {
         self.canonical_calls.fetch_add(1, Ordering::Relaxed);
-        Ok(cursor(100, Commitment::Finalized))
+        Ok(cursor(
+            self.snapshot_block.load(Ordering::Relaxed) as u64,
+            Commitment::Finalized,
+        ))
     }
 
     async fn validate_checkpoint(&self, _checkpoint: &Checkpoint) -> Result<bool, SourceError> {
         self.validate_calls.fetch_add(1, Ordering::Relaxed);
         Ok(self.checkpoint_valid.load(Ordering::Relaxed))
     }
-}
-
-#[tokio::test]
-async fn quote_and_batch_never_call_the_source() {
-    let source = Arc::new(MockSource::new(None));
-    let client = ConnectedQuoteClient::connect(config(), source.clone(), None)
-        .await
-        .unwrap();
-    let calls = source_calls(&source);
-    let single = client.quote(&request()).unwrap();
-    let batch = client
-        .quote_many(&[request(), request(), request()])
-        .unwrap();
-    assert_eq!(batch.cursor, single.cursor);
-    assert!(
-        batch
-            .outcomes
-            .iter()
-            .all(|outcome| outcome == &single.outcome)
-    );
-    assert_eq!(source_calls(&source), calls);
-    let oversized = vec![request(); 257];
-    assert!(matches!(
-        client.quote_many(&oversized),
-        Err(IndexerError::InvalidRequest(_))
-    ));
-    client.shutdown().await;
 }
 
 #[tokio::test]
@@ -587,6 +563,13 @@ mod source_identity;
 
 mod lifecycle;
 
+mod correction_ancestor;
+mod correction_regressions;
+mod optimistic_correction;
+mod quote_path;
+mod recovery_correction;
+mod recovery_watermark;
+
 fn config() -> ClientConnectConfig {
     ClientConnectConfig {
         deployment: DeploymentConfig {
@@ -657,16 +640,6 @@ fn request() -> QuoteRequest {
         amount: U256::from(1_000),
         mode: QuoteMode::ExactIn,
     }
-}
-
-fn source_calls(source: &MockSource) -> [usize; 5] {
-    [
-        source.snapshot_calls.load(Ordering::Relaxed),
-        source.backfill_calls.load(Ordering::Relaxed),
-        source.subscribe_calls.load(Ordering::Relaxed),
-        source.canonical_calls.load(Ordering::Relaxed),
-        source.validate_calls.load(Ordering::Relaxed),
-    ]
 }
 
 async fn wait_until(mut predicate: impl FnMut() -> bool) {

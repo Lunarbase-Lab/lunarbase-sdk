@@ -23,19 +23,19 @@ struct RpcState {
 }
 
 #[derive(Clone, Debug)]
-struct RpcCall {
-    method: String,
-    block_tag: Option<String>,
+pub(crate) struct RpcCall {
+    pub(crate) method: String,
+    pub(crate) block_tag: Option<String>,
 }
 
-struct MockRpc {
-    url: String,
+pub(crate) struct MockRpc {
+    pub(crate) url: String,
     calls: Arc<Mutex<Vec<RpcCall>>>,
     task: JoinHandle<()>,
 }
 
 impl MockRpc {
-    async fn start(logs: Vec<Value>, contexts: HashMap<String, Value>) -> Self {
+    pub(crate) async fn start(logs: Vec<Value>, contexts: HashMap<String, Value>) -> Self {
         Self::start_with_context_response_id(logs, contexts, None).await
     }
 
@@ -64,7 +64,7 @@ impl MockRpc {
         }
     }
 
-    fn calls(&self) -> Vec<RpcCall> {
+    pub(crate) fn calls(&self) -> Vec<RpcCall> {
         self.calls.lock().unwrap().clone()
     }
 }

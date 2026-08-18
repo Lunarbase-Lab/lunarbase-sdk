@@ -1,16 +1,20 @@
 //! Ordered single-writer quote-state reducer.
 
+#[path = "reducer/events.rs"]
+mod events;
+#[path = "reducer/identity.rs"]
+mod identity;
+use identity::{
+    is_realtime_progression, validate_event_against_head, validate_event_successor,
+    validate_head_against_event,
+};
+
 use crate::bootstrap::VerifiedRouterSnapshot;
 use crate::model::{
     ChainCursor, Checkpoint, DeploymentConfig, MATH_COMPATIBILITY_VERSION, QuoteEvent,
     SCHEMA_VERSION,
 };
-use lunarbase_math::arithmetic::BPS;
-use lunarbase_math::slot0::{
-    set_lane_slot0_block_delay, set_lane_slot0_exists, set_lane_slot0_paused,
-    set_lane_slot0_price_push_threshold, set_lane_slot0_slippage_k_bps,
-};
-use lunarbase_math::{Address, FeeClass, U256};
+use lunarbase_math::{Address, FeeClass};
 use lunarbase_math::{LaneState, QuoteState};
 use std::sync::Arc;
 use thiserror::Error;
@@ -33,6 +37,9 @@ pub enum ReducerError {
     /// Two non-progressive cursors claim different hashes for one block height.
     #[error("block hash mismatch")]
     BlockHashMismatch,
+    /// One canonical log position was reused for a different decoded payload.
+    #[error("canonical event position carries a different payload")]
+    EventPayloadMismatch,
     /// A state delta would underflow, overflow, or otherwise violate arithmetic invariants.
     #[error("arithmetic transition failed")]
     Arithmetic,
@@ -63,12 +70,19 @@ pub enum ReducerError {
 pub struct QuoteReducer {
     /// Complete quote-critical state mutated only by the ordered reducer task.
     state: Arc<QuoteState>,
+    /// Test-only count of state CoW clones performed by this reducer lineage.
+    #[cfg(test)]
+    state_cow_clones: usize,
     /// Runtime-selected economic fee class, independent of chain state.
     fee_class: FeeClass,
     /// Optional exact-router accounting data, separate from quote-critical state.
     verified_router: Option<Arc<VerifiedRouterSnapshot>>,
     /// Last normalized head or event position accepted by the reducer.
     cursor: Option<ChainCursor>,
+    /// Last accepted quote event, ordered independently from head delivery.
+    event_cursor: Option<ChainCursor>,
+    /// Decoded identity at `event_cursor`, used to distinguish retries from corruption.
+    event: Option<QuoteEvent>,
     /// Fail-closed publication flag cleared on gaps, reorgs, and reducer errors.
     ready: bool,
 }
@@ -82,9 +96,13 @@ impl QuoteReducer {
     ) -> Self {
         Self {
             state: Arc::new(state),
+            #[cfg(test)]
+            state_cow_clones: 0,
             fee_class,
             verified_router: verified_router.map(Arc::new),
             cursor: None,
+            event_cursor: None,
+            event: None,
             ready: false,
         }
     }
@@ -93,9 +111,13 @@ impl QuoteReducer {
     pub fn from_checkpoint(checkpoint: Checkpoint, fee_class: FeeClass) -> Self {
         Self {
             state: Arc::new(checkpoint.state),
+            #[cfg(test)]
+            state_cow_clones: 0,
             fee_class,
             verified_router: None,
             cursor: Some(checkpoint.cursor),
+            event_cursor: None,
+            event: None,
             ready: true,
         }
     }
@@ -148,31 +170,61 @@ impl QuoteReducer {
     /// Installs the initial snapshot cursor.
     pub fn bootstrap(&mut self, cursor: ChainCursor) {
         self.cursor = Some(cursor);
+        self.event_cursor = None;
+        self.event = None;
         self.ready = true;
+    }
+
+    /// Resets ordering metadata after a fully validated correction restore.
+    pub(crate) fn rewind_head(&mut self, head: ChainCursor) -> Result<(), ReducerError> {
+        if self
+            .cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.chain_id != head.chain_id)
+            || self
+                .event_cursor
+                .as_ref()
+                .is_some_and(|event| event.chain_id != head.chain_id)
+        {
+            return Err(ReducerError::ChainIdMismatch);
+        }
+        self.cursor = Some(head);
+        self.event_cursor = None;
+        self.event = None;
+        Ok(())
     }
 
     /// Advances a block-level cursor without changing quote state.
     pub fn observe_head(&mut self, head: ChainCursor) -> Result<(), ReducerError> {
+        validate_head_against_event(self.event_cursor.as_ref(), self.cursor.as_ref(), &head)?;
         if let Some(current) = &mut self.cursor {
             if current.chain_id != head.chain_id {
                 return Err(ReducerError::ChainIdMismatch);
-            }
-            if current.block_number == head.block_number
-                && current.block_hash.is_some()
-                && head.block_hash.is_some()
-                && current.block_hash != head.block_hash
-                && !is_realtime_progression(current, &head)
-            {
-                return Err(ReducerError::BlockHashMismatch);
             }
             if head.block_number < current.block_number {
                 return Ok(());
             }
             if head.block_number == current.block_number {
-                if current.block_hash.is_none() || is_realtime_progression(current, &head) {
-                    current.block_hash = head.block_hash;
+                let identity_changed = current.block_hash != head.block_hash;
+                let applied_event = self
+                    .event_cursor
+                    .as_ref()
+                    .is_some_and(|event| event.block_number == head.block_number);
+                if current.block_hash.is_some() && head.block_hash.is_none() {
+                    return Err(ReducerError::BlockHashMismatch);
                 }
-                current.execution_block_number = head.execution_block_number;
+                if !identity_changed
+                    && current.execution_block_number != head.execution_block_number
+                {
+                    return Err(ReducerError::BlockHashMismatch);
+                }
+                if identity_changed && (applied_event || !is_realtime_progression(current, &head)) {
+                    return Err(ReducerError::BlockHashMismatch);
+                }
+                if identity_changed {
+                    current.block_hash = head.block_hash;
+                    current.execution_block_number = head.execution_block_number;
+                }
                 if head.commitment > current.commitment {
                     current.commitment = head.commitment;
                 }
@@ -187,149 +239,88 @@ impl QuoteReducer {
         Ok(())
     }
 
+    /// Publishes a fully validated correction tip while retaining the last
+    /// replacement-event identity used for duplicate detection.
+    pub(crate) fn observe_corrected_head(&mut self, head: ChainCursor) -> Result<(), ReducerError> {
+        self.observe_head(head.clone())?;
+        self.cursor = Some(head);
+        Ok(())
+    }
+
     /// Applies one decoded event after validating ordering and storage widths.
     pub fn apply(&mut self, cursor: ChainCursor, event: QuoteEvent) -> Result<(), ReducerError> {
-        if let Some(previous) = &self.cursor {
+        self.apply_with_effect(cursor, event).map(|_| ())
+    }
+
+    /// Applies an event and reports whether quote or verified-router state changed.
+    pub(crate) fn apply_with_effect(
+        &mut self,
+        cursor: ChainCursor,
+        event: QuoteEvent,
+    ) -> Result<bool, ReducerError> {
+        if let Some(head) = &self.cursor {
+            if head.chain_id != cursor.chain_id {
+                return Err(ReducerError::ChainIdMismatch);
+            }
+            validate_event_against_head(head, &cursor)?;
+        }
+        if let Some(previous) = &self.event_cursor {
             if previous.chain_id != cursor.chain_id {
                 return Err(ReducerError::ChainIdMismatch);
             }
-            if previous.block_number == cursor.block_number
-                && previous.block_hash.is_some()
-                && cursor.block_hash.is_some()
-                && previous.block_hash != cursor.block_hash
-                && !is_realtime_progression(previous, &cursor)
-            {
-                return Err(ReducerError::BlockHashMismatch);
-            }
-            let previous_is_block_head = previous.block_number == cursor.block_number
-                && previous.transaction_index.is_none()
-                && previous.log_index.is_none()
-                && cursor.transaction_index.is_some()
-                && cursor.log_index.is_some();
-            if !previous_is_block_head && cursor.event_order() < previous.event_order() {
+            validate_event_successor(previous, &cursor)?;
+            if cursor.event_order() < previous.event_order() {
                 return Err(ReducerError::CursorRegression);
             }
-            if !previous_is_block_head && cursor.event_order() == previous.event_order() {
-                return Ok(());
+            if cursor.event_order() == previous.event_order() {
+                return if self.event.as_ref() == Some(&event) {
+                    Ok(false)
+                } else {
+                    Err(ReducerError::EventPayloadMismatch)
+                };
             }
         }
-        self.apply_event(event)?;
-        self.cursor = Some(cursor);
-        Ok(())
+        let retained_event = event.clone();
+        let changed = self.apply_event(event)?;
+        self.event_cursor = Some(cursor.clone());
+        self.event = Some(retained_event);
+        match self.cursor.as_mut() {
+            Some(head) if cursor.block_number < head.block_number => {
+                if cursor.source_sequence > head.source_sequence {
+                    head.source_sequence = cursor.source_sequence;
+                    head.source_sub_index = cursor.source_sub_index;
+                }
+            }
+            Some(head) if cursor.block_number == head.block_number => {
+                let mut published = cursor;
+                published.commitment = published.commitment.max(head.commitment);
+                *head = published;
+            }
+            _ => self.cursor = Some(cursor),
+        }
+        Ok(changed)
     }
 
-    fn apply_event(&mut self, event: QuoteEvent) -> Result<(), ReducerError> {
-        match event {
-            QuoteEvent::LaneAdded { asset } => {
-                if self.verified_router.is_some() {
-                    return Err(ReducerError::VerifiedRouterRefreshRequired);
-                }
-                let lane = self.state_mut().lanes.entry(asset).or_default();
-                let slot0 = set_lane_slot0_exists(lane.slot0, true);
-                lane.slot0 = set_lane_slot0_paused(slot0, true);
-            }
-            QuoteEvent::LaneRemoved { asset } => {
-                self.state_mut().lanes.remove(&asset);
-                if let Some(verified) = self.verified_router.as_mut() {
-                    Arc::make_mut(verified).partner_fee_bps.remove(&asset);
-                }
-            }
-            QuoteEvent::LaneUpdated { asset, slot0 } => {
-                self.lane_mut(asset)?.slot0 = slot0;
-            }
-            QuoteEvent::SlippageKSet { asset, new_k } => {
-                if U256::from(new_k) > BPS {
-                    return Err(ReducerError::InvalidSlippageK);
-                }
-                let lane = self.lane_mut(asset)?;
-                lane.slot0 = set_lane_slot0_slippage_k_bps(lane.slot0, new_k);
-            }
-            QuoteEvent::LanePausedSet { asset, paused } => {
-                let lane = self.lane_mut(asset)?;
-                lane.slot0 = set_lane_slot0_paused(lane.slot0, paused);
-            }
-            QuoteEvent::PricePushThresholdSet {
-                asset,
-                price_push_threshold,
-                enabled,
-            } => {
-                let lane = self.lane_mut(asset)?;
-                lane.slot0 =
-                    set_lane_slot0_price_push_threshold(lane.slot0, price_push_threshold, enabled)
-                        .map_err(|_| ReducerError::InvalidWidth)?;
-            }
-            QuoteEvent::BlockDelaySet { asset, block_delay } => {
-                let lane = self.lane_mut(asset)?;
-                lane.slot0 = set_lane_slot0_block_delay(lane.slot0, block_delay);
-            }
-            QuoteEvent::PartnerInfoSet { router, asset, fee }
-            | QuoteEvent::PartnerFeeSet { router, asset, fee } => {
-                let Some(verified) = self.verified_router.as_ref() else {
-                    return Ok(());
-                };
-                if router != verified.router {
-                    return Ok(());
-                }
-                if asset != self.state.cash && !self.state.lanes.contains_key(&asset) {
-                    return Ok(());
-                }
-                if U256::from(fee) > BPS {
-                    return Err(ReducerError::InvalidWidth);
-                }
-                if let Some(verified) = self.verified_router.as_mut() {
-                    Arc::make_mut(verified).partner_fee_bps.insert(asset, fee);
-                }
-            }
-            QuoteEvent::WhitelistSet {
-                router,
-                whitelisted,
-            } => {
-                if self
-                    .verified_router
-                    .as_ref()
-                    .is_some_and(|verified| verified.router == router)
-                    && whitelisted != self.fee_class.is_whitelisted()
-                {
-                    return Err(ReducerError::FeeClassMismatch);
-                }
-            }
-            QuoteEvent::BlacklistFeeMultiplierSet { multiplier } => {
-                self.state_mut().blacklist_fee_multiplier = multiplier;
-            }
-            QuoteEvent::DepositExecuted { asset, principal } => {
-                let lane = self.lane_mut(asset)?;
-                let next = lane
-                    .total_principal_amount
-                    .checked_add(principal)
-                    .ok_or(ReducerError::Arithmetic)?;
-                lane.total_principal_amount = next;
-            }
-            QuoteEvent::WithdrawalExecuted { asset, principal } => {
-                let lane = self.lane_mut(asset)?;
-                let next = lane
-                    .total_principal_amount
-                    .checked_sub(principal)
-                    .ok_or(ReducerError::Arithmetic)?;
-                lane.total_principal_amount = next;
-            }
-            QuoteEvent::Sync {
-                asset,
-                asset_reserve,
-                cash_reserve,
-            } => {
-                self.state_mut().cash_reserve = cash_reserve;
-                if asset != self.state.cash {
-                    self.lane_mut(asset)?.asset_reserve = asset_reserve;
-                }
-            }
-            QuoteEvent::ImplementationUpgraded { .. } => {
-                return Err(ReducerError::ImplementationUpgraded);
-            }
-        }
-        Ok(())
+    #[cfg(test)]
+    pub(crate) fn state_strong_count(&self) -> usize {
+        Arc::strong_count(&self.state)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn state_ptr(&self) -> *const QuoteState {
+        Arc::as_ptr(&self.state)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn state_cow_clones(&self) -> usize {
+        self.state_cow_clones
     }
 
     fn state_mut(&mut self) -> &mut QuoteState {
+        #[cfg(test)]
+        if Arc::strong_count(&self.state) > 1 {
+            self.state_cow_clones += 1;
+        }
         Arc::make_mut(&mut self.state)
     }
 
@@ -338,6 +329,27 @@ impl QuoteReducer {
             .lanes
             .get_mut(&asset)
             .ok_or(ReducerError::UnknownLane)
+    }
+
+    /// Conservatively estimates retained bytes for optimistic-history budgets.
+    pub(crate) fn retained_bytes(&self) -> usize {
+        let lanes = self
+            .state
+            .lanes
+            .capacity()
+            .saturating_mul(std::mem::size_of::<(Address, LaneState)>().saturating_add(16));
+        let router = self.verified_router.as_ref().map_or(0, |router| {
+            std::mem::size_of::<VerifiedRouterSnapshot>().saturating_add(
+                router
+                    .partner_fee_bps
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<(Address, u32)>().saturating_add(16)),
+            )
+        });
+        std::mem::size_of::<Self>()
+            .saturating_add(std::mem::size_of::<QuoteState>())
+            .saturating_add(lanes)
+            .saturating_add(router)
     }
 
     /// Builds a durable checkpoint. This clone is outside the quote path.
@@ -356,12 +368,6 @@ impl QuoteReducer {
             state: self.state.as_ref().clone(),
         })
     }
-}
-
-fn is_realtime_progression(previous: &ChainCursor, next: &ChainCursor) -> bool {
-    previous.commitment == crate::model::Commitment::Realtime
-        && next.commitment == crate::model::Commitment::Realtime
-        && next.source_sequence > previous.source_sequence
 }
 
 #[cfg(test)]

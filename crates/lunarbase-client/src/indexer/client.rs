@@ -1,5 +1,6 @@
 //! Connected client lifecycle, quote access, and graceful shutdown.
 
+use crate::indexer::bootstrap_handoff::BootstrapHandoff;
 use crate::indexer::checkpoint_recovery::recover_checkpoint;
 use crate::indexer::client_types::{
     ClientConnectConfig, ClientRuntimeStats, ClientRuntimeStatsSnapshot, CoreEventSink,
@@ -7,11 +8,13 @@ use crate::indexer::client_types::{
 };
 use crate::indexer::engine::QuoteIndexer;
 use crate::indexer::errors::{ClientRuntimeEvent, IndexerError};
-use crate::indexer::event_delivery::emit_handoff_events;
+#[cfg(feature = "perf-trace")]
+use crate::indexer::perf_trace::PerfTrace;
 use crate::indexer::quote_types::{ClientBatchQuote, ClientQuote, IndexerHealth};
 use crate::indexer::runtime_helpers::{freshness_watchdog, source_operation};
 use crate::indexer::tasks::{
-    ReducerRuntime, SourcePumpRuntime, reducer_loop, source_pump, wait_for_source_active,
+    RecoverySignal, ReducerRuntime, SourcePumpRuntime, reducer_loop, source_activity_lease,
+    source_pump, wait_for_source_active,
 };
 use crate::model::{Checkpoint, Commitment, ContractLog, SourceError};
 use crate::source::ChainDataSource;
@@ -20,15 +23,27 @@ use lunarbase_math::{QuoteRequest, QuoteState};
 use std::any::Any;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{Mutex, broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 const RUNTIME_EVENT_CAPACITY: usize = 256;
-/// Fully connected client with a synchronous, shared-read quote path.
+#[cfg(feature = "perf-trace")]
+type ConnectPerfTrace = Option<PerfTrace>;
+#[cfg(not(feature = "perf-trace"))]
+struct ConnectPerfTrace;
+
+#[cfg(feature = "perf-trace")]
+const fn disabled_perf_trace() -> ConnectPerfTrace {
+    None
+}
+#[cfg(not(feature = "perf-trace"))]
+const fn disabled_perf_trace() -> ConnectPerfTrace {
+    ConnectPerfTrace
+}
+/// Fully connected client with a synchronous lock-free snapshot quote path.
 pub struct ConnectedQuoteClient {
     /// Shared quote state, lock-free readiness gate, and recovery notification.
     pub(super) shared: Arc<SharedQuoteState>,
@@ -58,7 +73,22 @@ impl ConnectedQuoteClient {
     where
         S: ChainDataSource + 'static,
     {
-        Self::connect_inner(config, source, optional_checkpoint, None).await
+        let perf_trace = disabled_perf_trace();
+        Self::connect_inner(config, source, optional_checkpoint, None, perf_trace).await
+    }
+
+    /// Connects one process-isolated release diagnostic to a bounded trace.
+    #[cfg(feature = "perf-trace")]
+    pub async fn connect_with_perf_trace<S>(
+        config: ClientConnectConfig,
+        source: Arc<S>,
+        optional_checkpoint: Option<Checkpoint>,
+        perf_trace: PerfTrace,
+    ) -> Result<Self, IndexerError>
+    where
+        S: ChainDataSource + 'static,
+    {
+        Self::connect_inner(config, source, optional_checkpoint, None, Some(perf_trace)).await
     }
 
     /// Connects with an explicitly enabled, best-effort Core event observer.
@@ -102,11 +132,13 @@ impl ConnectedQuoteClient {
     where
         S: ChainDataSource + 'static,
     {
+        let perf_trace = disabled_perf_trace();
         Self::connect_inner(
             config,
             source,
             optional_checkpoint,
             Some(CoreEventSink::new(core_event_sink, policy)),
+            perf_trace,
         )
         .await
     }
@@ -116,6 +148,7 @@ impl ConnectedQuoteClient {
         source: Arc<S>,
         optional_checkpoint: Option<Checkpoint>,
         core_event_sink: Option<CoreEventSink>,
+        perf_trace: ConnectPerfTrace,
     ) -> Result<Self, IndexerError>
     where
         S: ChainDataSource + 'static,
@@ -132,11 +165,20 @@ impl ConnectedQuoteClient {
         let (cancel, pump_cancel) = watch::channel(false);
         let (reducer_cancel, reducer_cancel_rx) = watch::channel(false);
         let (source_active_tx, mut source_active_rx) = watch::channel(false);
+        let (recovery_tx, recovery_rx) = watch::channel(RecoverySignal::default());
         let (runtime_events, _) = broadcast::channel(RUNTIME_EVENT_CAPACITY);
-        let stats = Arc::new(ClientRuntimeStats::new(
-            config.buffer_capacity,
-            config.buffer_byte_capacity,
-        ));
+        let stats = ClientRuntimeStats::new(config.buffer_capacity, config.buffer_byte_capacity);
+        #[cfg(feature = "perf-trace")]
+        let stats = {
+            let mut stats = stats;
+            if let Some(perf_trace) = perf_trace {
+                stats.attach_perf_trace(perf_trace);
+            }
+            stats
+        };
+        #[cfg(not(feature = "perf-trace"))]
+        let ConnectPerfTrace = perf_trace;
+        let stats = Arc::new(stats);
         let recovery_event_sink = core_event_sink;
         let pump_future = source_pump(
             source.clone(),
@@ -147,7 +189,10 @@ impl ConnectedQuoteClient {
                 stall_timeout: config.source_stall_timeout,
                 operation_timeout: config.source_operation_timeout,
                 source_active: source_active_tx,
+                shared: shared.clone(),
                 cancel: pump_cancel,
+                recovery: recovery_rx,
+                recovery_signal: recovery_tx.clone(),
                 events: runtime_events.clone(),
                 stats: stats.clone(),
             },
@@ -168,6 +213,12 @@ impl ConnectedQuoteClient {
             "before subscription was established",
         )
         .await?;
+        let source_lease =
+            source_activity_lease(&source_active_rx, shared.as_ref()).ok_or_else(|| {
+                SourceError::Unavailable(
+                    "source disconnected before bootstrap state was acquired".into(),
+                )
+            })?;
 
         let mut checkpoint_recovered = false;
         let mut initial = if let Some(checkpoint) = optional_checkpoint {
@@ -207,33 +258,18 @@ impl ConnectedQuoteClient {
             snapshot_indexer(source.as_ref(), &config).await?
         };
 
-        let mut buffered = Vec::new();
-        while let Ok(update) = updates_rx.try_recv() {
-            buffered.push(update.dequeue(&stats));
-        }
-        crate::indexer::engine::sort_chain_updates(&mut buffered);
-        emit_handoff_events(
+        let handoff = BootstrapHandoff::capture(&mut updates_rx, config.buffer_capacity).apply(
             &mut initial,
-            &buffered,
             recovery_event_sink.as_ref(),
             checkpoint_recovered,
+        )?;
+        handoff.install_and_publish(
+            shared.as_ref(),
+            initial,
+            source_lease,
+            recovery_event_sink.as_ref(),
             &stats,
         )?;
-        initial.apply_handoff(buffered)?;
-        await_source_active(
-            &mut source_active_rx,
-            &mut bootstrap_cancel,
-            config.source_operation_timeout,
-            "during bootstrap",
-        )
-        .await?;
-
-        *shared
-            .indexer
-            .write()
-            .map_err(|_| IndexerError::LockPoisoned)? = initial;
-        stats.record_state_update();
-        shared.publish_available();
         let freshness = tokio::spawn(supervise_task(
             "freshness-watchdog",
             freshness_watchdog(
@@ -257,6 +293,7 @@ impl ConnectedQuoteClient {
                 events: runtime_events.clone(),
                 stats: stats.clone(),
                 core_event_sink: recovery_event_sink,
+                recovery: recovery_tx,
             },
         );
         let reducer = tokio::spawn(supervise_task(
@@ -278,6 +315,8 @@ impl ConnectedQuoteClient {
                 reducer: Some(reducer),
                 source_pump,
                 freshness: Some(freshness),
+                forced_abort: false,
+                completion: None,
             }),
         })
     }
@@ -307,17 +346,13 @@ impl ConnectedQuoteClient {
         }
     }
 
-    /// Evaluates one quote under a short shared read guard.
+    /// Evaluates one quote from one lock-free immutable snapshot.
     pub fn quote(&self, request: &QuoteRequest) -> Result<ClientQuote, IndexerError> {
-        if !self.is_ready() {
+        if !self.shared.quote_path_available(1) {
             return Err(IndexerError::NotReady);
         }
         let prepared = {
-            let indexer = self
-                .shared
-                .indexer
-                .read()
-                .map_err(|_| IndexerError::LockPoisoned)?;
+            let indexer = self.shared.load_indexer()?;
             indexer.prepare_quote()?
         };
         prepared.evaluate(request)
@@ -325,15 +360,11 @@ impl ConnectedQuoteClient {
 
     /// Evaluates all requests under one state/cursor snapshot.
     pub fn quote_many(&self, requests: &[QuoteRequest]) -> Result<ClientBatchQuote, IndexerError> {
-        if !self.is_ready() {
+        if !self.shared.quote_path_available(requests.len()) {
             return Err(IndexerError::NotReady);
         }
         let prepared = {
-            let indexer = self
-                .shared
-                .indexer
-                .read()
-                .map_err(|_| IndexerError::LockPoisoned)?;
+            let indexer = self.shared.load_indexer()?;
             indexer.prepare_quote_many(requests)?
         };
         prepared.evaluate_many(requests)
@@ -341,12 +372,7 @@ impl ConnectedQuoteClient {
 
     /// Returns current readiness and execution context.
     pub fn health(&self) -> Result<IndexerHealth, IndexerError> {
-        let mut health = self
-            .shared
-            .indexer
-            .read()
-            .map_err(|_| IndexerError::LockPoisoned)?
-            .health();
+        let mut health = self.shared.load_indexer()?.health();
         health.ready &= self.is_ready();
         Ok(health)
     }
@@ -356,17 +382,12 @@ impl ConnectedQuoteClient {
         if !self.is_ready() {
             return Ok(None);
         }
-        Ok(self
-            .shared
-            .indexer
-            .read()
-            .map_err(|_| IndexerError::LockPoisoned)?
-            .checkpoint())
+        Ok(self.shared.load_indexer()?.checkpoint())
     }
 
     /// Returns the atomic readiness gate used by HTTP probes.
     pub fn is_ready(&self) -> bool {
-        self.shared.available.load(Ordering::Acquire)
+        self.shared.is_available()
     }
 
     /// Samples ingestion and recovery counters.
@@ -383,6 +404,10 @@ pub(super) struct RuntimeTasks {
     pub(super) source_pump: Option<JoinHandle<()>>,
     /// Reducer-state freshness monitor.
     pub(super) freshness: Option<JoinHandle<()>>,
+    /// A timed-out caller requested abort; later callers must finish that path.
+    pub(super) forced_abort: bool,
+    /// Stable terminal result returned to every serialized shutdown caller.
+    pub(super) completion: Option<Result<Option<Checkpoint>, IndexerError>>,
 }
 
 /// Cancels and aborts the subscription pump when bootstrap is dropped.
@@ -462,8 +487,7 @@ async fn supervise_task<F>(
     F: Future<Output = ()> + Send,
 {
     let result = AssertUnwindSafe(future).catch_unwind().await;
-    shared.available.store(false, Ordering::Release);
-    shared.ready.notify_waiters();
+    shared.stop();
     match result {
         Err(payload) => publish(
             &events,
@@ -496,13 +520,10 @@ pub(super) fn publish(sender: &broadcast::Sender<ClientRuntimeEvent>, event: Cli
 
 impl Drop for ConnectedQuoteClient {
     fn drop(&mut self) {
-        self.shared.stopping.store(true, Ordering::Release);
+        self.shared.stop();
         let _ = self.cancel.send(true);
         let _ = self.reducer_cancel.send(true);
-        let tasks = match self.tasks.get_mut() {
-            Ok(tasks) => tasks,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let tasks = self.tasks.get_mut();
         if let Some(task) = tasks.reducer.as_ref() {
             task.abort();
         }
@@ -514,3 +535,7 @@ impl Drop for ConnectedQuoteClient {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "client_tests.rs"]
+mod tests;

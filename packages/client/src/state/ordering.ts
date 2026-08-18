@@ -79,14 +79,15 @@ export class CursorReorderBuffer {
 }
 
 function cursorKey(cursor: ChainCursor, rank: number): CursorKey {
-  const transportOrder =
-    cursor.transactionIndex === undefined && cursor.logIndex === undefined ? (cursor.sourceSequence ?? 0n) : 0n;
+  const positioned = cursor.transactionIndex !== undefined && cursor.logIndex !== undefined;
+  const transportOrder = positioned ? 0n : (cursor.sourceSequence ?? 0n);
+  const transportSubIndex = positioned ? 0n : (cursor.sourceSubIndex ?? 0n);
   return [
     cursor.blockNumber,
     cursor.transactionIndex ?? 0n,
     cursor.logIndex ?? 0n,
     transportOrder,
-    cursor.sourceSubIndex ?? 0n,
+    transportSubIndex,
     rank,
   ];
 }
@@ -97,10 +98,12 @@ function updateKey(update: ChainUpdate): CursorKey {
       return cursorKey(update.head.cursor, 0);
     case "Log":
       return cursorKey(update.log.cursor, 1);
+    case "Correction":
+      return cursorKey(update.correction.newTip.cursor, 2);
     case "Reorg":
-      return cursorKey(update.newHead.cursor, 2);
+      return cursorKey(update.newHead.cursor, 3);
     case "Gap":
-      return update.cursor ? cursorKey(update.cursor, 3) : [(1n << 256n) - 1n, 0n, 0n, 0n, 0n, 3];
+      return update.cursor ? cursorKey(update.cursor, 4) : [(1n << 256n) - 1n, 0n, 0n, 0n, 0n, 4];
   }
 }
 
@@ -108,14 +111,7 @@ function watermarkKey(cursor: ChainCursor): CursorKey {
   if (cursor.transactionIndex === undefined && cursor.logIndex === undefined)
     return [cursor.blockNumber, (1n << 32n) - 1n, (1n << 32n) - 1n, (1n << 64n) - 1n, (1n << 32n) - 1n, 255];
   const transportOrder = 0n;
-  return [
-    cursor.blockNumber,
-    cursor.transactionIndex ?? 0n,
-    cursor.logIndex ?? 0n,
-    transportOrder,
-    cursor.sourceSubIndex ?? 0n,
-    255,
-  ];
+  return [cursor.blockNumber, cursor.transactionIndex ?? 0n, cursor.logIndex ?? 0n, transportOrder, 0n, 255];
 }
 
 function encodeKey(key: CursorKey): string {

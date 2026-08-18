@@ -5,17 +5,17 @@ mod reorg;
 
 pub(crate) use reorg::ReorgCorrection;
 
-use alloy_primitives::{Address, B256, keccak256};
+use alloy_primitives::{Address, B256, Keccak256, keccak256};
 use lunarbase_client::model::{BlockRef, ChainCursor, Commitment, ContractLog};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub(crate) const STREAM_SCHEMA_VERSION: u16 = 2;
-const REORG_ID_DOMAIN: &[u8] = b"lunarbase-durable-reorg-v2";
-pub(crate) const ID_DOMAIN_VERSION: &str = "lunarbase-durable-v2";
+const REORG_ID_DOMAIN: &[u8] = b"lunarbase-durable-reorg-v3";
+pub(crate) const ID_DOMAIN_VERSION: &str = "lunarbase-durable-v3";
 
-const LOG_ID_DOMAIN: &[u8] = b"lunarbase-durable-log-v2";
-const RECORD_ID_DOMAIN: &[u8] = b"lunarbase-durable-record-v2";
+const LOG_ID_DOMAIN: &[u8] = b"lunarbase-durable-log-v3";
+const RECORD_ID_DOMAIN: &[u8] = b"lunarbase-durable-record-v3";
 
 #[derive(Clone, Debug)]
 pub(crate) struct DurableEvent {
@@ -111,7 +111,7 @@ impl DurableEvent {
         }
         let identity = stable_log_identity(log)?;
         let logical_log_id = logical_log_id(log, &identity);
-        let record_id = origin_record_id(&logical_log_id);
+        let record_id = origin_record_id(&logical_log_id, log);
         let core = format!("{:#x}", log.address);
         let cursor_json = encode_cursor(&log.cursor, &core)?;
         let mut fields = Vec::with_capacity(12);
@@ -303,14 +303,19 @@ fn logical_log_id(log: &ContractLog, identity: &StableLogIdentity) -> String {
     encode_id(keccak256(preimage))
 }
 
-fn origin_record_id(logical_log_id: &str) -> String {
-    let mut preimage = [0_u8; RECORD_ID_DOMAIN.len() + 69 + 6];
-    let mut offset = 0;
-    append_bytes(&mut preimage, &mut offset, RECORD_ID_DOMAIN);
-    append_bytes(&mut preimage, &mut offset, logical_log_id.as_bytes());
-    append_bytes(&mut preimage, &mut offset, b"origin");
-    debug_assert_eq!(offset, preimage.len());
-    encode_id(keccak256(preimage))
+fn origin_record_id(logical_log_id: &str, log: &ContractLog) -> String {
+    let mut hasher = Keccak256::new();
+    hasher.update(RECORD_ID_DOMAIN);
+    hasher.update(logical_log_id.as_bytes());
+    hasher.update(b"origin");
+    hasher.update(log.cursor.execution_block_number.to_be_bytes());
+    hasher.update((log.topics.len() as u64).to_be_bytes());
+    for topic in &log.topics {
+        hasher.update(topic.as_slice());
+    }
+    hasher.update((log.data.len() as u64).to_be_bytes());
+    hasher.update(log.data.as_ref());
+    encode_id(hasher.finalize())
 }
 
 fn append_bytes(target: &mut [u8], offset: &mut usize, value: &[u8]) {
@@ -320,7 +325,7 @@ fn append_bytes(target: &mut [u8], offset: &mut usize, value: &[u8]) {
 }
 
 fn encode_id(digest: B256) -> String {
-    format!("v2:{digest:#x}")
+    format!("v3:{digest:#x}")
 }
 
 fn cursor_order(cursor: &ChainCursor) -> String {
@@ -352,6 +357,19 @@ mod tests {
         assert_eq!(canonical.logical_log_id, realtime.logical_log_id);
         assert_eq!(canonical.record_id, realtime.record_id);
         assert_eq!(canonical.logical_log_id.len(), 69);
+    }
+
+    #[test]
+    fn same_log_position_with_altered_payload_gets_a_distinct_record_id() {
+        let original = log(Commitment::Realtime, 1);
+        let mut altered = original.clone();
+        altered.cursor.execution_block_number = 99;
+        altered.topics[0] = B256::new([9; 32]);
+        altered.data = Bytes::from(vec![8; 64]);
+        let original = DurableEvent::from_log(&original).unwrap();
+        let altered = DurableEvent::from_log(&altered).unwrap();
+        assert_eq!(original.logical_log_id, altered.logical_log_id);
+        assert_ne!(original.record_id, altered.record_id);
     }
 
     #[test]

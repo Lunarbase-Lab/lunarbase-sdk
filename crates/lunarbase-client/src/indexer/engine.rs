@@ -5,32 +5,56 @@ use crate::indexer::errors::IndexerError;
 use crate::indexer::quote_types::{ClientBatchQuote, ClientQuote, IndexerHealth};
 use crate::model::{
     ChainCursor, ChainUpdate, Checkpoint, Commitment, ContractLog, DeploymentConfig,
-    MATH_COMPATIBILITY_VERSION, QuoteEvent, SourceError,
+    MATH_COMPATIBILITY_VERSION, QuoteEvent,
 };
 use crate::protocol::abi::decode_core_event;
 use crate::state::reducer::{QuoteReducer, ReducerError};
-use lunarbase_math::arithmetic::BPS;
-use lunarbase_math::{
-    Address, B256, FeeClass, QuoteMode, QuotePolicy, QuoteRequest, QuoteState, U256, quote,
-};
-use std::ops::RangeInclusive;
+use lunarbase_math::{B256, FeeClass, QuoteMode, QuotePolicy, QuoteRequest, QuoteState, quote};
 use std::sync::Arc;
 
+#[path = "engine/bootstrap.rs"]
+mod bootstrap;
+mod correction;
+mod finality;
+mod retention;
+mod validation;
+pub(crate) use bootstrap::CorrectionNotice;
+use correction::OptimisticJournal;
+use validation::{canonical_floor_covers_log, update_cursor, validate_verified_router_snapshot};
+pub(crate) use validation::{
+    snapshot_covers, sort_chain_update_refs, sort_chain_update_refs_with_indices,
+    sort_chain_updates, validate_core_log_identity, validate_core_recovery_log,
+};
+
 #[derive(Clone, Debug)]
-/// Synchronous state machine used under the client's short `RwLock` guards.
+/// Synchronous state machine published as immutable lock-free snapshots.
 pub struct QuoteIndexer {
     /// Ordered reducer owning the current quote-critical state and cursor.
-    pub reducer: QuoteReducer,
+    pub(crate) reducer: QuoteReducer,
     /// Immutable deployment identity used for compatibility and router checks.
-    deployment: DeploymentConfig,
+    deployment: Arc<DeploymentConfig>,
     /// Last canonical snapshot/backfill cursor whose state already includes
     /// every quote-critical log through that block.
     canonical_floor: Option<ChainCursor>,
+    /// Stable snapshot used for checkpoints; never points at an optimistic head.
+    stable_checkpoint: Option<Arc<Checkpoint>>,
+    /// Highest immutable finalized block identity observed from the source.
+    finalized_floor: Option<ChainCursor>,
+    /// Bounded copy-on-write before-images used only by the ingestion path.
+    optimistic_history: OptimisticJournal,
+    /// Compact semantic identity and tip of the last published correction.
+    last_correction: Option<AppliedCorrection>,
+}
+
+#[derive(Clone, Debug)]
+struct AppliedCorrection {
+    fingerprint: B256,
+    tip: ChainCursor,
 }
 
 const MAX_BATCH_QUOTES: usize = 256;
 
-/// Coherent state/cursor handle evaluated after the shared read lock is released.
+/// Coherent state/cursor handle evaluated after its immutable snapshot is released.
 pub(crate) struct PreparedQuoteSnapshot {
     state: Arc<QuoteState>,
     cursor: ChainCursor,
@@ -129,8 +153,12 @@ impl QuoteIndexer {
     pub fn new(state: QuoteState, deployment: DeploymentConfig) -> Self {
         Self {
             reducer: QuoteReducer::new(state, deployment.fee_class, None),
-            deployment,
+            deployment: Arc::new(deployment),
             canonical_floor: None,
+            stable_checkpoint: None,
+            finalized_floor: None,
+            optimistic_history: OptimisticJournal::default(),
+            last_correction: None,
         }
     }
 
@@ -148,58 +176,20 @@ impl QuoteIndexer {
             ));
         }
         let canonical_floor = checkpoint.cursor.clone();
+        let finalized_floor =
+            (canonical_floor.commitment == Commitment::Finalized).then(|| canonical_floor.clone());
+        let reducer = QuoteReducer::from_checkpoint(checkpoint, deployment.fee_class);
+        let mut optimistic_history = OptimisticJournal::default();
+        optimistic_history.reset(canonical_floor.clone());
         Ok(Self {
-            reducer: QuoteReducer::from_checkpoint(checkpoint, deployment.fee_class),
-            deployment,
+            stable_checkpoint: reducer.checkpoint(&deployment).map(Arc::new),
+            reducer,
+            deployment: Arc::new(deployment),
             canonical_floor: Some(canonical_floor),
+            finalized_floor,
+            optimistic_history,
+            last_correction: None,
         })
-    }
-
-    /// Installs a coherent snapshot and applies buffered post-snapshot data.
-    pub fn bootstrap_normalized(
-        &mut self,
-        snapshot: BootstrapSnapshot,
-        mut buffered: Vec<ChainUpdate>,
-    ) -> Result<(), IndexerError> {
-        if snapshot.cursor.chain_id != self.deployment.chain_id {
-            return Err(ReducerError::ChainIdMismatch.into());
-        }
-        if snapshot.implementation != self.deployment.expected_implementation
-            || snapshot.implementation_code_hash
-                != self.deployment.expected_implementation_code_hash
-        {
-            return Err(IndexerError::CodeHashMismatch);
-        }
-        validate_verified_router_snapshot(&snapshot, &self.deployment)?;
-        let snapshot_cursor = snapshot.cursor.clone();
-        let snapshot_chain = snapshot.cursor.chain_id;
-        buffered.sort_by_key(update_order);
-        self.reducer = QuoteReducer::new(
-            snapshot.state,
-            self.deployment.fee_class,
-            snapshot.verified_router,
-        );
-        self.reducer.bootstrap(snapshot.cursor);
-        self.canonical_floor = Some(snapshot_cursor.clone());
-        for update in buffered {
-            self.validate_core_update_identity(&update)?;
-            let cursor = update_cursor(&update);
-            if let Some(cursor) = cursor {
-                if cursor.chain_id != snapshot_chain {
-                    self.reducer.mark_not_ready();
-                    return Err(ReducerError::ChainIdMismatch.into());
-                }
-                if snapshot_covers(cursor, &snapshot_cursor)? {
-                    continue;
-                }
-            }
-            if let Err(error) = self.apply_validated_core_update(update) {
-                self.reducer.mark_not_ready();
-                return Err(error);
-            }
-        }
-        self.reducer.publish_ready();
-        Ok(())
     }
 
     /// Installs a snapshot without a handoff batch.
@@ -210,24 +200,36 @@ impl QuoteIndexer {
     /// Applies handoff messages that are strictly newer than the current
     /// cursor, preserving an already restored checkpoint state.
     pub fn apply_handoff(&mut self, mut buffered: Vec<ChainUpdate>) -> Result<(), IndexerError> {
+        sort_chain_updates(&mut buffered);
+        self.apply_handoff_borrowed_ordered(buffered.iter())
+    }
+
+    /// Applies an already ordered handoff while the caller retains ownership
+    /// and resource permits for every queued payload.
+    pub(crate) fn apply_handoff_borrowed_ordered<'a>(
+        &mut self,
+        buffered: impl IntoIterator<Item = &'a ChainUpdate>,
+    ) -> Result<(), IndexerError> {
         let current = self
             .reducer
             .cursor()
             .cloned()
             .ok_or(IndexerError::NoCursor)?;
-        buffered.sort_by_key(update_order);
         for update in buffered {
-            self.validate_core_update_identity(&update)?;
-            if let Some(cursor) = update_cursor(&update) {
+            self.validate_core_update_identity(update)?;
+            if let Some(cursor) = update_cursor(update) {
                 if cursor.chain_id != current.chain_id {
                     self.reducer.mark_not_ready();
                     return Err(ReducerError::ChainIdMismatch.into());
                 }
                 if snapshot_covers(cursor, &current)? {
+                    if let ChainUpdate::Correction(correction) = update {
+                        self.observe_covered_correction(correction)?;
+                    }
                     continue;
                 }
             }
-            self.apply_validated_core_update(update)?;
+            self.apply_validated_core_update_borrowed_with_notice(update)?;
         }
         self.reducer.publish_ready();
         Ok(())
@@ -254,23 +256,44 @@ impl QuoteIndexer {
                     self.reducer.mark_not_ready();
                     return Err(ReducerError::RemovedLog.into());
                 }
-                if let Some(event) = decoder(&log)
-                    && let Err(error) = self.reducer.apply(log.cursor, event)
-                {
+                let event = decoder(&log);
+                if let Err(error) = self.apply_decoded_log(log.cursor, event) {
                     self.reducer.mark_not_ready();
-                    return Err(error.into());
+                    return Err(error);
                 }
             }
             ChainUpdate::Head(head) => {
-                if let Err(error) = self.reducer.observe_head(head.cursor) {
+                let cursor = head.cursor;
+                self.validate_finalized_update(&cursor)?;
+                if let Err(error) = self.reducer.observe_head(cursor.clone()) {
                     self.reducer.mark_not_ready();
                     return Err(error.into());
                 }
+                // `observe_head` deliberately ignores stale heads. Do not let a
+                // late transport message relabel a retained block below the
+                // published tip: only an identity that actually became (or
+                // remained) the reducer head is proof for a later correction.
+                if let Some(published) = self.reducer.cursor().filter(|published| {
+                    published.chain_id == cursor.chain_id
+                        && published.block_number == cursor.block_number
+                        && published.execution_block_number == cursor.execution_block_number
+                        && published.block_hash == cursor.block_hash
+                }) {
+                    self.optimistic_history
+                        .record_head_identity(published.clone());
+                }
+                self.record_finalized_update(&cursor)?;
             }
             ChainUpdate::Reorg { .. } => {
                 self.reducer.mark_not_ready();
                 return Err(IndexerError::Gap(
                     "reorg requires canonical recovery".into(),
+                ));
+            }
+            ChainUpdate::Correction(_) => {
+                self.reducer.mark_not_ready();
+                return Err(IndexerError::Gap(
+                    "optimistic correction requires the correction journal".into(),
                 ));
             }
             ChainUpdate::Gap { reason, .. } => {
@@ -282,33 +305,84 @@ impl QuoteIndexer {
     }
 
     fn validate_core_update_identity(&mut self, update: &ChainUpdate) -> Result<(), IndexerError> {
-        if let ChainUpdate::Log(log) = update
-            && let Err(error) =
+        let result = match update {
+            ChainUpdate::Log(log) => {
                 validate_core_log_identity(log, self.deployment.core, self.deployment.chain_id)
-        {
+            }
+            ChainUpdate::Correction(correction) => (|| {
+                correction.validate()?;
+                if correction.common_ancestor.cursor.chain_id != self.deployment.chain_id {
+                    return Err(ReducerError::ChainIdMismatch.into());
+                }
+                for log in &correction.replacement_logs {
+                    validate_core_log_identity(
+                        log,
+                        self.deployment.core,
+                        self.deployment.chain_id,
+                    )?;
+                }
+                Ok(())
+            })(),
+            ChainUpdate::Head(_) | ChainUpdate::Reorg { .. } | ChainUpdate::Gap { .. } => Ok(()),
+        };
+        if let Err(error) = result {
             self.reducer.mark_not_ready();
             return Err(error);
         }
         Ok(())
     }
 
-    /// Applies one update through the pinned Core ABI decoder.
-    pub fn apply_core_update(&mut self, update: ChainUpdate) -> Result<(), IndexerError> {
-        self.validate_core_update_identity(&update)?;
-        self.apply_validated_core_update(update)
+    /// Applies a borrowed update so the connected runtime can retain queue
+    /// ownership and its count/byte permits until the transition succeeds.
+    pub(crate) fn apply_core_update_borrowed(
+        &mut self,
+        update: &ChainUpdate,
+    ) -> Result<(), IndexerError> {
+        self.validate_core_update_identity(update)?;
+        match update {
+            ChainUpdate::Correction(correction) => {
+                self.replace_with_correction(correction).map(drop)
+            }
+            ChainUpdate::Log(log) => self.apply_core_log_borrowed_validated(log).map(drop),
+            ChainUpdate::Head(head) => {
+                self.apply_validated_update(ChainUpdate::Head(head.clone()), &|_| None)
+            }
+            ChainUpdate::Reorg { old_head, new_head } => self.apply_validated_update(
+                ChainUpdate::Reorg {
+                    old_head: old_head.clone(),
+                    new_head: new_head.clone(),
+                },
+                &|_| None,
+            ),
+            ChainUpdate::Gap { cursor, reason } => self.apply_validated_update(
+                ChainUpdate::Gap {
+                    cursor: cursor.clone(),
+                    reason: reason.clone(),
+                },
+                &|_| None,
+            ),
+        }
     }
 
-    /// Applies a log and retains its payload allocation for event delivery.
-    pub(crate) fn apply_core_log_for_delivery(
+    /// Applies a borrowed log and reports whether its owned payload should be
+    /// forwarded after the caller releases the state lock.
+    pub(crate) fn apply_core_log_borrowed(
         &mut self,
-        log: ContractLog,
-    ) -> Result<Option<ContractLog>, IndexerError> {
+        log: &ContractLog,
+    ) -> Result<bool, IndexerError> {
         if let Err(error) =
-            validate_core_log_identity(&log, self.deployment.core, self.deployment.chain_id)
+            validate_core_log_identity(log, self.deployment.core, self.deployment.chain_id)
         {
             self.reducer.mark_not_ready();
             return Err(error);
         }
+        self.apply_core_log_borrowed_validated(log)
+    }
+
+    fn apply_core_log_borrowed_validated(
+        &mut self,
+        log: &ContractLog,
+    ) -> Result<bool, IndexerError> {
         if log.removed {
             self.reducer.mark_not_ready();
             return Err(ReducerError::RemovedLog.into());
@@ -316,18 +390,20 @@ impl QuoteIndexer {
         if let Some(floor) = self.canonical_floor.as_ref()
             && canonical_floor_covers_log(&log.cursor, floor)?
         {
-            return Ok(None);
+            return Ok(false);
         }
-        if let Some(event) = decode_core_event(&log)?
-            && let Err(error) = self.reducer.apply(log.cursor.clone(), event)
-        {
+        let event = decode_core_event(log)?;
+        if let Err(error) = self.apply_decoded_log(log.cursor.clone(), event) {
             self.reducer.mark_not_ready();
-            return Err(error.into());
+            return Err(error);
         }
-        Ok(Some(log))
+        Ok(true)
     }
 
     fn apply_validated_core_update(&mut self, update: ChainUpdate) -> Result<(), IndexerError> {
+        if let ChainUpdate::Correction(correction) = update {
+            return self.replace_with_correction(&correction).map(drop);
+        }
         if matches!(&update, ChainUpdate::Log(log) if log.removed) {
             return self.apply_validated_update(update, &|_| None);
         }
@@ -343,11 +419,43 @@ impl QuoteIndexer {
         self.apply_validated_update(update, &|_| None)
     }
 
+    fn apply_validated_core_update_borrowed_with_notice(
+        &mut self,
+        update: &ChainUpdate,
+    ) -> Result<Option<CorrectionNotice>, IndexerError> {
+        if let ChainUpdate::Correction(correction) = update {
+            let notice = CorrectionNotice::from_validated(correction);
+            return self
+                .replace_with_correction(correction)
+                .map(|applied| applied.then_some(notice));
+        }
+        self.apply_core_update_borrowed(update)?;
+        Ok(None)
+    }
+
     /// Records a completed canonical recovery range. Realtime logs at or
     /// below this cursor may still be released by a source-local reorder
     /// buffer and are already represented by the installed state.
-    pub(crate) fn set_canonical_floor(&mut self, cursor: ChainCursor) {
-        self.canonical_floor = Some(cursor);
+    pub(crate) fn set_canonical_floor(&mut self, cursor: ChainCursor) -> Result<(), IndexerError> {
+        let current = self.reducer.cursor().ok_or(IndexerError::NoCursor)?;
+        if current.chain_id != cursor.chain_id {
+            self.reducer.mark_not_ready();
+            return Err(ReducerError::ChainIdMismatch.into());
+        }
+        if cursor.transaction_index.is_some()
+            || cursor.log_index.is_some()
+            || current.block_number != cursor.block_number
+            || current.execution_block_number != cursor.execution_block_number
+            || current.block_hash.is_none()
+            || current.block_hash != cursor.block_hash
+        {
+            self.reducer.mark_not_ready();
+            return Err(ReducerError::BlockHashMismatch.into());
+        }
+        self.canonical_floor = Some(cursor.clone());
+        self.optimistic_history.advance_floor(cursor);
+        self.stable_checkpoint = self.reducer.checkpoint(&self.deployment).map(Arc::new);
+        Ok(())
     }
 
     /// Returns the ready state by reference without cloning it.
@@ -422,7 +530,11 @@ impl QuoteIndexer {
 
     /// Builds a deployment-bound checkpoint outside the quote path.
     pub fn checkpoint(&self) -> Option<Checkpoint> {
-        self.reducer.checkpoint(&self.deployment)
+        self.stable_checkpoint.as_deref().cloned()
+    }
+
+    pub(crate) fn stable_checkpoint_handle(&self) -> Option<Arc<Checkpoint>> {
+        self.stable_checkpoint.as_ref().map(Arc::clone)
     }
 
     /// Revokes quote readiness immediately.
@@ -432,138 +544,25 @@ impl QuoteIndexer {
 
     /// Returns the deployment identity used by recovery.
     pub fn deployment(&self) -> &DeploymentConfig {
-        &self.deployment
+        self.deployment.as_ref()
     }
-}
 
-fn validate_verified_router_snapshot(
-    snapshot: &BootstrapSnapshot,
-    deployment: &DeploymentConfig,
-) -> Result<(), IndexerError> {
-    match (
-        deployment.verified_router,
-        snapshot.verified_router.as_ref(),
-    ) {
-        (None, None) => Ok(()),
-        (Some(expected), Some(actual))
-            if actual.router == expected
-                && actual.partner_fee_bps.len() <= snapshot.state.lanes.len().saturating_add(1)
-                && actual.partner_fee_bps.iter().all(|(asset, fee)| {
-                    (*asset == snapshot.state.cash || snapshot.state.lanes.contains_key(asset))
-                        && U256::from(*fee) <= BPS
-                }) =>
-        {
-            Ok(())
+    fn replace_with_correction(
+        &mut self,
+        correction: &crate::model::ChainCorrection,
+    ) -> Result<bool, IndexerError> {
+        match self.clone().into_corrected_core(correction) {
+            Ok((_candidate, false)) => Ok(false),
+            Ok((candidate, true)) => {
+                *self = candidate;
+                Ok(true)
+            }
+            Err(error) => {
+                self.reducer.mark_not_ready();
+                Err(error)
+            }
         }
-        _ => Err(SourceError::Unavailable(
-            "snapshot verified-router policy does not match deployment".into(),
-        )
-        .into()),
     }
-}
-
-/// Rejects source/filter violations before ABI decoding or event publication.
-pub(crate) fn validate_core_log_identity(
-    log: &ContractLog,
-    expected_core: Address,
-    expected_chain_id: u64,
-) -> Result<(), IndexerError> {
-    if log.address != expected_core {
-        return Err(ReducerError::ContractAddressMismatch.into());
-    }
-    if log.cursor.chain_id != expected_chain_id {
-        return Err(ReducerError::ChainIdMismatch.into());
-    }
-    Ok(())
-}
-
-/// Validates canonical backfill identity and bounds before cursor filtering.
-pub(crate) fn validate_core_recovery_log(
-    log: &ContractLog,
-    expected_core: Address,
-    expected_chain_id: u64,
-    block_range: RangeInclusive<u64>,
-) -> Result<(), IndexerError> {
-    validate_core_log_identity(log, expected_core, expected_chain_id)?;
-    if log.removed
-        || log.cursor.block_hash.is_none()
-        || !block_range.contains(&log.cursor.block_number)
-    {
-        return Err(IndexerError::Gap(
-            "canonical recovery backfill returned an invalid log".into(),
-        ));
-    }
-    Ok(())
-}
-
-fn snapshot_covers(update: &ChainCursor, snapshot: &ChainCursor) -> Result<bool, IndexerError> {
-    if update.chain_id != snapshot.chain_id {
-        return Err(ReducerError::ChainIdMismatch.into());
-    }
-    if update.block_number < snapshot.block_number {
-        return Ok(true);
-    }
-    if update.block_number > snapshot.block_number {
-        return Ok(false);
-    }
-    match (update.block_hash, snapshot.block_hash) {
-        (Some(update), Some(snapshot)) if update == snapshot => Ok(true),
-        (Some(_), Some(_)) => Ok(false),
-        _ => Err(IndexerError::Gap(
-            "same-block handoff has no hash identity; canonical recovery required".into(),
-        )),
-    }
-}
-
-fn canonical_floor_covers_log(
-    update: &ChainCursor,
-    floor: &ChainCursor,
-) -> Result<bool, IndexerError> {
-    if update.chain_id != floor.chain_id {
-        return Err(ReducerError::ChainIdMismatch.into());
-    }
-    if update.block_number < floor.block_number {
-        return Ok(true);
-    }
-    if update.block_number > floor.block_number {
-        return Ok(false);
-    }
-    match (update.block_hash, floor.block_hash) {
-        (Some(update_hash), Some(floor_hash)) if update_hash == floor_hash => {
-            let floor_is_block_complete =
-                floor.transaction_index.is_none() && floor.log_index.is_none();
-            Ok(floor_is_block_complete || update.event_order() <= floor.event_order())
-        }
-        (Some(_), Some(_)) => Err(ReducerError::BlockHashMismatch.into()),
-        _ => Err(IndexerError::Gap(
-            "same-block realtime log has no canonical hash identity".into(),
-        )),
-    }
-}
-
-fn update_cursor(update: &ChainUpdate) -> Option<&ChainCursor> {
-    match update {
-        ChainUpdate::Head(head) => Some(&head.cursor),
-        ChainUpdate::Log(log) => Some(&log.cursor),
-        ChainUpdate::Reorg { new_head, .. } => Some(&new_head.cursor),
-        ChainUpdate::Gap { cursor, .. } => cursor.as_ref(),
-    }
-}
-
-fn update_order(update: &ChainUpdate) -> (u64, u32, u32, u64, u32, u8) {
-    let cursor = update_cursor(update);
-    let order = cursor.map_or((u64::MAX, 0, 0, 0, 0), ChainCursor::event_order);
-    let rank = match update {
-        ChainUpdate::Head(_) => 0,
-        ChainUpdate::Log(_) => 1,
-        ChainUpdate::Reorg { .. } => 2,
-        ChainUpdate::Gap { .. } => 3,
-    };
-    (order.0, order.1, order.2, order.3, order.4, rank)
-}
-
-pub(crate) fn sort_chain_updates(updates: &mut [ChainUpdate]) {
-    updates.sort_by_key(update_order);
 }
 
 #[cfg(test)]

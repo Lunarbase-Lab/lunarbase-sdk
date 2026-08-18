@@ -6,6 +6,7 @@ import {
   BoundedRingBuffer,
   Commitment,
   ConnectedQuoteClient,
+  CORE_EVENT_TOPICS,
   MATH_COMPATIBILITY_VERSION,
   Network,
   QuoteIndexer,
@@ -71,6 +72,31 @@ test("queue and deadline paths release abort listeners", async () => {
   assert.equal(inner.listeners, 0);
 });
 
+test("queue admits a bounded handoff after every overflow sentinel dequeue path", async () => {
+  const overflow: ChainUpdate = { kind: "Gap", reason: "x".repeat(2_048) };
+  const head: ChainUpdate = { kind: "Head", head: { cursor: nextCursor() } };
+  const signal = new AbortController().signal;
+
+  const pendingQueue = new BoundedUpdateQueue(2, 1_024);
+  const pending = pendingQueue.next(signal);
+  pendingQueue.push(overflow);
+  assert.equal((await pending)?.kind, "Gap");
+  pendingQueue.push(head);
+  assert.equal((await pendingQueue.next(signal))?.kind, "Head");
+
+  const directQueue = new BoundedUpdateQueue(2, 1_024);
+  directQueue.push(overflow);
+  assert.equal((await directQueue.next(signal))?.kind, "Gap");
+  directQueue.push(head);
+  assert.equal((await directQueue.next(signal))?.kind, "Head");
+
+  const drainedQueue = new BoundedUpdateQueue(2, 1_024);
+  drainedQueue.push(overflow);
+  assert.equal(drainedQueue.drainAll()[0]?.kind, "Gap");
+  drainedQueue.push(head);
+  assert.equal(drainedQueue.drainAll()[0]?.kind, "Head");
+});
+
 test("deployment and filter ownership detach caller mutations", () => {
   const input = deployment();
   const filter: ContractFilter = { address: CORE, topics: [HASH] };
@@ -97,20 +123,71 @@ test("connect fails within the source operation deadline for a hung subscription
   assert.ok(performance.now() - started < 250);
 });
 
+test("connect rejects correction history budgets above protocol caps before source I/O", async () => {
+  const source = new HungSubscribeSource();
+  await assert.rejects(
+    ConnectedQuoteClient.connect({ ...connectConfig(20), correctionHistoryBlockBound: 129 }, source),
+    /correctionHistoryBlockBound must be at most 128/,
+  );
+  await assert.rejects(
+    ConnectedQuoteClient.connect({ ...connectConfig(20), correctionHistoryByteBound: 16 * 1024 * 1024 + 1 }, source),
+    /correctionHistoryByteBound must be at most 16 MiB/,
+  );
+});
+
 test("shutdown cancels recovery and bounds a hung iterator return", async () => {
   const source = new HungIteratorSource();
   const client = await ConnectedQuoteClient.connect(connectConfig(25), source);
   source.hangSnapshot = true;
-  const recovery = client.recover();
+  const recoveryFailure = assert.rejects(
+    client.recover(),
+    /recovery (?:aborted|ended) before a state candidate was installed/,
+  );
   await Promise.resolve();
 
   const started = performance.now();
   await client.shutdown(250);
-  await recovery;
+  await recoveryFailure;
   assert.ok(performance.now() - started < 250);
   assert.equal(source.returnCalls, 1);
   assert.equal(client.health().ready, false);
   assert.throws(() => client.quoteMany([]), { code: "NOT_READY" });
+  assert.throws(() => client.recover(), { code: "NOT_READY" });
+});
+
+test("quote indexer owns correction budgets and rejects an earlier canonical floor", () => {
+  const limits = { blockCapacity: 128, byteCapacity: 1_024 };
+  const indexer = QuoteIndexer.fromSnapshot(snapshot(), deployment(), limits);
+  (limits as { byteCapacity: number }).byteCapacity = 16 * 1024 * 1024;
+  for (let offset = 1n; offset <= 4n; offset += 1n) {
+    const blockByte = Number(40n + offset)
+      .toString(16)
+      .padStart(2, "0");
+    indexer.applyCoreUpdate({
+      kind: "Log",
+      log: {
+        address: CORE,
+        topics: [CORE_EVENT_TOPICS.BlacklistFeeMultiplierSet],
+        data: `0x${offset.toString(16).padStart(64, "0")}` as Hex,
+        removed: false,
+        cursor: {
+          ...cursor(),
+          blockNumber: 100n + offset,
+          executionBlockNumber: 100n + offset,
+          blockHash: `0x${blockByte.repeat(32)}` as Hex,
+          transactionIndex: 0n,
+          logIndex: 0n,
+          commitment: Commitment.Realtime,
+        },
+      },
+    });
+  }
+  assert.ok(indexer.correctionMetrics().journalRetainedBytes <= 1_024);
+  assert.ok(indexer.correctionMetrics().journalEvictions > 0);
+
+  assert.throws(() => indexer.setCanonicalFloor(cursor()), { code: "GAP" });
+  assert.equal(indexer.health().ready, false);
+  assert.equal(indexer.checkpoint()?.cursor.blockNumber, 100n);
 });
 
 class HungSubscribeSource implements ChainDataSource {
@@ -128,7 +205,7 @@ class HungSubscribeSource implements ChainDataSource {
     return Promise.resolve(cursor());
   }
   validateCheckpoint(_checkpoint: Checkpoint): Promise<boolean> {
-    return Promise.resolve(false);
+    return Promise.resolve(true);
   }
 }
 
@@ -229,5 +306,15 @@ function cursor(): ChainCursor {
     executionBlockNumber: 100n,
     blockHash: HASH,
     commitment: Commitment.Finalized,
+  };
+}
+
+function nextCursor(): ChainCursor {
+  return {
+    ...cursor(),
+    blockNumber: 101n,
+    executionBlockNumber: 101n,
+    blockHash: `0x${"22".repeat(32)}` as Hex,
+    commitment: Commitment.Realtime,
   };
 }

@@ -1,11 +1,12 @@
-# Durable event delivery v2
+# Durable event delivery schema v2
 
 This document is the normative delivery contract for fork-aware LunarBase Core
 events. The words MUST, MUST NOT, SHOULD, and MAY describe requirements for a
 production implementation.
 
-The event worker emits Redis schema v2 in its deployment-bound v2 namespace. A v1
-namespace MUST NOT be opened or mutated as v2.
+The event worker emits Redis schema v2 in its deployment-bound v2 key namespace
+and uses ID domain v3. A namespace written with an older ID domain MUST NOT be
+opened by a v3 writer.
 
 ## Scope and isolation
 
@@ -57,7 +58,7 @@ have no leading zeroes, except the value zero itself.
 `applied` and `reverted` records. Its preimage is:
 
 ```text
-"lunarbase-durable-log-v2"
+"lunarbase-durable-log-v3"
 || chainId_be_u64
 || core_20_bytes
 || blockHash_32_bytes
@@ -66,7 +67,7 @@ have no leading zeroes, except the value zero itself.
 || logIndex_be_u32
 ```
 
-The encoded value is `v2:0x` followed by the lowercase Keccak-256 digest.
+The encoded value is `v3:0x` followed by the lowercase Keccak-256 digest.
 Commitment, receive order, operation, and reorg identity MUST NOT enter this
 preimage.
 
@@ -75,25 +76,34 @@ preimage.
 `reorgId` is stable across retries of one correction:
 
 ```text
-"lunarbase-durable-reorg-v2"
-|| chainId_be_u64
+"lunarbase-durable-reorg-v3"
 || core_20_bytes
-|| ancestorBlockHash
-|| oldTipBlockHash
-|| newTipBlockHash
+|| semantic(commonAncestor, oldTip, newTip)
+|| semantic(oldBranch[])
+|| semantic(newBranch[])
+|| semantic(orderedReplacementLogs[])
 ```
+
+A semantic block identity contains chain ID, block number, execution block
+number, block hash, and parent hash. A semantic log identity additionally
+contains Core address, block and execution identity, transaction hash and
+indices, topics, and data. Commitment, receive sequence/sub-index, and the
+current finalized watermark do not enter `reorgId`, so an exact crash retry is
+stable while an altered correction envelope receives a different ID.
 
 ### recordId
 
 `recordId` identifies one lifecycle transition, not one immutable log:
 
 ```text
-normal apply: Keccak("lunarbase-durable-record-v2" || logicalLogId || "origin")
-fork log:    Keccak("lunarbase-durable-record-v2" || logicalLogId || reorgId || operation)
-control:     Keccak("lunarbase-durable-record-v2" || reorgId || operation)
+normal apply: Keccak("lunarbase-durable-record-v3" || logicalLogId || "origin"
+                     || executionBlockNumber || topics || data)
+fork log:    Keccak("lunarbase-durable-record-v3" || logicalLogId || reorgId || operation)
+control:     Keccak("lunarbase-durable-record-v3" || reorgId || operation)
 ```
 
-`reorgId` and `recordId` use the same `v2:0x<lowercase digest>` encoding
+Lengths are included for variable-size topic/data sequences. `reorgId` and
+`recordId` use the same `v3:0x<lowercase digest>` encoding
 as `logicalLogId`.
 
 The same branch may become active again after another fork. Its new
@@ -182,7 +192,7 @@ committed.
 The worker detects a fork from parent linkage. Provider retractions MAY trigger
 resolution earlier, but never define the complete abandoned branch.
 
-On discontinuity the worker:
+On an unresolved discontinuity the worker:
 
 1. revokes readiness and pauses normal persistence;
 2. keeps newly received frames only within count and byte budgets;
@@ -213,9 +223,12 @@ transaction. The manifest, barriers, lifecycle records, canonical indexes, and
 cursor therefore become visible together or not at all. Stable `recordId`
 values make an ambiguous transaction retry idempotent.
 
-Readiness remains false from discontinuity through `reorg/commit`. The worker
-updates the canonical-height index and source resume position before committing
-the barrier, then closes the manifest atomically with `ReorgCommit`.
+A source-published, fully validated correction is applied atomically without
+revoking readiness. If the correction cannot be resolved inside the durable
+window or budgets, the worker remains live, reports a gap, and enters bounded
+canonical recovery; readiness is false only for that recovery interval. The
+worker updates the canonical-height index and source resume position before
+committing the barrier, then closes the manifest atomically with `ReorgCommit`.
 
 ## Delivery modes
 
@@ -261,11 +274,24 @@ status idempotently by `recordId`, acknowledges the record, and rejects later
 entries in that namespace. Recovery requires an operator-chosen canonical
 bootstrap boundary and a new namespace.
 
-## Bounds, retention, and failure policy
+## Bounds and failure policy
 
-The source queue, Redis queue, pending frames, header journal, block-log
-references, correction plan, and RPC response bodies MUST each have item and
-byte limits. Limits charge shared buffers to every retained owner.
+The source queue, Redis queue, pending frames, in-process header window,
+correction plan, and RPC response bodies have item and byte limits. Limits
+charge shared buffers to every retained owner. These limits do not currently
+bound total Redis residency.
+
+Automated Redis archival and pruning are not implemented in schema v2. Stream
+entries, `record-ids`, lifecycle state, headers, canonical-height entries, and
+block-log references grow monotonically. Operators MUST size and alert the
+dedicated Redis instance for the complete retention horizon. With
+`maxmemory-policy noeviction`, exhaustion fails writes and makes the worker
+unready; it never authorizes lossy eviction.
+
+Do not run `XTRIM` or delete index keys independently: doing so can strand
+deduplication, lifecycle, fork, and recovery references. The following rules
+describe the required contract for the planned bounded maintenance worker, not
+functionality present in this release.
 
 Journal entries may be pruned only when all conditions hold:
 
@@ -279,15 +305,14 @@ the same bounded maintenance transaction. Trimming MUST use a safe Stream ID
 watermark and MUST NOT use approximate length-based eviction.
 
 Redis MUST use AOF with `appendfsync always` and
-`maxmemory-policy noeviction`. Capacity alerts fire before the configured
-journal or Redis memory high-watermark. If finality stalls, a consumer blocks
-retention, a common ancestor is outside the retained window, or any byte budget
-is exhausted, the worker pauses persistence through bounded backpressure and
-remains live but unready. It never
+`maxmemory-policy noeviction`. Capacity alerts MUST fire before the provisioned
+Redis memory limit. If a common ancestor is outside the in-process retained
+window, a bounded queue is exhausted, or Redis rejects a write, the worker
+pauses persistence through bounded backpressure and remains live but unready. It never
 silently drops an event, deletes an unfinalized branch, or substitutes a normal
 backfill for an unknown correction.
 
-## Schema transition
+## Schema and ID-domain transition
 
 Schema v2 uses a new key prefix, consumer group, and bootstrap boundary. It
 does not mutate v1 keys and consumers MUST NOT merge both streams.
@@ -297,6 +322,13 @@ archive v1 processing through that boundary, bootstrap downstream state at the
 same boundary, and start the v2 worker from the next block. Canonical backfill
 then covers downtime. A v1 `eventId` is not a v2 `recordId` or
 `logicalLogId`.
+
+ID domain v3 intentionally changes `logicalLogId`, `recordId`, and `reorgId`
+while retaining the schema-v2 record and key layout. Deployment metadata binds
+the ID domain, so an existing schema-v2 namespace initialized by an older
+writer is incompatible. Drain/archive it and start from a verified boundary in
+a fresh namespace (or complete an explicit offline migration). Mixed v2/v3 ID
+writers in one namespace are forbidden.
 
 Fork correction is enabled for EVM, Base, and Arbitrum workers. A Monad worker
 without a durable proposal resolver remains live but unready on a retraction;

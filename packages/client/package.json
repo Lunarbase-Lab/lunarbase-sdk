@@ -1,6 +1,6 @@
 {
   "name": "@lunarbase-lab/pmm-v2-client",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Universal LunarBase TypeScript runtime and execution engine",
   "keywords": [
     "lunarbase",
@@ -25,6 +25,7 @@
   },
   "dependencies": {
     "@lunarbase-lab/pmm-v2-math": "workspace:*",
+    "@noble/hashes": "1.8.0",
     "ox": "0.14.30"
   },
   "devDependencies": {

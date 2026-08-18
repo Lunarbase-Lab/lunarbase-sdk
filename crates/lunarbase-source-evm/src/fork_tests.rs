@@ -41,6 +41,25 @@ fn common_append_is_bounded_and_does_not_prune_silently() {
 }
 
 #[test]
+fn prepared_heads_do_not_mutate_until_committed() {
+    let mut window = window();
+    let first = block(10, 10, 9);
+    let second = block(11, 11, 10);
+    window.push_head(first.clone()).unwrap();
+
+    let append = window.prepare_head(second.clone()).unwrap();
+    assert_eq!(window.tip(), Some(&first));
+    assert!(window.commit_head(append));
+    assert_eq!(window.tip(), Some(&second));
+
+    let promoted = block_with_commitment(11, 11, 10, Commitment::Finalized);
+    let replacement = window.prepare_progressive_tip(promoted.clone()).unwrap();
+    assert_eq!(window.tip(), Some(&second));
+    window.commit_progressive_tip(replacement);
+    assert_eq!(window.tip(), Some(&promoted));
+}
+
+#[test]
 fn finality_prunes_only_history_before_the_boundary() {
     let mut window = window();
     window.push_head(block(10, 10, 9)).unwrap();

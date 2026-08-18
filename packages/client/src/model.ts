@@ -12,6 +12,9 @@ import type { Hex } from "ox/Hex";
 
 const TEXT_ENCODER = new TextEncoder();
 
+const CORRECTION_PROTOCOL_FIXED_BYTES = 504 + 288;
+const CORRECTION_PROTOCOL_BLOCK_REF_BYTES = 144;
+const CORRECTION_PROTOCOL_LOG_FIXED_BYTES = 216;
 /** Current checkpoint schema. */
 export const SCHEMA_VERSION = 6;
 /** Quote-math compatibility profile implemented by this SDK. */
@@ -92,6 +95,22 @@ export interface ContractLog {
   cursor: ChainCursor;
 }
 
+/** Fully resolved canonical branch replacement emitted after an optimistic fork. */
+export interface ChainCorrection {
+  /** Last block shared by the previously published and replacement branches. */
+  readonly commonAncestor: BlockRef;
+  /** Previously published optimistic tip being superseded. */
+  readonly oldTip: BlockRef;
+  /** Canonical replacement tip after applying this correction. */
+  readonly newTip: BlockRef;
+  /** Old branch ordered from the child of `commonAncestor` through `oldTip`. */
+  readonly oldBranch: readonly BlockRef[];
+  /** New branch ordered from the child of `commonAncestor` through `newTip`. */
+  readonly newBranch: readonly BlockRef[];
+  /** Complete Core log replacement for `newBranch`, in canonical log order. */
+  readonly replacementLogs: readonly ContractLog[];
+}
+
 /** Core address and accepted event signatures. */
 export interface ContractFilter {
   /** Contract address accepted by the source. */
@@ -114,6 +133,7 @@ export interface BackfillRequest {
 export type ChainUpdate =
   | { kind: "Head"; head: BlockRef }
   | { kind: "Log"; log: ContractLog }
+  | { kind: "Correction"; correction: ChainCorrection }
   | { kind: "Reorg"; oldHead: BlockRef; newHead: BlockRef }
   | { kind: "Gap"; cursor?: ChainCursor; reason: string };
 
@@ -123,11 +143,30 @@ export function contractLogRetainedBytes(log: ContractLog): number {
   return 256 + topicBytes + log.data.length;
 }
 
+/** Charges correction payload bytes using the shared 64-bit Rust wire envelope. */
+export function chainCorrectionProtocolBytes(correction: ChainCorrection): number {
+  const branchBytes = (correction.oldBranch.length + correction.newBranch.length) * CORRECTION_PROTOCOL_BLOCK_REF_BYTES;
+  return correction.replacementLogs.reduce(
+    (total, log) => total + CORRECTION_PROTOCOL_LOG_FIXED_BYTES + log.topics.length * 32 + decodedHexBytes(log.data),
+    CORRECTION_PROTOCOL_FIXED_BYTES + branchBytes,
+  );
+}
+
+function decodedHexBytes(value: Hex): number {
+  return Math.ceil(Math.max(0, value.length - 2) / 2);
+}
+
 /** Conservatively charges one normalized update to bounded runtime queues. */
 export function chainUpdateRetainedBytes(update: ChainUpdate): number {
   switch (update.kind) {
     case "Log":
       return 64 + contractLogRetainedBytes(update.log);
+    case "Correction":
+      return (
+        512 +
+        (update.correction.oldBranch.length + update.correction.newBranch.length) * 384 +
+        update.correction.replacementLogs.reduce((total, log) => total + contractLogRetainedBytes(log), 0)
+      );
     case "Gap":
       return 192 + TEXT_ENCODER.encode(update.reason).byteLength;
     case "Head":
@@ -267,6 +306,7 @@ export class ReducerError extends Error {
     readonly code:
       | "CHAIN_ID_MISMATCH"
       | "CURSOR_REGRESSION"
+      | "DUPLICATE_EVENT_CONFLICT"
       | "BLOCK_HASH_MISMATCH"
       | "REMOVED_LOG"
       | "INVALID_SLIPPAGE_K"
@@ -350,5 +390,49 @@ export interface IndexerHealth {
   /** Optional router whose accounting allocation is verified. */
   verifiedRouter: Address | undefined;
 }
+
+/** Allocation and correction counters exposed for runtime monitoring. */
+export interface IndexerCorrectionMetrics {
+  /** Successfully applied branch replacements since construction. */
+  readonly appliedCorrections: number;
+  /** Eventful blocks currently retained in the compact undo journal. */
+  readonly journalBlocks: number;
+  /** Eventful history blocks cumulatively evicted by count or byte pressure. */
+  readonly journalEvictions: number;
+  /** Conservative bytes retained by compact before-images. */
+  readonly journalRetainedBytes: number;
+}
+
+/** Lifecycle transition published outside the synchronous quote hot path. */
+export type IndexerLifecycleEvent =
+  | {
+      /** A resolved fork was atomically applied without revoking readiness. */
+      readonly kind: "CorrectionApplied";
+      /** Last block shared by the old and replacement branches. */
+      readonly commonAncestor: BlockRef;
+      /** Optimistic tip superseded by the correction. */
+      readonly oldTip: BlockRef;
+      /** Replacement tip now visible to quotes. */
+      readonly newTip: BlockRef;
+      /** Number of replacement Core logs consumed by the reducer. */
+      readonly replacementLogCount: number;
+    }
+  | {
+      /** Continuity could not be proven and canonical recovery is required. */
+      readonly kind: "Gap";
+      /** Best known source position associated with the gap. */
+      readonly cursor?: ChainCursor;
+      /** Stable human-readable recovery reason. */
+      readonly reason: string;
+    }
+  | {
+      /** Lifecycle observers missed notices; quote continuity is unaffected. */
+      readonly kind: "ObserverGap";
+      /** Stable reason describing observer-only notice loss. */
+      readonly reason: string;
+    };
+
+/** Observer invoked asynchronously after a lifecycle transition is published. */
+export type IndexerLifecycleListener = (event: IndexerLifecycleEvent) => void;
 
 export type { Address, FeeClass, LaneState, QuoteOutcome, QuoteRequest, QuoteState, Word };

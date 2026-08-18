@@ -45,16 +45,22 @@ pub(super) async fn freshness_watchdog(
 ) {
     let maximum_age = duration_millis(maximum_age);
     loop {
+        let availability = shared.availability_token();
         let generation = stats.state_update_generation.load(Ordering::Acquire);
         let last_update = stats.last_state_update_unix_millis.load(Ordering::Acquire);
         let now = unix_millis();
-        let fresh = state_is_fresh(now, last_update, maximum_age);
+        let correcting = SharedQuoteState::token_is_correcting(availability);
+        let fresh = correcting || state_is_fresh(now, last_update, maximum_age);
         let delay = if fresh {
-            maximum_age
-                .saturating_sub(now.saturating_sub(last_update))
-                .saturating_add(1)
+            if correcting {
+                maximum_age.clamp(1, 250)
+            } else {
+                maximum_age
+                    .saturating_sub(now.saturating_sub(last_update))
+                    .saturating_add(1)
+            }
         } else {
-            expire_if_unchanged(&shared, &stats, generation);
+            expire_if_unchanged(&shared, &stats, generation, availability);
             maximum_age.clamp(1, 250)
         };
         tokio::select! {
@@ -65,19 +71,17 @@ pub(super) async fn freshness_watchdog(
     }
 }
 
-fn expire_if_unchanged(shared: &SharedQuoteState, stats: &ClientRuntimeStats, generation: u64) {
-    let was_available = shared.available.swap(false, Ordering::AcqRel);
-    let unchanged = stats
-        .state_update_generation
-        .compare_exchange(generation, generation, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok();
-    if unchanged {
-        if was_available {
-            shared.ready.notify_waiters();
-        }
-    } else {
-        shared.publish_available();
-    }
+fn expire_if_unchanged(
+    shared: &SharedQuoteState,
+    stats: &ClientRuntimeStats,
+    generation: u64,
+    availability: u64,
+) {
+    let Some(expiring) = shared.begin_expiration(availability) else {
+        return;
+    };
+    let unchanged = stats.state_update_generation.load(Ordering::Acquire) == generation;
+    shared.finish_expiration(expiring, unchanged);
 }
 
 async fn cancellation_requested(cancel: &mut watch::Receiver<bool>) {
@@ -131,21 +135,57 @@ mod tests {
     fn watchdog_expiration_cannot_overwrite_concurrent_progress_or_shutdown() {
         let (shared, stats) = shared();
         stats.record_state_update();
-        shared.publish_available();
+        shared.publish_available_if(shared.availability_token());
+        let availability = shared.availability_token();
         let generation = stats.state_update_generation.load(Ordering::Acquire);
-        expire_if_unchanged(&shared, &stats, generation);
-        assert!(!shared.available.load(Ordering::Acquire));
+        expire_if_unchanged(&shared, &stats, generation, availability);
+        assert!(!shared.is_available());
 
+        let stale_availability = shared.availability_token();
         let stale_generation = stats.state_update_generation.load(Ordering::Acquire);
         stats.record_state_update();
-        shared.publish_available();
-        expire_if_unchanged(&shared, &stats, stale_generation);
-        assert!(shared.available.load(Ordering::Acquire));
+        shared.publish_available_if(shared.availability_token());
+        expire_if_unchanged(&shared, &stats, stale_generation, stale_availability);
+        assert!(shared.is_available());
 
-        shared.stopping.store(true, Ordering::Release);
-        shared.available.store(false, Ordering::Release);
+        shared.stop();
         stats.record_state_update();
-        shared.publish_available();
-        assert!(!shared.available.load(Ordering::Acquire));
+        shared.publish_available_if(shared.availability_token());
+        assert!(!shared.is_available());
+    }
+
+    #[test]
+    fn watchdog_cannot_expire_a_correction_started_after_its_sample() {
+        let (shared, stats) = shared();
+        shared.publish_available_if(shared.availability_token());
+        let watchdog_sample = shared.availability_token();
+        let generation = stats.state_update_generation.load(Ordering::Acquire);
+        let correction = shared.begin_correction().unwrap();
+
+        expire_if_unchanged(&shared, &stats, generation, watchdog_sample);
+        assert!(shared.is_available());
+        assert!(SharedQuoteState::token_is_correcting(
+            shared.availability_token()
+        ));
+
+        shared.complete_correction(correction);
+        assert!(shared.is_available());
+    }
+
+    #[test]
+    fn reducer_progress_restores_an_expiration_lease_without_not_ready() {
+        let (shared, stats) = shared();
+        stats.record_state_update();
+        shared.publish_available_if(shared.availability_token());
+        let ready = shared.availability_token();
+        let generation = stats.state_update_generation.load(Ordering::Acquire);
+        let expiring = shared.begin_expiration(ready).unwrap();
+        assert!(shared.is_available());
+
+        stats.record_state_update();
+        shared.publish_available_if(shared.availability_token());
+        let unchanged = stats.state_update_generation.load(Ordering::Acquire) == generation;
+        shared.finish_expiration(expiring, unchanged);
+        assert!(shared.is_available());
     }
 }

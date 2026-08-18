@@ -30,6 +30,27 @@ fn event_level_checkpoint_covers_only_events_through_its_cursor() {
 }
 
 #[test]
+fn same_hash_with_conflicting_execution_context_is_never_covered() {
+    let snapshot = cursor_at(B256::new([1; 32]), 2, 3);
+    let mut conflicting = snapshot.clone();
+    conflicting.execution_block_number += 1;
+
+    assert!(snapshot_covers(&conflicting, &snapshot).is_err());
+    assert!(canonical_floor_covers_log(&conflicting, &snapshot).is_err());
+}
+
+#[test]
+fn snapshot_covers_only_equal_or_weaker_commitment_at_the_same_identity() {
+    let mut realtime = cursor_at(B256::new([1; 32]), 2, 3);
+    realtime.commitment = Commitment::Realtime;
+    let mut finalized = realtime.clone();
+    finalized.commitment = Commitment::Finalized;
+
+    assert!(!snapshot_covers(&finalized, &realtime).unwrap());
+    assert!(snapshot_covers(&realtime, &finalized).unwrap());
+}
+
+#[test]
 fn retained_event_log_reuses_its_payload_allocations() {
     let core = Address::new([4; 20]);
     let mut indexer = QuoteIndexer::new(QuoteState::default(), deployment(core));
@@ -48,6 +69,25 @@ fn retained_event_log_reuses_its_payload_allocations() {
 
     assert_eq!(retained.topics.as_ptr(), topics);
     assert_eq!(retained.data.as_ptr(), data);
+}
+
+#[test]
+fn retained_log_charges_reserved_topic_capacity() {
+    let mut topics = Vec::with_capacity(32);
+    topics.push(B256::new([3; 32]));
+    let log = ContractLog {
+        address: Address::new([4; 20]),
+        transaction_hash: Some(B256::new([2; 32])),
+        topics,
+        data: Bytes::new(),
+        removed: false,
+        cursor: cursor_at(B256::new([1; 32]), 2, 3),
+    };
+
+    assert!(
+        log.retained_bytes()
+            >= std::mem::size_of::<ContractLog>() + 32 * std::mem::size_of::<B256>()
+    );
 }
 
 fn deployment(core: Address) -> DeploymentConfig {

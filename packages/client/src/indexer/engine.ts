@@ -6,7 +6,9 @@ import { decodeCoreEvent } from "../protocol/abi.js";
 import { QuoteReducer } from "../state/reducer.js";
 import { Commitment, IndexerError, MATH_COMPATIBILITY_VERSION } from "../model.js";
 import type {
+  BlockRef,
   BootstrapSnapshot,
+  ChainCorrection,
   ChainCursor,
   ChainUpdate,
   Checkpoint,
@@ -14,9 +16,33 @@ import type {
   ClientQuote,
   DeploymentConfig,
   ContractLog,
+  IndexerCorrectionMetrics,
   IndexerHealth,
+  IndexerLifecycleEvent,
+  IndexerLifecycleListener,
 } from "../model.js";
-import { compareCursor, updateCursor } from "../source.js";
+import { updateCursor } from "../source.js";
+import { correctionFingerprint } from "./correction_fingerprint.js";
+import {
+  CorrectionJournal,
+  DEFAULT_CORRECTION_HISTORY_BLOCKS,
+  DEFAULT_CORRECTION_HISTORY_BYTES,
+  type CorrectionJournalLimits,
+} from "./correction_journal.js";
+import { validateCorrectionEnvelope, validateCorrectionState } from "./correction_validation.js";
+import {
+  canonicalFloorCoversLog,
+  canonicalFloorMatchesCurrent,
+  cursorCoversCorrectionTip,
+  cursorHasIdentity,
+  sameCursorIdentity,
+  snapshotCovers,
+  validateCoreLogIdentity,
+  validateSnapshotCursor,
+} from "./cursor_policy.js";
+import { orderHandoffUpdates } from "./handoff_order.js";
+import { LifecyclePublisher } from "./lifecycle_publisher.js";
+import { FinalityGuard } from "./finality_guard.js";
 
 /** Provider-neutral quote engine. No method on its hot path performs I/O. */
 export class QuoteIndexer {
@@ -29,18 +55,46 @@ export class QuoteIndexer {
     deployment: DeploymentConfig,
     /** Canonical state boundary already represented by the reducer. */
     private canonicalFloor?: ChainCursor,
+    /** Count and byte budget for compact optimistic before-images. */
+    correctionLimits: CorrectionJournalLimits = defaultCorrectionLimits(),
   ) {
     this.deployment = ownDeploymentConfig(deployment);
+    this.correctionLimits = ownCorrectionLimits(correctionLimits);
     this.coreAddress = this.deployment.core;
+    const floor = canonicalFloor ?? reducer.cursor();
+    if (!floor) throw new IndexerError("NO_CURSOR", "correction journal requires an initial cursor");
+    this.correctionJournal = new CorrectionJournal({ cursor: { ...floor } }, this.correctionLimits);
   }
 
   /** Owned immutable deployment identity used for compatibility checks. */
   private readonly deployment: DeploymentConfig;
+  /** Owned immutable correction budgets reused by recovery snapshots. */
+  private readonly correctionLimits: CorrectionJournalLimits;
+
+  /** Compact state before-images retained for bounded optimistic rollback. */
+  private correctionJournal: CorrectionJournal;
+  /** Canonical state owner used to avoid persisting an incomplete optimistic head. */
+  private stableReducer?: QuoteReducer;
+  /** Bounded asynchronous observer surface outside reducer execution. */
+  private readonly lifecycle = new LifecyclePublisher();
+  /** Successful corrections since construction. */
+  private appliedCorrections = 0;
+  /** Completed journal evictions retained across canonical snapshot replacement. */
+  private journalEvictionOffset = 0;
+  /** Exact last correction identity retained without its payload. */
+  private lastAppliedCorrectionFingerprint?: string;
+  /** New-tip identity paired with the compact retry fingerprint. */
+  private lastAppliedCorrectionTip?: ChainCursor;
+  /** Highest immutable finalized identity that corrections may not cross. */
+  private finality = new FinalityGuard();
 
   /** Builds a ready indexer from one coherent source snapshot. */
-  static fromSnapshot(snapshot: BootstrapSnapshot, deployment: DeploymentConfig): QuoteIndexer {
-    if (snapshot.cursor.chainId !== deployment.chainId)
-      throw new IndexerError("SOURCE", "snapshot cursor chain id mismatch");
+  static fromSnapshot(
+    snapshot: BootstrapSnapshot,
+    deployment: DeploymentConfig,
+    correctionLimits = defaultCorrectionLimits(),
+  ): QuoteIndexer {
+    validateSnapshotCursor(snapshot.cursor, deployment.chainId);
     validateVerifiedRouterSnapshot(snapshot, deployment);
     const indexer = new QuoteIndexer(
       new QuoteReducer(snapshot.state, deployment.feeClass, snapshot.verifiedRouter),
@@ -48,48 +102,102 @@ export class QuoteIndexer {
       {
         ...snapshot.cursor,
       },
+      correctionLimits,
     );
     indexer.verifyImplementation(snapshot);
     indexer.reducer.bootstrap(snapshot.cursor);
+    indexer.stableReducer = indexer.reducer.fork();
+    indexer.finality.observe(snapshot.cursor);
     return indexer;
   }
 
   /** Restores a compatible checkpoint. */
-  static fromCheckpoint(checkpoint: Checkpoint, deployment: DeploymentConfig): QuoteIndexer {
+  static fromCheckpoint(
+    checkpoint: Checkpoint,
+    deployment: DeploymentConfig,
+    correctionLimits = defaultCorrectionLimits(),
+  ): QuoteIndexer {
     if (!checkpointMatchesDeployment(checkpoint, deployment))
       throw new IndexerError("CODE_HASH_MISMATCH", "checkpoint deployment or state mismatch");
     if (deployment.verifiedRouter !== undefined)
       throw new IndexerError("INVALID_REQUEST", "verified-router mode requires a fresh chain snapshot");
-    return new QuoteIndexer(QuoteReducer.fromCheckpoint(checkpoint, deployment.feeClass), deployment, {
-      ...checkpoint.cursor,
-    });
+    const indexer = new QuoteIndexer(
+      QuoteReducer.fromCheckpoint(checkpoint, deployment.feeClass),
+      deployment,
+      { ...checkpoint.cursor },
+      correctionLimits,
+    );
+    indexer.stableReducer = indexer.reducer.fork();
+    indexer.finality.observe(checkpoint.cursor);
+    return indexer;
   }
 
   /** Atomically replaces state after snapshot/recovery and replays handoff updates. */
   installSnapshot(snapshot: BootstrapSnapshot, buffered: readonly ChainUpdate[]): void {
-    const replacement = QuoteIndexer.fromSnapshot(snapshot, this.deployment);
-    replacement.replayHandoff(buffered, snapshot.cursor);
+    this.finality.validateSnapshot(snapshot.cursor);
+    const priorJournalEvictions = saturatingCounter(this.journalEvictionOffset, this.correctionJournal.evictionCount);
+    const replacement = QuoteIndexer.fromSnapshot(snapshot, this.deployment, this.correctionLimits);
+    replacement.finality.retain(this.finality.cursor());
+    if (
+      this.lastAppliedCorrectionFingerprint &&
+      this.lastAppliedCorrectionTip &&
+      snapshotCovers(this.lastAppliedCorrectionTip, snapshot.cursor)
+    ) {
+      replacement.lastAppliedCorrectionFingerprint = this.lastAppliedCorrectionFingerprint;
+      replacement.lastAppliedCorrectionTip = { ...this.lastAppliedCorrectionTip };
+    }
+    const stagedLifecycle = new LifecyclePublisher();
+    replacement.replayHandoff(buffered, snapshot.cursor, stagedLifecycle);
     replacement.reducer.publishReady();
     this.reducer = replacement.reducer;
+    this.correctionJournal = replacement.correctionJournal;
+    this.journalEvictionOffset = saturatingCounter(priorJournalEvictions, replacement.journalEvictionOffset);
+    this.appliedCorrections = saturatingCounter(this.appliedCorrections, replacement.appliedCorrections);
+    this.stableReducer = replacement.stableReducer;
+    this.lastAppliedCorrectionFingerprint = replacement.lastAppliedCorrectionFingerprint;
+    this.lastAppliedCorrectionTip = replacement.lastAppliedCorrectionTip
+      ? { ...replacement.lastAppliedCorrectionTip }
+      : undefined;
+    this.finality = replacement.finality;
     this.canonicalFloor = replacement.canonicalFloor ? { ...replacement.canonicalFloor } : undefined;
+    stagedLifecycle.flushInto(this.lifecycle);
   }
 
   /** Applies buffered subscription messages newer than the installed state. */
-  replayHandoff(buffered: readonly ChainUpdate[], snapshotCursor: import("../model.js").ChainCursor): void {
-    const ordered = [...buffered].sort((left, right) => {
-      const a = updateCursor(left);
-      const b = updateCursor(right);
-      if (!a || !b) return left.kind.localeCompare(right.kind);
-      return compareCursor(a, b);
-    });
+  replayHandoff(
+    buffered: readonly ChainUpdate[],
+    snapshotCursor: import("../model.js").ChainCursor,
+    stagedLifecycle?: LifecyclePublisher,
+  ): void {
+    const ordered = orderHandoffUpdates(buffered);
     for (const update of ordered) {
       try {
         if (update.kind === "Gap") throw new IndexerError("GAP", update.reason);
         if (update.kind === "Reorg") throw new IndexerError("GAP", "reorg during snapshot handoff");
-        this.validateCoreLogIdentity(update);
+        if (update.kind === "Log") this.validateHandoffLog(update.log);
+        if (update.kind === "Correction") {
+          this.validateHandoffCorrection(update.correction);
+          if (snapshotCovers(update.correction.newTip.cursor, snapshotCursor)) {
+            const notice = this.observeCoveredCorrection(update.correction);
+            if (notice) {
+              if (stagedLifecycle) stagedLifecycle.stage(notice);
+              else this.lifecycle.publish(notice);
+            }
+            continue;
+          }
+          const notice = this.applyCorrection(update.correction, true);
+          if (notice) {
+            if (stagedLifecycle) stagedLifecycle.stage(notice);
+            else this.lifecycle.publish(notice);
+          }
+          continue;
+        }
         const cursor = updateCursor(update);
         if (!cursor) continue;
-        if (snapshotCovers(cursor, snapshotCursor)) continue;
+        if (snapshotCovers(cursor, snapshotCursor)) {
+          this.observeFinalized(cursor, false);
+          continue;
+        }
         this.applyCoreUpdate(update);
       } catch (error) {
         this.reducer.markNotReady();
@@ -100,27 +208,45 @@ export class QuoteIndexer {
 
   /** Records a completed canonical recovery range. */
   setCanonicalFloor(cursor: ChainCursor): void {
-    if (cursor.chainId !== this.deployment.chainId) {
+    const current = this.reducer.cursor();
+    if (!current || !canonicalFloorMatchesCurrent(cursor, current)) {
       this.reducer.markNotReady();
-      throw new IndexerError("REDUCER", "canonical floor chain id mismatch");
+      throw new IndexerError("GAP", "canonical floor does not match current reducer state");
     }
     this.canonicalFloor = { ...cursor };
+    this.stableReducer = this.reducer.fork();
+    this.lastAppliedCorrectionFingerprint = undefined;
+    this.lastAppliedCorrectionTip = undefined;
+    this.journalEvictionOffset = saturatingCounter(this.journalEvictionOffset, this.correctionJournal.evictionCount);
+    this.correctionJournal = new CorrectionJournal({ cursor: { ...cursor } }, this.correctionLimits);
   }
 
   /** Applies one normalized update through the pinned Core ABI decoder. */
   applyCoreUpdate(update: ChainUpdate): void {
-    this.validateCoreLogIdentity(update);
     try {
       switch (update.kind) {
-        case "Log": {
-          if (update.log.removed) throw new IndexerError("GAP", "removed log requires canonical recovery");
-          if (this.canonicalFloor && canonicalFloorCoversLog(update.log.cursor, this.canonicalFloor)) break;
-          const event = decodeCoreEvent(update.log);
-          if (event) this.reducer.apply(update.log.cursor, event);
+        case "Log":
+          if (this.applyLog(this.reducer, this.correctionJournal, update.log, true)) {
+            this.lastAppliedCorrectionFingerprint = undefined;
+            this.lastAppliedCorrectionTip = undefined;
+          }
+          if (update.log.cursor.commitment === Commitment.Finalized) this.reducer.observeHead(update.log.cursor);
+          this.observeFinalized(update.log.cursor, false);
           break;
-        }
         case "Head":
           this.reducer.observeHead(update.head.cursor);
+          if (cursorHasIdentity(this.reducer.cursor(), update.head.cursor)) {
+            this.correctionJournal.observe(update.head.cursor);
+            this.observeFinalized(update.head.cursor, true);
+          } else {
+            this.observeFinalized(update.head.cursor, false);
+          }
+          break;
+        case "Correction":
+          {
+            const notice = this.applyCorrection(update.correction);
+            if (notice) this.lifecycle.publish(notice);
+          }
           break;
         case "Reorg":
           throw new IndexerError("GAP", "reorg requires canonical recovery");
@@ -129,8 +255,12 @@ export class QuoteIndexer {
       }
     } catch (error) {
       this.reducer.markNotReady();
-      if (error instanceof IndexerError) throw error;
-      throw new IndexerError("REDUCER", error instanceof Error ? error.message : "reducer transition failed");
+      const normalized =
+        error instanceof IndexerError
+          ? error
+          : new IndexerError("REDUCER", error instanceof Error ? error.message : "reducer transition failed");
+      this.lifecycle.publish({ kind: "Gap", cursor: updateCursor(update), reason: normalized.message });
+      throw normalized;
     }
   }
 
@@ -177,9 +307,29 @@ export class QuoteIndexer {
     };
   }
 
-  /** Produces a deep-cloned checkpoint outside the quote path. */
+  /** Returns compact correction counters for load and memory monitoring. */
+  correctionMetrics(): IndexerCorrectionMetrics {
+    return {
+      appliedCorrections: this.appliedCorrections,
+      journalBlocks: this.correctionJournal.blockCount,
+      journalRetainedBytes: this.correctionJournal.retainedBytes,
+      journalEvictions: saturatingCounter(this.journalEvictionOffset, this.correctionJournal.evictionCount),
+    };
+  }
+
+  /** Observes correction/gap lifecycle asynchronously outside reducer work. */
+  onLifecycle(listener: IndexerLifecycleListener): () => void {
+    return this.lifecycle.subscribe(listener);
+  }
+
+  /** Produces only the latest complete canonical checkpoint. */
   checkpoint(): Checkpoint | undefined {
-    return this.reducer.checkpoint(this.deployment);
+    return this.stableReducer?.checkpoint(this.deployment);
+  }
+
+  /** Identity-only checkpoint used to prove the monotonic finalized floor. */
+  finalizedCheckpoint(): Checkpoint | undefined {
+    return this.finality.checkpoint(this.checkpoint());
   }
 
   /** Marks quotes unavailable during shutdown or recovery. */
@@ -187,14 +337,99 @@ export class QuoteIndexer {
     this.reducer.markNotReady();
   }
 
-  private validateCoreLogIdentity(update: ChainUpdate): void {
-    if (update.kind !== "Log") return;
-    try {
-      validateCoreLogIdentity(update.log, this.coreAddress, this.deployment.chainId);
-    } catch (error) {
-      this.reducer.markNotReady();
-      throw error;
+  private applyLog(
+    reducer: QuoteReducer,
+    journal: CorrectionJournal,
+    log: ContractLog,
+    respectCanonicalFloor: boolean,
+  ): boolean {
+    validateCoreLogIdentity(log, this.coreAddress, this.deployment.chainId);
+    if (log.removed) throw new IndexerError("GAP", "removed log requires a resolved correction");
+    if (respectCanonicalFloor && this.canonicalFloor && canonicalFloorCoversLog(log.cursor, this.canonicalFloor))
+      return false;
+    const event = decodeCoreEvent(log);
+    if (!event) return false;
+    if (respectCanonicalFloor) journal.validateMutation(log.cursor);
+    const undo = reducer.apply(log.cursor, event);
+    if (undo) journal.record(log.cursor, undo);
+    return undo !== undefined;
+  }
+
+  private applyCorrection(correction: ChainCorrection, envelopeValidated = false): IndexerLifecycleEvent | undefined {
+    if (!envelopeValidated) validateCorrectionEnvelope(correction, this.coreAddress, this.deployment.chainId);
+    if (!this.reducer.isReady())
+      throw new IndexerError("GAP", "correction cannot repair invalid quote state; snapshot recovery required");
+    const fingerprint = correctionFingerprint(correction);
+    const current = this.reducer.cursor();
+    if (
+      this.lastAppliedCorrectionFingerprint === fingerprint &&
+      this.lastAppliedCorrectionTip &&
+      sameCursorIdentity(this.lastAppliedCorrectionTip, correction.newTip.cursor) &&
+      current &&
+      cursorCoversCorrectionTip(current, correction.newTip.cursor)
+    )
+      return undefined;
+    this.finality.validateCorrection(correction);
+    const shouldApply = validateCorrectionState(correction, current);
+    if (!shouldApply) {
+      if (this.lastAppliedCorrectionFingerprint === fingerprint) return undefined;
+      throw new IndexerError("GAP", "correction new tip has no matching applied envelope");
     }
+    const candidate = this.correctionJournal.candidate(this.reducer, correction.commonAncestor, correction.oldBranch);
+    const replacement = candidate.reducer;
+    const journal = candidate.journal;
+    for (const log of correction.replacementLogs) this.applyLog(replacement, journal, log, false);
+    replacement.observeHead(correction.newTip.cursor);
+    for (const block of correction.newBranch) journal.observe(block.cursor);
+    this.reducer = replacement;
+    this.correctionJournal = journal;
+    this.lastAppliedCorrectionFingerprint = fingerprint;
+    this.lastAppliedCorrectionTip = { ...correction.newTip.cursor };
+    this.observeFinalized(correction.newTip.cursor, true);
+    this.appliedCorrections = Math.min(Number.MAX_SAFE_INTEGER, this.appliedCorrections + 1);
+    return correctionNotice(correction);
+  }
+
+  private observeCoveredCorrection(correction: ChainCorrection): IndexerLifecycleEvent | undefined {
+    const fingerprint = correctionFingerprint(correction);
+    if (this.lastAppliedCorrectionTip && sameCursorIdentity(this.lastAppliedCorrectionTip, correction.newTip.cursor)) {
+      if (this.lastAppliedCorrectionFingerprint === fingerprint) return undefined;
+      throw new IndexerError("GAP", "snapshot-covered correction conflicts with the retained correction identity");
+    }
+    if (
+      correction.oldTip.cursor.commitment === Commitment.Finalized ||
+      correction.oldBranch.some((block) => block.cursor.commitment === Commitment.Finalized)
+    )
+      throw new IndexerError("GAP", "snapshot-covered correction cannot replace finalized branch state");
+    this.observeFinalized(correction.newTip.cursor, true);
+    this.lastAppliedCorrectionFingerprint = fingerprint;
+    this.lastAppliedCorrectionTip = { ...correction.newTip.cursor };
+    this.appliedCorrections = Math.min(Number.MAX_SAFE_INTEGER, this.appliedCorrections + 1);
+    return correctionNotice(correction);
+  }
+
+  private validateHandoffLog(log: ContractLog): void {
+    try {
+      validateCoreLogIdentity(log, this.coreAddress, this.deployment.chainId);
+    } catch (error) {
+      throw permanentHandoffError(error);
+    }
+  }
+
+  private validateHandoffCorrection(correction: ChainCorrection): void {
+    try {
+      validateCorrectionEnvelope(correction, this.coreAddress, this.deployment.chainId);
+    } catch (error) {
+      throw permanentHandoffError(error);
+    }
+  }
+
+  private observeFinalized(cursor: ChainCursor, blockComplete: boolean): void {
+    if (!this.finality.observe(cursor) || !blockComplete || !cursorHasIdentity(this.reducer.cursor(), cursor)) return;
+    this.stableReducer = this.reducer.fork();
+    this.canonicalFloor = { ...cursor };
+    this.journalEvictionOffset = saturatingCounter(this.journalEvictionOffset, this.correctionJournal.evictionCount);
+    this.correctionJournal = new CorrectionJournal({ cursor: { ...cursor } }, this.correctionLimits);
   }
 
   private requireCursor() {
@@ -238,31 +473,39 @@ function validateVerifiedRouterSnapshot(snapshot: BootstrapSnapshot, deployment:
   }
   throw new IndexerError("SOURCE", "snapshot verified-router policy does not match deployment");
 }
-/** Validates normalized log identity before any ordering shortcut or decode. */
-export function validateCoreLogIdentity(log: ContractLog, expectedCore: Address, expectedChainId: bigint): void {
-  if (log.address !== expectedCore)
-    throw new IndexerError("REDUCER", "contract log address does not match deployment Core");
-  if (log.cursor.chainId !== expectedChainId)
-    throw new IndexerError("REDUCER", "contract log cursor chain id mismatch");
+
+function defaultCorrectionLimits(): CorrectionJournalLimits {
+  return {
+    blockCapacity: DEFAULT_CORRECTION_HISTORY_BLOCKS,
+    byteCapacity: DEFAULT_CORRECTION_HISTORY_BYTES,
+  };
 }
 
-function snapshotCovers(update: ChainCursor, snapshot: ChainCursor): boolean {
-  if (update.chainId !== snapshot.chainId) throw new IndexerError("REDUCER", "cursor chain id mismatch");
-  if (update.blockNumber < snapshot.blockNumber) return true;
-  if (update.blockNumber > snapshot.blockNumber) return false;
-  if (update.blockHash === undefined || snapshot.blockHash === undefined)
-    throw new IndexerError("GAP", "same-block handoff has no hash identity; canonical recovery required");
-  return update.blockHash.toLowerCase() === snapshot.blockHash.toLowerCase();
+function ownCorrectionLimits(limits: CorrectionJournalLimits): CorrectionJournalLimits {
+  return Object.freeze({ blockCapacity: limits.blockCapacity, byteCapacity: limits.byteCapacity });
 }
 
-function canonicalFloorCoversLog(update: ChainCursor, floor: ChainCursor): boolean {
-  if (update.chainId !== floor.chainId) throw new IndexerError("REDUCER", "cursor chain id mismatch");
-  if (update.blockNumber < floor.blockNumber) return true;
-  if (update.blockNumber > floor.blockNumber) return false;
-  if (update.blockHash === undefined || floor.blockHash === undefined)
-    throw new IndexerError("GAP", "same-block realtime log has no canonical hash identity");
-  if (update.blockHash.toLowerCase() !== floor.blockHash.toLowerCase())
-    throw new IndexerError("REDUCER", "block hash mismatch");
-  const floorIsBlockComplete = floor.transactionIndex === undefined && floor.logIndex === undefined;
-  return floorIsBlockComplete || compareCursor(update, floor) <= 0;
+function saturatingCounter(left: number, right: number): number {
+  return left >= Number.MAX_SAFE_INTEGER - right ? Number.MAX_SAFE_INTEGER : left + right;
+}
+
+function cloneBlock(block: BlockRef): BlockRef {
+  return { cursor: { ...block.cursor }, parentHash: block.parentHash };
+}
+
+function correctionNotice(correction: ChainCorrection): IndexerLifecycleEvent {
+  return {
+    kind: "CorrectionApplied",
+    commonAncestor: cloneBlock(correction.commonAncestor),
+    oldTip: cloneBlock(correction.oldTip),
+    newTip: cloneBlock(correction.newTip),
+    replacementLogCount: correction.replacementLogs.length,
+  };
+}
+
+function permanentHandoffError(error: unknown): IndexerError {
+  return new IndexerError(
+    "INVALID_REQUEST",
+    error instanceof Error ? error.message : "snapshot handoff contains an invalid update",
+  );
 }

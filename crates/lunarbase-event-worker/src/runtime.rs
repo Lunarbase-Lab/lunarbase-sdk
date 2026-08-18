@@ -1,10 +1,26 @@
 //! Canonical recovery followed by at-least-once live event persistence.
 
+#[path = "runtime/control.rs"]
+mod control;
 #[path = "runtime/forks.rs"]
 mod forks;
 #[path = "runtime/persist.rs"]
 mod persist;
+#[path = "runtime/recovery_coverage.rs"]
+mod recovery_coverage;
+#[path = "runtime/recovery_state.rs"]
+mod recovery_state;
+#[path = "runtime/upstream_correction.rs"]
+mod upstream;
+#[path = "runtime/validation.rs"]
+mod validation;
+use control::wait_until_active;
+pub(super) use control::{sleep_or_shutdown, wait_for_shutdown};
 use forks::ForkRuntime;
+use recovery_coverage::recovery_log_is_covered;
+pub(super) use recovery_state::Transition;
+use recovery_state::{RecoveryAction, RecoveryState};
+use validation::{validate_cursor, validate_log_identity, validate_recovery_log};
 
 use crate::{
     config::Config,
@@ -14,18 +30,14 @@ use crate::{
 };
 use lunarbase_client::{
     model::{
-        BackfillRequest, BlockRef, ChainCursor, ChainUpdate, ContractFilter, ContractLog, Network,
-        SourceError,
+        BackfillRequest, BlockRef, ChainCursor, ChainUpdate, ContractFilter, Network, SourceError,
     },
     source::ChainDataSource,
 };
 use lunarbase_source_evm::fork::{ForkError, ForkResolver};
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::{
-    sync::{mpsc, watch},
-    time::sleep,
-};
+use tokio::sync::{mpsc, watch};
 
 #[derive(Debug, Error)]
 pub(crate) enum RuntimeError {
@@ -44,6 +56,8 @@ pub(crate) enum RuntimeError {
     LogIdentity,
     #[error("canonical recovery returned an invalid log: {0}")]
     RecoveryLog(String),
+    #[error("finalized source identity was retracted")]
+    FinalizedConflict,
     #[error("source pump stopped unexpectedly")]
     PumpStopped,
     #[cfg(not(all(
@@ -59,17 +73,8 @@ pub(crate) enum RuntimeError {
 impl RuntimeError {
     fn retryable_recovery(&self) -> bool {
         matches!(self, Self::Source(_) | Self::RecoveryLog(_) | Self::Fork(_))
-            || matches!(self, Self::Store(error) if error.retryable()
-                || matches!(error, StoreError::Journal(_) | StoreError::CorrectionBudget(_)
-                    | StoreError::QueueByteLimit))
+            || matches!(self, Self::Store(error) if error.retryable())
     }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum Transition {
-    Continue,
-    Recover(Option<BlockRef>),
-    Shutdown,
 }
 
 pub(crate) async fn run<S>(
@@ -151,17 +156,32 @@ async fn drive<S: ChainDataSource>(
     active: &mut watch::Receiver<bool>,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<(), RuntimeError> {
-    let mut recovery_target = None;
+    let mut recovery = RecoveryState::default();
     loop {
         metrics.set_ready(false);
         if !wait_until_active(active, shutdown).await? {
             return Ok(());
         }
-        let attempted_target = recovery_target.clone();
+        if let Some(detail) = recovery.conflict() {
+            metrics.recovery_failure();
+            tracing::warn!(
+                detail,
+                "event worker retained a conflicting recovery watermark"
+            );
+            if !sleep_or_shutdown(config.reconnect_delay, shutdown).await {
+                return Ok(());
+            }
+            continue;
+        }
+        let Some(source_lease) = metrics.source_lease().filter(|_| *active.borrow()) else {
+            continue;
+        };
+        let attempted_target = recovery.target().cloned();
         match recover(
             source.as_ref(),
             forks.as_deref_mut(),
-            recovery_target.take(),
+            recovery.take_target(),
+            recovery.required(),
             config,
             filter,
             store,
@@ -172,14 +192,13 @@ async fn drive<S: ChainDataSource>(
         )
         .await
         {
-            Ok(Transition::Shutdown) => return Ok(()),
-            Ok(Transition::Recover(target)) => {
-                recovery_target = target;
-                continue;
-            }
-            Ok(Transition::Continue) => {}
+            Ok(transition) => match recovery.apply(transition, forks.is_some()) {
+                RecoveryAction::Shutdown => return Ok(()),
+                RecoveryAction::Retry => continue,
+                RecoveryAction::Live => {}
+            },
             Err(error) => {
-                recovery_target = attempted_target;
+                recovery.restore_target(attempted_target);
                 metrics.recovery_failure();
                 if !error.retryable_recovery() {
                     return Err(error);
@@ -191,8 +210,8 @@ async fn drive<S: ChainDataSource>(
                 continue;
             }
         }
-        if *active.borrow() && metrics.queues_empty() {
-            metrics.set_ready(true);
+        if *active.borrow() && metrics.queues_empty() && !metrics.publish_ready_if(source_lease) {
+            continue;
         }
         match consume_live(
             forks.as_deref_mut(),
@@ -201,16 +220,16 @@ async fn drive<S: ChainDataSource>(
             metrics,
             receiver,
             active,
+            source_lease,
             shutdown,
         )
         .await
         {
-            Ok(Transition::Shutdown) => return Ok(()),
-            Ok(Transition::Recover(target)) => {
-                recovery_target = target;
-                continue;
-            }
-            Ok(Transition::Continue) => unreachable!("live consumption has no finite success"),
+            Ok(transition) => match recovery.apply(transition, forks.is_some()) {
+                RecoveryAction::Shutdown => return Ok(()),
+                RecoveryAction::Retry => continue,
+                RecoveryAction::Live => unreachable!("live consumption has no finite success"),
+            },
             Err(error) => {
                 metrics.recovery_failure();
                 if !error.retryable_recovery() {
@@ -220,7 +239,7 @@ async fn drive<S: ChainDataSource>(
                 if !sleep_or_shutdown(config.reconnect_delay, shutdown).await {
                     return Ok(());
                 }
-                recovery_target = None;
+                recovery.clear_target();
                 continue;
             }
         }
@@ -232,6 +251,7 @@ async fn recover<S: ChainDataSource>(
     source: &S,
     mut forks: Option<&mut ForkRuntime>,
     target: Option<BlockRef>,
+    required: Option<&ChainCursor>,
     config: &Config,
     filter: &ContractFilter,
     store: &RedisEventStore,
@@ -241,9 +261,7 @@ async fn recover<S: ChainDataSource>(
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<Transition, RuntimeError> {
     metrics.recovery();
-    if forks.is_none() && target.is_some() {
-        return Err(ForkError::AncestorOutsideWindow.into());
-    }
+    let target = forks.is_some().then_some(target).flatten();
     if let Some(forks) = forks.as_deref_mut()
         && forks
             .reconcile(source, target, config, filter, store, metrics, shutdown)
@@ -261,6 +279,14 @@ async fn recover<S: ChainDataSource>(
     }
     let head = source.canonical_head().await?;
     validate_cursor(&head, config.chain_id)?;
+    if let Some(required) = required
+        && !recovery_coverage::head_covers(required, &head)?
+    {
+        return Err(RuntimeError::RecoveryLog(format!(
+            "canonical head {} does not cover required source cursor {}",
+            head.block_number, required.block_number
+        )));
+    }
     metrics.observe_head(head.block_number);
     let from_block = cursor
         .as_ref()
@@ -283,17 +309,21 @@ async fn recover<S: ChainDataSource>(
                 filter: filter.clone(),
             })
             .await?;
+        validation::normalize_recovery_page(&mut logs, config, page_start, page_end)?;
         logs.sort_by_key(|log| log.cursor.event_order());
         for log in logs {
-            validate_recovery_log(&log, config, page_start, page_end)?;
-            if cursor
-                .as_ref()
-                .is_some_and(|durable| log.cursor.event_order() <= durable.event_order())
-            {
+            if cursor.as_ref().is_some_and(|durable| {
+                recovery_log_is_covered(forks.is_some(), &log.cursor, durable)
+            }) {
                 continue;
             }
-            if persist::log(log, config, store, metrics, shutdown).await? == Transition::Shutdown {
-                return Ok(Transition::Shutdown);
+            match persist::log(log, config, store, metrics, shutdown).await? {
+                Transition::Continue => {}
+                Transition::Shutdown => return Ok(Transition::Shutdown),
+                Transition::Recover(target) => return Ok(Transition::Recover(target)),
+                Transition::RecoverRequired(required) => {
+                    return Ok(Transition::RecoverRequired(required));
+                }
             }
         }
         if page_end == head.block_number {
@@ -330,6 +360,7 @@ async fn consume_live(
     metrics: &Metrics,
     receiver: &mut mpsc::Receiver<QueuedUpdate>,
     active: &mut watch::Receiver<bool>,
+    source_lease: u64,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Result<Transition, RuntimeError> {
     loop {
@@ -342,8 +373,11 @@ async fn consume_live(
                 if transition != Transition::Continue {
                     return Ok(transition);
                 }
-                if *active.borrow() && metrics.queues_empty() {
-                    metrics.set_ready(true);
+                if *active.borrow()
+                    && metrics.queues_empty()
+                    && !metrics.publish_ready_if(source_lease)
+                {
+                    return Ok(Transition::Recover(None));
                 }
             }
         }
@@ -369,9 +403,18 @@ async fn handle_update(
         },
         ChainUpdate::Log(log) => {
             if log.removed {
+                validate_log_identity(&log, config)?;
+                if config.minimum_commitment == lunarbase_client::model::Commitment::Finalized {
+                    return if log.cursor.commitment < lunarbase_client::model::Commitment::Finalized
+                    {
+                        Ok(Transition::Continue)
+                    } else {
+                        Err(RuntimeError::FinalizedConflict)
+                    };
+                }
                 metrics.source_gap();
-                let target = (forks.is_none()
-                    || config.minimum_commitment == lunarbase_client::model::Commitment::Finalized)
+                let target = forks
+                    .is_some()
                     .then(|| BlockRef::new(log.cursor.clone(), None));
                 tracing::warn!(
                     block = log.cursor.block_number,
@@ -382,16 +425,26 @@ async fn handle_update(
             persist::log(log, config, store, metrics, shutdown).await
         }
         ChainUpdate::Gap { cursor, reason } => {
-            if let Some(cursor) = cursor {
-                validate_cursor(&cursor, config.chain_id)?;
+            if let Some(cursor) = cursor.as_ref() {
+                validate_cursor(cursor, config.chain_id)?;
             }
             metrics.source_gap();
             tracing::warn!(reason, "event source requested canonical recovery");
-            Ok(Transition::Recover(None))
+            Ok(cursor.map_or(Transition::Recover(None), Transition::RecoverRequired))
         }
         ChainUpdate::Reorg { old_head, new_head } => {
             validate_cursor(&old_head.cursor, config.chain_id)?;
             validate_cursor(&new_head.cursor, config.chain_id)?;
+            if config.minimum_commitment == lunarbase_client::model::Commitment::Finalized {
+                return if old_head.cursor.commitment
+                    == lunarbase_client::model::Commitment::Finalized
+                    || new_head.cursor.commitment == lunarbase_client::model::Commitment::Finalized
+                {
+                    Err(RuntimeError::FinalizedConflict)
+                } else {
+                    Ok(Transition::Continue)
+                };
+            }
             metrics.source_gap();
             tracing::warn!(
                 old = old_head.cursor.block_number,
@@ -399,6 +452,9 @@ async fn handle_update(
                 "durable fork correction scheduled"
             );
             Ok(Transition::Recover(Some(new_head)))
+        }
+        ChainUpdate::Correction(correction) => {
+            upstream::apply(correction, forks, config, store, metrics, shutdown).await
         }
     }
 }
@@ -454,66 +510,6 @@ async fn load_cursor_with_retry(
     }
 }
 
-fn validate_cursor(cursor: &ChainCursor, chain_id: u64) -> Result<(), RuntimeError> {
-    if cursor.chain_id != chain_id {
-        return Err(RuntimeError::LogIdentity);
-    }
-    Ok(())
-}
-
-fn validate_log_identity(log: &ContractLog, config: &Config) -> Result<(), RuntimeError> {
-    validate_cursor(&log.cursor, config.chain_id)?;
-    if log.address != config.core {
-        return Err(RuntimeError::LogIdentity);
-    }
-    Ok(())
-}
-
-fn validate_recovery_log(
-    log: &ContractLog,
-    config: &Config,
-    from_block: u64,
-    to_block: u64,
-) -> Result<(), RuntimeError> {
-    validate_log_identity(log, config)?;
-    if log.removed || log.cursor.block_number < from_block || log.cursor.block_number > to_block {
-        return Err(RuntimeError::RecoveryLog(format!(
-            "block {} outside {from_block}..={to_block} or marked removed",
-            log.cursor.block_number
-        )));
-    }
-    Ok(())
-}
-
-async fn wait_until_active(
-    active: &mut watch::Receiver<bool>,
-    shutdown: &mut watch::Receiver<bool>,
-) -> Result<bool, RuntimeError> {
-    while !*active.borrow() {
-        tokio::select! {
-            biased;
-            () = wait_for_shutdown(shutdown) => return Ok(false),
-            changed = active.changed() => {
-                if changed.is_err() {
-                    return Err(RuntimeError::PumpStopped);
-                }
-            }
-        }
-    }
-    Ok(true)
-}
-
-async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
-    while !*shutdown.borrow() && shutdown.changed().await.is_ok() {}
-}
-
-async fn sleep_or_shutdown(
-    delay: std::time::Duration,
-    shutdown: &mut watch::Receiver<bool>,
-) -> bool {
-    tokio::select! {
-        biased;
-        () = wait_for_shutdown(shutdown) => false,
-        () = sleep(delay) => true,
-    }
-}
+#[cfg(test)]
+#[path = "runtime_tests.rs"]
+mod tests;

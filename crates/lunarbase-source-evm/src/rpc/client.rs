@@ -383,20 +383,7 @@ impl RpcHttpClient {
                     for value in logs {
                         let log =
                             parse_filtered_rpc_log(&value, chain_id, commitment, &request.filter)?;
-                        let bytes = log.retained_bytes();
-                        if normalized.len() >= self.limits.max_backfill_logs
-                            || bytes
-                                > self
-                                    .limits
-                                    .max_backfill_bytes
-                                    .saturating_sub(normalized_bytes)
-                        {
-                            return Err(RpcError::Limit(
-                                "normalized backfill batch count or byte budget exceeded".into(),
-                            ));
-                        }
-                        normalized_bytes += bytes;
-                        normalized.push(log);
+                        admit_log(&mut normalized, &mut normalized_bytes, log, self.limits)?;
                     }
                 }
                 Err(error) if from_block < to_block && is_bisectable_log_range_limit(&error) => {
@@ -449,6 +436,27 @@ impl RpcHttpClient {
         )
         .await
     }
+}
+
+pub(super) fn admit_log(
+    normalized: &mut Vec<ContractLog>,
+    normalized_bytes: &mut usize,
+    mut log: ContractLog,
+    limits: RpcHttpLimits,
+) -> Result<(), RpcError> {
+    let bytes = log.retained_bytes();
+    if normalized.len() >= limits.max_backfill_logs
+        || bytes > limits.max_backfill_bytes.saturating_sub(*normalized_bytes)
+    {
+        return Err(RpcError::Limit(
+            "normalized backfill batch count or byte budget exceeded".into(),
+        ));
+    }
+    log.normalize_for_retention();
+    debug_assert_eq!(bytes, log.retained_bytes());
+    *normalized_bytes += bytes;
+    normalized.push(log);
+    Ok(())
 }
 
 fn normalize_block_cursor(

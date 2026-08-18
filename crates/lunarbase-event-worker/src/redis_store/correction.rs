@@ -91,28 +91,15 @@ pub(super) fn correct(
             "correction byte limit exceeded".into(),
         ));
     }
-    let base_event_count = correction.new_events.len().saturating_add(2);
-    if base_event_count > limits.max_events {
-        return Err(StoreError::CorrectionBudget(
-            "correction event limit exceeded".into(),
-        ));
-    }
-    let reference_lists = load_references(
-        connection,
-        keys,
-        correction,
-        limits.max_events - base_event_count,
-    )?;
+    let remaining_old_events =
+        remaining_old_event_budget(correction.new_events.len(), limits.max_events)?;
+    let reference_lists = load_references(connection, keys, correction, remaining_old_events)?;
     let (old_logs, reference_bytes) = materialize_old_logs(correction, &reference_lists)?;
-    let event_count = old_logs
-        .len()
-        .saturating_add(correction.new_events.len())
-        .saturating_add(2);
-    if event_count > limits.max_events {
-        return Err(StoreError::CorrectionBudget(
-            "correction event limit exceeded".into(),
-        ));
-    }
+    validate_total_event_count(
+        old_logs.len(),
+        correction.new_events.len(),
+        limits.max_events,
+    )?;
     let source_bytes = load_source_bytes(connection, keys, &old_logs)?;
 
     let old_key_start = 14;
@@ -217,6 +204,29 @@ pub(super) fn correct(
         reverted,
         applied,
     })
+}
+
+fn remaining_old_event_budget(applied: usize, max_events: usize) -> Result<usize, StoreError> {
+    let controls_and_applied = applied.saturating_add(2);
+    if controls_and_applied > max_events {
+        return Err(StoreError::CorrectionBudget(
+            "correction event limit exceeded".into(),
+        ));
+    }
+    Ok(max_events - controls_and_applied)
+}
+
+fn validate_total_event_count(
+    reverted: usize,
+    applied: usize,
+    max_events: usize,
+) -> Result<(), StoreError> {
+    if reverted.saturating_add(applied).saturating_add(2) > max_events {
+        return Err(StoreError::CorrectionBudget(
+            "correction event limit exceeded".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn load_references(
@@ -372,4 +382,23 @@ fn required_hash(block: &lunarbase_client::model::BlockRef) -> Result<String, St
         .block_hash
         .map(|hash| format!("{hash:#x}"))
         .ok_or_else(|| StoreError::Journal("correction block hash is absent".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lifecycle_event_bound_includes_both_controls_and_both_log_branches() {
+        assert_eq!(remaining_old_event_budget(8_190, 8_192).unwrap(), 0);
+        assert!(matches!(
+            remaining_old_event_budget(8_191, 8_192),
+            Err(StoreError::CorrectionBudget(_))
+        ));
+        assert!(validate_total_event_count(4_095, 4_095, 8_192).is_ok());
+        assert!(matches!(
+            validate_total_event_count(4_096, 4_095, 8_192),
+            Err(StoreError::CorrectionBudget(_))
+        ));
+    }
 }

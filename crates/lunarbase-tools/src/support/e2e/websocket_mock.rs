@@ -47,6 +47,9 @@ async fn websocket_connection_inner(
         .await
         .map_err(|error| E2eError::Scenario(error.to_string()))?;
     let (mut writer, mut reader) = socket.split();
+    // Register before acknowledgements can make the client publish source
+    // readiness; otherwise an immediate post-ready notification can be lost.
+    let mut events = state.events.subscribe();
     let mut accepts_all_logs = false;
     for _ in 0..3 {
         let Some(Ok(message)) = reader.next().await else {
@@ -82,7 +85,6 @@ async fn websocket_connection_inner(
             .await
             .map_err(|error| E2eError::Scenario(error.to_string()))?;
     }
-    let mut events = state.events.subscribe();
     loop {
         tokio::select! {
             incoming = reader.next() => {

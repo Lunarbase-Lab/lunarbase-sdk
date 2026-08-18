@@ -3,25 +3,40 @@
 use crate::indexer::client::publish;
 use crate::indexer::client_types::{
     ClientConnectConfig, ClientRuntimeStats, CoreEventSink, QueuedChainUpdate, SharedQuoteState,
-    unix_millis,
 };
-use crate::indexer::engine::{validate_core_log_identity, validate_core_recovery_log};
 use crate::indexer::errors::{ClientRuntimeEvent, IndexerError};
-use crate::indexer::event_delivery::{same_core_event_identity, try_observe_core_event};
 use crate::indexer::runtime_helpers::source_operation;
-use crate::model::{BackfillRequest, ChainUpdate, Commitment, ContractFilter, ContractLog};
-use crate::source::{ChainDataSource, SourceStream};
-use crate::state::reducer::ReducerError;
-use futures_util::StreamExt;
+use crate::model::{ChainUpdate, ContractFilter};
+use crate::source::ChainDataSource;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, watch};
-use tokio::time::{sleep, timeout};
+use tokio::time::sleep;
 
-const RECOVERY_PAGE_BLOCKS: u64 = 1_000;
-const LEGACY_RECOVERY_LOG_LIMIT: usize = 65_536;
-const LEGACY_RECOVERY_BYTE_LIMIT: usize = 64 * 1024 * 1024;
+mod correction;
+mod failure;
+mod microbatch;
+mod recovery_backfill;
+mod recovery_install;
+mod recovery_stage;
+#[cfg(feature = "perf-trace")]
+mod segment_trace;
+mod source_activity;
+mod source_queue;
+mod source_stream;
+use failure::{drain_pending_updates, record_transition_failure};
+use microbatch::{FailedLiveUpdate, apply_live_segment, collect_live_segment};
+pub(super) use recovery_backfill::{
+    RECOVERY_LIMITS, RecoveryLimits, RecoveryUsage, recovery_page_end,
+};
+use recovery_stage::record_failure as record_recovery_failure;
+#[cfg(test)]
+use source_activity::source_activity_lease_after_observation;
+use source_activity::{SourceInactiveGuard, mark_source_inactive};
+pub(super) use source_activity::{source_activity_lease, wait_for_source_active};
+pub(super) use source_queue::{RecoverySignal, send_update};
 
 /// Operational event and counter handles used by the reducer task.
 pub(super) struct ReducerRuntime {
@@ -31,6 +46,9 @@ pub(super) struct ReducerRuntime {
     pub stats: Arc<ClientRuntimeStats>,
     /// Optional nonblocking, commitment-filtered Core event observer.
     pub core_event_sink: Option<CoreEventSink>,
+    /// Signals that a retained recovery stage already represents the
+    /// transport discontinuity, so the pump must not deadlock on another Gap.
+    pub recovery: watch::Sender<RecoverySignal>,
 }
 
 /// Source-specific timing, lifecycle, and observability handles.
@@ -43,8 +61,14 @@ pub(super) struct SourcePumpRuntime {
     pub operation_timeout: Duration,
     /// Handshake state observed by bootstrap and recovery.
     pub source_active: watch::Sender<bool>,
+    /// Admission state whose source lease is invalidated synchronously.
+    pub shared: Arc<SharedQuoteState>,
     /// Cooperative cancellation receiver owned by the source task.
     pub cancel: watch::Receiver<bool>,
+    /// True while the reducer owns a retained recovery stage.
+    pub recovery: watch::Receiver<RecoverySignal>,
+    /// Nonblocking terminal-control publisher paired with `recovery`.
+    pub recovery_signal: watch::Sender<RecoverySignal>,
     /// Bounded broadcast channel for operational lifecycle events.
     pub events: broadcast::Sender<ClientRuntimeEvent>,
     /// Lock-free queue, reconnect, and source-activity counters.
@@ -64,13 +88,17 @@ pub(super) async fn source_pump<S>(
         stall_timeout,
         operation_timeout,
         source_active,
+        shared,
         mut cancel,
+        mut recovery,
+        recovery_signal,
         events,
         stats,
     } = runtime;
+    let _inactive_guard = SourceInactiveGuard::new(source_active.clone(), Arc::clone(&shared));
     let mut ever_active = false;
     loop {
-        let _ = source_active.send(false);
+        mark_source_inactive(&source_active, shared.as_ref());
         let stream = tokio::select! {
             biased;
             () = cancellation_requested(&mut cancel) => return,
@@ -84,14 +112,19 @@ pub(super) async fn source_pump<S>(
             Ok(stream) => {
                 ever_active = true;
                 let _ = source_active.send(true);
-                if !consume_stream(
+                if !source_stream::consume(
                     stream,
-                    &sender,
-                    stall_timeout,
-                    &source_active,
-                    &mut cancel,
-                    &events,
-                    &stats,
+                    source_stream::Runtime {
+                        sender: &sender,
+                        stall_timeout,
+                        source_active: &source_active,
+                        shared: &shared,
+                        cancel: &mut cancel,
+                        recovery: &mut recovery,
+                        recovery_signal: &recovery_signal,
+                        events: &events,
+                        stats: &stats,
+                    },
                 )
                 .await
                 {
@@ -110,11 +143,14 @@ pub(super) async fn source_pump<S>(
                     && !send_update(
                         &sender,
                         &mut cancel,
+                        &mut recovery,
+                        &recovery_signal,
                         ChainUpdate::Gap {
                             cursor: None,
                             reason: format!("source subscribe failed: {detail}"),
                         },
                         &stats,
+                        true,
                     )
                     .await
                 {
@@ -122,139 +158,12 @@ pub(super) async fn source_pump<S>(
                 }
             }
         }
-        let _ = source_active.send(false);
+        mark_source_inactive(&source_active, shared.as_ref());
         stats.source_reconnects.fetch_add(1, Ordering::Relaxed);
         if sleep_or_cancel(reconnect_delay, &mut cancel).await {
             return;
         }
     }
-}
-
-async fn consume_stream(
-    mut stream: SourceStream,
-    sender: &mpsc::Sender<QueuedChainUpdate>,
-    stall_timeout: Duration,
-    source_active: &watch::Sender<bool>,
-    cancel: &mut watch::Receiver<bool>,
-    events: &broadcast::Sender<ClientRuntimeEvent>,
-    stats: &ClientRuntimeStats,
-) -> bool {
-    loop {
-        let item = tokio::select! {
-            biased;
-            () = cancellation_requested(cancel) => return false,
-            item = timeout(stall_timeout, stream.next()) => item,
-        };
-        let item = match item {
-            Ok(item) => item,
-            Err(_) => {
-                let _ = source_active.send(false);
-                publish(
-                    events,
-                    ClientRuntimeEvent::SourceStreamFailed {
-                        detail: format!(
-                            "source produced no updates for {} ms",
-                            stall_timeout.as_millis()
-                        ),
-                    },
-                );
-                return send_update(
-                    sender,
-                    cancel,
-                    ChainUpdate::Gap {
-                        cursor: None,
-                        reason: "realtime source stalled; canonical recovery required".into(),
-                    },
-                    stats,
-                )
-                .await;
-            }
-        };
-        let Some(item) = item else {
-            let _ = source_active.send(false);
-            publish(events, ClientRuntimeEvent::SourceStreamClosed);
-            return send_update(
-                sender,
-                cancel,
-                ChainUpdate::Gap {
-                    cursor: None,
-                    reason: "source stream closed; canonical recovery required".into(),
-                },
-                stats,
-            )
-            .await;
-        };
-        let update = match item {
-            Ok(update) => update,
-            Err(error) => {
-                let detail = error.to_string();
-                publish(
-                    events,
-                    ClientRuntimeEvent::SourceStreamFailed {
-                        detail: detail.clone(),
-                    },
-                );
-                ChainUpdate::Gap {
-                    cursor: None,
-                    reason: format!("source stream failed: {detail}"),
-                }
-            }
-        };
-        let terminal = matches!(update, ChainUpdate::Gap { .. });
-        if terminal {
-            let _ = source_active.send(false);
-        }
-        if !send_update(sender, cancel, update, stats).await {
-            return false;
-        }
-        if terminal {
-            return true;
-        }
-    }
-}
-
-async fn send_update(
-    sender: &mpsc::Sender<QueuedChainUpdate>,
-    cancel: &mut watch::Receiver<bool>,
-    update: ChainUpdate,
-    stats: &ClientRuntimeStats,
-) -> bool {
-    let mut update = update;
-    let mut bytes = update.retained_bytes();
-    if bytes > stats.queue_byte_capacity {
-        update = ChainUpdate::Gap {
-            cursor: None,
-            reason: "source update exceeded reducer queue byte budget; canonical recovery required"
-                .into(),
-        };
-        bytes = update.retained_bytes();
-    }
-    let byte_permit = tokio::select! {
-        biased;
-        () = cancellation_requested(cancel) => return false,
-        result = stats.queue_byte_budget.clone().acquire_many_owned(bytes.max(1) as u32) => result,
-    };
-    let Ok(byte_permit) = byte_permit else {
-        return false;
-    };
-    let permit = tokio::select! {
-        biased;
-        () = cancellation_requested(cancel) => return false,
-        result = sender.reserve() => result,
-    };
-    let Ok(permit) = permit else {
-        return false;
-    };
-
-    // Increment before publishing: `Permit::send` is synchronous, so the
-    // receiver cannot decrement the counter before this update becomes visible.
-    stats.queue_depth.fetch_add(1, Ordering::Relaxed);
-    stats.queue_bytes.fetch_add(bytes, Ordering::Relaxed);
-    stats
-        .last_source_update_unix_millis
-        .store(unix_millis(), Ordering::Relaxed);
-    permit.send(QueuedChainUpdate::new(update, bytes, byte_permit));
-    true
 }
 
 pub(super) async fn reducer_loop<S>(
@@ -268,28 +177,57 @@ pub(super) async fn reducer_loop<S>(
 ) where
     S: ChainDataSource + 'static,
 {
+    let mut pending = VecDeque::new();
     loop {
-        let update = tokio::select! {
-            biased;
-            () = cancellation_requested(&mut cancel) => {
-                drain_pending_updates(shared.as_ref(), &mut updates, &runtime).await;
-                return;
+        let update = if let Some(update) = pending.pop_front() {
+            Some(update)
+        } else {
+            tokio::select! {
+                biased;
+                () = cancellation_requested(&mut cancel) => {
+                    drain_pending_updates(
+                        shared.as_ref(),
+                        &mut pending,
+                        &mut updates,
+                        &runtime,
+                    )
+                    .await;
+                    return;
+                }
+                update = updates.recv() => update,
             }
-            update = updates.recv() => update,
         };
         let Some(update) = update else {
-            shared.available.store(false, Ordering::Release);
-            shared.ready.notify_waiters();
+            shared.revoke_available();
             return;
         };
-        let update = update.dequeue(&runtime.stats);
-        let result = apply_live_update(shared.as_ref(), update, &runtime);
-        if let Err(error) = result {
-            record_transition_failure(shared.as_ref(), error, &runtime);
+        #[cfg(feature = "perf-trace")]
+        let mut update = update;
+        #[cfg(feature = "perf-trace")]
+        let mut segment_trace = segment_trace::SegmentTrace::begin(&mut update, &updates, &runtime);
+        let segment = collect_live_segment(update, &mut updates, &mut pending);
+        #[cfg(feature = "perf-trace")]
+        segment_trace.collected(&segment, &updates, &pending, &runtime);
+        let source_lease = source_activity_lease(&source_active, shared.as_ref());
+        #[cfg(feature = "perf-trace")]
+        let applied = apply_live_segment(
+            shared.as_ref(),
+            segment,
+            source_lease,
+            &runtime,
+            segment_trace.builder_mut(),
+        );
+        #[cfg(not(feature = "perf-trace"))]
+        let applied = apply_live_segment(shared.as_ref(), segment, source_lease, &runtime);
+        #[cfg(feature = "perf-trace")]
+        segment_trace.finish(applied.is_ok());
+        if let Err(mut failed) = applied {
+            failed.queued.extend(pending.drain(..));
             if !recover_until_ready(
                 shared.as_ref(),
                 source.as_ref(),
                 &config,
+                *failed,
                 &mut updates,
                 &mut cancel,
                 &mut source_active,
@@ -303,89 +241,86 @@ pub(super) async fn reducer_loop<S>(
     }
 }
 
-fn apply_live_update(
-    shared: &SharedQuoteState,
-    update: ChainUpdate,
-    runtime: &ReducerRuntime,
-) -> Result<(), IndexerError> {
-    let event_log = {
-        let mut indexer = shared
-            .indexer
-            .write()
-            .map_err(|_| IndexerError::LockPoisoned)?;
-        match update {
-            ChainUpdate::Log(log)
-                if runtime
-                    .core_event_sink
-                    .as_ref()
-                    .is_some_and(|sink| sink.accepts(log.cursor.commitment)) =>
-            {
-                indexer.apply_core_log_for_delivery(log)?
-            }
-            update => {
-                indexer.apply_core_update(update)?;
-                None
-            }
-        }
-    };
-    if let Some(log) = event_log {
-        try_observe_core_event(runtime.core_event_sink.as_ref(), log, &runtime.stats);
-    }
-    runtime.stats.record_state_update();
-    shared.publish_available();
-    Ok(())
-}
-
-async fn drain_pending_updates(
-    shared: &SharedQuoteState,
-    updates: &mut mpsc::Receiver<QueuedChainUpdate>,
-    runtime: &ReducerRuntime,
-) {
-    let mut state_valid = true;
-    while let Some(queued) = updates.recv().await {
-        let update = queued.dequeue(&runtime.stats);
-        if state_valid && let Err(error) = apply_live_update(shared, update, runtime) {
-            record_transition_failure(shared, error, runtime);
-            state_valid = false;
-        }
-    }
-}
-
-fn record_transition_failure(
-    shared: &SharedQuoteState,
-    error: IndexerError,
-    runtime: &ReducerRuntime,
-) {
-    shared.available.store(false, Ordering::Release);
-    runtime.stats.gaps.fetch_add(1, Ordering::Relaxed);
-    publish(
-        &runtime.events,
-        ClientRuntimeEvent::StateTransitionFailed {
-            detail: error.to_string(),
-        },
-    );
-}
-
 async fn recover_until_ready<S: ChainDataSource>(
     shared: &SharedQuoteState,
     source: &S,
     config: &ClientConnectConfig,
+    failed: FailedLiveUpdate,
     updates: &mut mpsc::Receiver<QueuedChainUpdate>,
     cancel: &mut watch::Receiver<bool>,
     source_active: &mut watch::Receiver<bool>,
     runtime: &ReducerRuntime,
 ) -> bool {
-    let recovery_from = match shared.indexer.read() {
-        Ok(indexer) => indexer.reducer.cursor().cloned(),
-        Err(_) => {
-            record_recovery_failure(IndexerError::LockPoisoned, &runtime.events, &runtime.stats);
-            return false;
-        }
+    let FailedLiveUpdate {
+        error,
+        queued,
+        failed_index,
+        prior_cursor,
+    } = failed;
+    runtime.recovery.send_modify(|signal| signal.active = true);
+    record_transition_failure(shared, error, runtime);
+    let Some(stable_checkpoint) = recovery_stage::stable_checkpoint(shared, runtime) else {
+        return false;
     };
+    let finalized_checkpoint =
+        match recovery_stage::finalized_validation_checkpoint(shared, stable_checkpoint.as_ref()) {
+            Ok(checkpoint) => checkpoint,
+            Err(error) => {
+                record_recovery_failure(error, &runtime.events, &runtime.stats);
+                return false;
+            }
+        };
+    let recovery_from = prior_cursor.clone();
+    let mut stage = recovery_stage::RecoveryStage::new_segment(queued, failed_index, prior_cursor);
     loop {
+        let control = runtime.recovery.borrow().clone();
+        stage.merge_control(&control);
         publish(&runtime.events, ClientRuntimeEvent::RecoveryStarted);
+        stage.absorb(updates);
         if !wait_for_source_active(source_active, cancel).await {
             return false;
+        }
+        let Some(source_lease) = source_activity_lease(source_active, shared) else {
+            continue;
+        };
+        let floor_validation = tokio::select! {
+            biased;
+            () = cancellation_requested(cancel) => return false,
+            result = recovery_backfill::validate_floors(
+                source,
+                stable_checkpoint.as_ref(),
+                finalized_checkpoint.as_ref(),
+                config.source_operation_timeout,
+            ) => result,
+        };
+        if let Err(error) = floor_validation {
+            record_recovery_failure(error, &runtime.events, &runtime.stats);
+            if sleep_or_cancel(config.reconnect_delay, cancel).await {
+                return false;
+            }
+            continue;
+        }
+        stage.absorb(updates);
+        if stage.needs_canonical_head() {
+            let head = tokio::select! {
+                biased;
+                () = cancellation_requested(cancel) => return false,
+                result = source_operation(
+                    "recovery canonical head",
+                    config.source_operation_timeout,
+                    source.canonical_head(),
+                ) => result,
+            };
+            match head {
+                Ok(head) => stage.set_canonical_head(head),
+                Err(error) => {
+                    record_recovery_failure(error, &runtime.events, &runtime.stats);
+                    if sleep_or_cancel(config.reconnect_delay, cancel).await {
+                        return false;
+                    }
+                    continue;
+                }
+            }
         }
         let snapshot = tokio::select! {
             biased;
@@ -398,8 +333,53 @@ async fn recover_until_ready<S: ChainDataSource>(
         };
         match snapshot {
             Ok(snapshot) => {
+                stage.absorb(updates);
+                if stage.needs_canonical_head() {
+                    let head = tokio::select! {
+                        biased;
+                        () = cancellation_requested(cancel) => return false,
+                        result = source_operation(
+                            "recovery canonical head",
+                            config.source_operation_timeout,
+                            source.canonical_head(),
+                        ) => result,
+                    };
+                    match head {
+                        Ok(head) => stage.set_canonical_head(head),
+                        Err(error) => {
+                            record_recovery_failure(error, &runtime.events, &runtime.stats);
+                            if sleep_or_cancel(config.reconnect_delay, cancel).await {
+                                return false;
+                            }
+                            continue;
+                        }
+                    }
+                }
+                match stage.snapshot_covers(&snapshot.cursor) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        record_recovery_failure(
+                            IndexerError::Gap(
+                                "recovery snapshot did not cover the failed source update".into(),
+                            ),
+                            &runtime.events,
+                            &runtime.stats,
+                        );
+                        if sleep_or_cancel(config.reconnect_delay, cancel).await {
+                            return false;
+                        }
+                        continue;
+                    }
+                    Err(error) => {
+                        record_recovery_failure(error, &runtime.events, &runtime.stats);
+                        if sleep_or_cancel(config.reconnect_delay, cancel).await {
+                            return false;
+                        }
+                        continue;
+                    }
+                }
                 let backfill_logs = if let Some(recovery_from) = recovery_from.as_ref() {
-                    match load_recovery_events(
+                    match recovery_backfill::load(
                         source,
                         &config.filter,
                         recovery_from,
@@ -421,27 +401,71 @@ async fn recover_until_ready<S: ChainDataSource>(
                 } else {
                     Vec::new()
                 };
-                let mut buffered = Vec::new();
-                while let Ok(update) = updates.try_recv() {
-                    buffered.push(update.dequeue(&runtime.stats));
+                stage.absorb(updates);
+                let control = runtime.recovery.borrow().clone();
+                stage.merge_control(&control);
+                if stage.needs_canonical_head() {
+                    continue;
                 }
-                let result = install_recovered_state(
-                    shared,
-                    snapshot,
-                    buffered,
-                    backfill_logs,
-                    runtime.core_event_sink.as_ref(),
-                    &runtime.stats,
-                );
+                match stage.snapshot_covers(&snapshot.cursor) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        record_recovery_failure(
+                            IndexerError::Gap(
+                                "late recovery signal was not covered by the snapshot".into(),
+                            ),
+                            &runtime.events,
+                            &runtime.stats,
+                        );
+                        continue;
+                    }
+                    Err(error) => {
+                        record_recovery_failure(error, &runtime.events, &runtime.stats);
+                        continue;
+                    }
+                }
+                let buffered = stage.borrowed_updates();
+                let result = recovery_install::install(shared, snapshot, buffered, backfill_logs);
                 match result {
-                    Ok(()) => {
-                        runtime.stats.recoveries.fetch_add(1, Ordering::Relaxed);
+                    Ok(outcome) => {
                         runtime.stats.record_state_update();
-                        shared.publish_available();
+                        if !shared.publish_available_if(source_lease) {
+                            stage.require_all_updates();
+                            record_recovery_failure(
+                                IndexerError::Gap(
+                                    "source disconnected while recovery was being installed".into(),
+                                ),
+                                &runtime.events,
+                                &runtime.stats,
+                            );
+                            if sleep_or_cancel(config.reconnect_delay, cancel).await {
+                                return false;
+                            }
+                            continue;
+                        }
+                        if !source_queue::finish_recovery(
+                            &runtime.recovery,
+                            stage.control_generation(),
+                        ) {
+                            stage.require_all_updates();
+                            record_recovery_failure(
+                                IndexerError::Gap(
+                                    "source recovery requirement changed during publication".into(),
+                                ),
+                                &runtime.events,
+                                &runtime.stats,
+                            );
+                            continue;
+                        }
+                        let staged = stage.into_owned_updates();
+                        outcome.record_stats(runtime);
+                        runtime.stats.recoveries.fetch_add(1, Ordering::Relaxed);
+                        outcome.publish_after_ready(runtime, staged);
                         publish(&runtime.events, ClientRuntimeEvent::RecoveryCompleted);
                         return true;
                     }
                     Err(error) => {
+                        stage.require_all_updates();
                         record_recovery_failure(error, &runtime.events, &runtime.stats);
                     }
                 }
@@ -452,126 +476,6 @@ async fn recover_until_ready<S: ChainDataSource>(
             return false;
         }
     }
-}
-
-async fn load_recovery_events<S: ChainDataSource>(
-    source: &S,
-    filter: &ContractFilter,
-    from: &crate::model::ChainCursor,
-    to: &crate::model::ChainCursor,
-    core_event_sink: Option<&CoreEventSink>,
-    operation_timeout: Duration,
-) -> Result<Vec<ContractLog>, IndexerError> {
-    if core_event_sink.is_none_or(|sink| !sink.accepts(Commitment::Canonical)) {
-        return Ok(Vec::new());
-    }
-    if from.chain_id != to.chain_id {
-        return Err(ReducerError::ChainIdMismatch.into());
-    }
-    if from.block_number > to.block_number {
-        return Err(IndexerError::Gap(
-            "canonical recovery head regressed below the pre-gap cursor".into(),
-        ));
-    }
-    let mut logs = Vec::new();
-    let mut retained_bytes = 0_usize;
-    let mut page_start = from.block_number;
-    loop {
-        let page_end = recovery_page_end(page_start, to.block_number);
-        let mut page = source_operation(
-            "recovery backfill",
-            operation_timeout,
-            source.backfill(BackfillRequest {
-                from_block: page_start,
-                to_block: page_end,
-                filter: filter.clone(),
-            }),
-        )
-        .await?;
-        page.sort_by_key(|log| log.cursor.event_order());
-        for log in page {
-            validate_core_recovery_log(&log, filter.address, to.chain_id, page_start..=page_end)?;
-            let bytes = log.retained_bytes();
-            if logs.len() >= LEGACY_RECOVERY_LOG_LIMIT
-                || bytes > LEGACY_RECOVERY_BYTE_LIMIT.saturating_sub(retained_bytes)
-            {
-                return Err(IndexerError::Gap(
-                    "legacy observer recovery exceeded its count or byte budget".into(),
-                ));
-            }
-            retained_bytes += bytes;
-            logs.push(log);
-        }
-        if page_end == to.block_number {
-            break;
-        }
-        page_start = page_end.saturating_add(1);
-    }
-    logs.sort_by_key(|log| log.cursor.event_order());
-    Ok(logs)
-}
-
-fn install_recovered_state(
-    shared: &SharedQuoteState,
-    snapshot: crate::bootstrap::BootstrapSnapshot,
-    mut buffered: Vec<ChainUpdate>,
-    backfill_logs: Vec<ContractLog>,
-    core_event_sink: Option<&CoreEventSink>,
-    stats: &ClientRuntimeStats,
-) -> Result<(), IndexerError> {
-    crate::indexer::engine::sort_chain_updates(&mut buffered);
-
-    // Validate the complete transition privately before publishing it. The
-    // optional observer is offered logs without delaying state publication.
-    let mut candidate = shared
-        .indexer
-        .read()
-        .map_err(|_| IndexerError::LockPoisoned)?
-        .clone();
-    let mut ordered_logs = backfill_logs;
-    if let Some(sink) = core_event_sink {
-        ordered_logs.extend(buffered.iter().filter_map(|update| match update {
-            ChainUpdate::Log(log) if sink.accepts(log.cursor.commitment) => Some(log.clone()),
-            _ => None,
-        }));
-    }
-    candidate.bootstrap_normalized(snapshot, buffered)?;
-    ordered_logs.sort_by_key(|log| log.cursor.event_order());
-    ordered_logs.dedup_by(|right, left| same_core_event_identity(left, right));
-    for log in ordered_logs {
-        validate_core_log_identity(
-            &log,
-            candidate.deployment().core,
-            candidate.deployment().chain_id,
-        )?;
-        try_observe_core_event(core_event_sink, log, stats);
-    }
-
-    *shared
-        .indexer
-        .write()
-        .map_err(|_| IndexerError::LockPoisoned)? = candidate;
-    Ok(())
-}
-
-fn record_recovery_failure(
-    error: IndexerError,
-    events: &broadcast::Sender<ClientRuntimeEvent>,
-    stats: &ClientRuntimeStats,
-) {
-    stats.recovery_failures.fetch_add(1, Ordering::Relaxed);
-    publish(
-        events,
-        ClientRuntimeEvent::RecoveryFailed {
-            detail: error.to_string(),
-        },
-    );
-}
-
-pub(super) fn recovery_page_end(from_block: u64, to_block: u64) -> u64 {
-    from_block
-        .saturating_add(RECOVERY_PAGE_BLOCKS.saturating_sub(1))
-        .min(to_block)
 }
 
 async fn cancellation_requested(cancel: &mut watch::Receiver<bool>) {
@@ -590,26 +494,6 @@ async fn sleep_or_cancel(delay: Duration, cancel: &mut watch::Receiver<bool>) ->
         biased;
         () = cancellation_requested(cancel) => true,
         () = sleep(delay) => false,
-    }
-}
-
-pub(super) async fn wait_for_source_active(
-    active: &mut watch::Receiver<bool>,
-    cancel: &mut watch::Receiver<bool>,
-) -> bool {
-    loop {
-        if *active.borrow() {
-            return true;
-        }
-        tokio::select! {
-            biased;
-            () = cancellation_requested(cancel) => return false,
-            changed = active.changed() => {
-                if changed.is_err() {
-                    return false;
-                }
-            }
-        }
     }
 }
 

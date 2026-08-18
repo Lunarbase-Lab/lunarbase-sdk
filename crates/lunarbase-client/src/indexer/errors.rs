@@ -2,6 +2,7 @@
 
 use crate::model::{LogDecodeError, SourceError};
 use crate::state::reducer::ReducerError;
+use lunarbase_math::B256;
 use lunarbase_math::QuoteError;
 use thiserror::Error;
 
@@ -66,6 +67,22 @@ pub enum ClientRuntimeEvent {
         /// Reducer or decoding error that triggered fail-closed recovery.
         detail: String,
     },
+    /// A complete optimistic branch replacement was published atomically.
+    CorrectionApplied {
+        /// Last block shared by both branches.
+        common_ancestor: u64,
+        /// Hash of the abandoned branch tip.
+        old_tip_hash: B256,
+        /// Hash of the replacement branch tip.
+        new_tip_hash: B256,
+        /// Number of Core logs replayed into the replacement state.
+        replacement_logs: usize,
+    },
+    /// The bounded rollback window evicted old before-images.
+    CorrectionHistoryPruned {
+        /// Cumulative number of eventful blocks evicted by the byte/count budget.
+        total_evictions: u64,
+    },
     /// Canonical snapshot and backfill recovery has started.
     RecoveryStarted,
     /// Canonical recovery completed and quote readiness was restored.
@@ -99,6 +116,8 @@ impl ClientRuntimeEvent {
             Self::SourceStreamFailed { .. } => "source_stream_failed",
             Self::SourceStreamClosed => "source_stream_closed",
             Self::StateTransitionFailed { .. } => "state_transition_failed",
+            Self::CorrectionApplied { .. } => "correction_applied",
+            Self::CorrectionHistoryPruned { .. } => "correction_history_pruned",
             Self::RecoveryStarted => "recovery_started",
             Self::RecoveryCompleted => "recovery_completed",
             Self::RecoveryFailed { .. } => "recovery_failed",
@@ -116,6 +135,16 @@ impl ClientRuntimeEvent {
             | Self::StateTransitionFailed { detail }
             | Self::RecoveryFailed { detail } => detail.clone(),
             Self::SourceStreamClosed => "source stream closed; canonical recovery required".into(),
+            Self::CorrectionApplied {
+                common_ancestor,
+                replacement_logs,
+                ..
+            } => format!(
+                "optimistic correction after block {common_ancestor} replayed {replacement_logs} Core logs"
+            ),
+            Self::CorrectionHistoryPruned { total_evictions } => {
+                format!("optimistic history budget evicted {total_evictions} eventful blocks")
+            }
             Self::RecoveryStarted => "canonical recovery started".into(),
             Self::RecoveryCompleted => "canonical recovery completed".into(),
             Self::BackgroundTaskStopped { task } => {

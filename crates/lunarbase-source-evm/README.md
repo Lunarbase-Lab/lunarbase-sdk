@@ -8,8 +8,8 @@ Status: **fully supported** for standard EVM networks and Base Flashblocks.
 
 ```toml
 [dependencies]
-lunarbase-client = { package = "lunarbase-pmm-v2-client", version = "0.3.1" }
-lunarbase-source-evm = { package = "lunarbase-pmm-v2-source-evm", version = "0.3.1" }
+lunarbase-client = { package = "lunarbase-pmm-v2-client", version = "0.4.0" }
+lunarbase-source-evm = { package = "lunarbase-pmm-v2-source-evm", version = "0.4.0" }
 ```
 
 ## Use

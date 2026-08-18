@@ -76,7 +76,7 @@ impl CursorReorderBuffer {
     ///
     /// Returns a gap for overflow, conflicting payloads at one cursor, or any
     /// insertion after the buffer has already been poisoned.
-    pub fn push(&mut self, update: ChainUpdate) -> Result<(), SourceError> {
+    pub fn push(&mut self, mut update: ChainUpdate) -> Result<(), SourceError> {
         if self.poisoned {
             return Err(SourceError::Gap(
                 "reorder buffer is poisoned; resnapshot required".into(),
@@ -96,6 +96,8 @@ impl CursorReorderBuffer {
                 "reorder buffer count or byte budget exceeded; resnapshot required".into(),
             ));
         }
+        update.normalize_for_retention();
+        debug_assert_eq!(update_bytes, update.retained_bytes());
         self.pending_bytes += update_bytes;
         self.pending.insert(key, update);
         Ok(())
@@ -130,10 +132,11 @@ fn update_key(update: &ChainUpdate) -> CursorKey {
     match update {
         ChainUpdate::Head(head) => cursor_key(&head.cursor, 0),
         ChainUpdate::Log(log) => cursor_key(&log.cursor, 1),
-        ChainUpdate::Reorg { new_head, .. } => cursor_key(&new_head.cursor, 2),
+        ChainUpdate::Correction(correction) => branch_end_key(&correction.new_tip.cursor, 2),
+        ChainUpdate::Reorg { new_head, .. } => branch_end_key(&new_head.cursor, 3),
         ChainUpdate::Gap { cursor, .. } => cursor
             .as_ref()
-            .map_or((u64::MAX, 0, 0, 0, 0, 3), |cursor| cursor_key(cursor, 3)),
+            .map_or((u64::MAX, 0, 0, 0, 0, 4), |cursor| cursor_key(cursor, 4)),
     }
 }
 
@@ -151,6 +154,17 @@ fn watermark_key(cursor: &ChainCursor) -> CursorKey {
             u8::MAX,
         )
     }
+}
+
+fn branch_end_key(cursor: &ChainCursor, rank: u8) -> CursorKey {
+    (
+        cursor.block_number,
+        u32::MAX,
+        u32::MAX,
+        u64::MAX,
+        u32::MAX,
+        rank,
+    )
 }
 
 fn cursor_key(cursor: &ChainCursor, rank: u8) -> CursorKey {
@@ -253,5 +267,31 @@ mod tests {
         buffer.push(head(cursor(2, None, None))).unwrap();
         assert!(buffer.push(head(cursor(3, None, None))).is_err());
         assert!(buffer.is_poisoned());
+    }
+
+    #[test]
+    fn byte_budget_retains_only_the_visible_tail_slice() {
+        let backing = Bytes::from(vec![0x5a; 1 << 20]);
+        let data = backing.slice(backing.len() - 1..);
+        drop(backing);
+        let update = ChainUpdate::Log(ContractLog {
+            address: Address::ZERO,
+            transaction_hash: None,
+            topics: Vec::new(),
+            data,
+            removed: false,
+            cursor: cursor(10, Some(0), Some(0)),
+        });
+        let logical_bytes = update.retained_bytes();
+        let mut buffer = CursorReorderBuffer::with_limits(1, logical_bytes).unwrap();
+
+        buffer.push(update).unwrap();
+        assert_eq!(buffer.retained_bytes(), logical_bytes);
+        let ChainUpdate::Log(log) = buffer.drain_all().pop().unwrap() else {
+            panic!("queued update must remain a log");
+        };
+        assert_eq!(log.data.as_ref(), [0x5a]);
+        let data: Vec<u8> = log.data.into();
+        assert_eq!(data.capacity(), data.len());
     }
 }

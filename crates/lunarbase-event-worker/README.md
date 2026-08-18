@@ -19,8 +19,12 @@ appendfsync always
 maxmemory-policy noeviction
 ```
 
-The current wire format is schema v2. Each command uses a preloaded Lua script
-through `EVALSHA`; `NOSCRIPT` transparently reloads the same script. A normal
+The current wire format and Redis key layout are schema v2; deterministic IDs
+use domain v3. Deployment metadata rejects older ID domains. Upgrade with a
+fresh namespace after draining/migrating the old one, and never run mixed
+v2/v3 ID writers against one namespace. Each command uses a preloaded Lua
+script through `EVALSHA`; `NOSCRIPT` transparently reloads the same script.
+A normal
 log append atomically validates deployment metadata and canonical membership,
 deduplicates `recordId`, appends the Stream record, updates
 `logicalLogId` lifecycle state, writes a lightweight block-journal reference,
@@ -38,8 +42,12 @@ correction is retried; normal persistence remains backpressured.
 
 Use a dedicated Redis resource with persistent storage, capacity alerts,
 authentication, network isolation, and backups. The worker intentionally does
-not apply lossy `MAXLEN` trimming. Archive events and trim only behind the
-oldest required consumer-group and fork-journal positions.
+not apply lossy `MAXLEN` trimming. Automated safe archival/pruning is not yet
+implemented: the Stream and its record, lifecycle, header, height, and block
+reference indexes grow monotonically. Queue and in-process fork-window limits
+do not bound total Redis memory. Do not trim one key independently; provision
+and alert Redis for the full retention horizon until the watermark-safe
+maintenance worker is available.
 
 ## Run
 
@@ -79,9 +87,13 @@ with `LUNARBASE_EVENT_SOURCE_QUEUE_BYTE_BOUND` and
 `LUNARBASE_EVENT_REDIS_QUEUE_BYTE_BOUND`. Saturation backpressures ingestion
 and revokes readiness. It never silently removes a required event.
 
-Fork history defaults to 4096 headers / 2 MiB and exact resolution is capped at
-4096 blocks. One correction is admitted only below 8192 lifecycle records and
-16 MiB. Override these with `LUNARBASE_EVENT_FORK_WINDOW_BLOCKS`,
+The in-process fork-resolution window defaults to 4096 headers / 2 MiB and
+exact resolution is capped at 4096 blocks. This is not a durable Redis
+retention bound. One correction admits at most 8192 total lifecycle records,
+including `reorg-begin`, `reorg-commit`, reverted logs, and replacement logs,
+and at most 16 MiB. A protocol-valid larger delta becomes an observable
+recovery gap; the worker remains alive rather than inflating one blocking Lua
+transaction. Override these with `LUNARBASE_EVENT_FORK_WINDOW_BLOCKS`,
 `LUNARBASE_EVENT_FORK_WINDOW_BYTES`, `LUNARBASE_EVENT_FORK_MAX_DEPTH`,
 `LUNARBASE_EVENT_CORRECTION_EVENT_BOUND`, and
 `LUNARBASE_EVENT_CORRECTION_BYTE_BOUND`.
@@ -94,8 +106,8 @@ The complete fork-aware contract is specified in
 All keys share one Redis Cluster hash tag. The deployment has a Stream,
 metadata, cursor/resume state, record and lifecycle indexes, header and
 canonical-height journals, canonical/finalized heads, reorg state, usage
-accounting, and one lightweight log-reference list per retained block. Exact
-key names and retention invariants are documented in
+accounting, and one lightweight log-reference list per observed block. Exact
+key names and the target retention invariants are documented in
 [`docs/EVENT_DELIVERY.md`](../../docs/EVENT_DELIVERY.md).
 
 Every normal Stream entry contains:

@@ -1,5 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
+import { Commitment, type Checkpoint } from "@lunarbase-lab/pmm-v2-client";
 import { RpcError } from "@lunarbase-lab/pmm-v2-source-evm";
 import { ArbitrumNitroSource } from "./index.js";
 
@@ -62,6 +63,22 @@ function rawLog(blockNumber: bigint, logIndex: bigint): Record<string, unknown> 
   };
 }
 
+function checkpoint(executionBlockNumber: bigint): Checkpoint {
+  return {
+    chainId: 42161n,
+    core: ADDRESS,
+    expectedImplementation: ADDRESS,
+    expectedImplementationCodeHash: `0x${"22".repeat(32)}`,
+    cursor: {
+      chainId: 42161n,
+      blockNumber: 42n,
+      executionBlockNumber,
+      blockHash: `0x${"11".repeat(32)}`,
+      commitment: Commitment.Canonical,
+    },
+  } as unknown as Checkpoint;
+}
+
 test("Arbitrum uses standard logs subscriptions", () => {
   assert.equal(source((() => Promise.reject(new Error("unused"))) as typeof fetch).config.logsSubscription, "logs");
 });
@@ -118,6 +135,45 @@ test("canonical head is pinned to explicit Nitro execution context", async () =>
   assert.deepEqual(
     requests.filter((request) => request.method === "eth_getBlockByNumber").map((request) => request.params[0]),
     ["latest", "0x2a"],
+  );
+});
+
+test("checkpoint validation rejects a different Nitro execution context before contract reads", async () => {
+  const requests: RpcRequest[] = [];
+  const valid = await source(
+    rpcFetcher((request) => {
+      if (request.method === "eth_getBlockByNumber")
+        return {
+          number: "0x2a",
+          hash: `0x${"11".repeat(32)}`,
+          l1BlockNumber: "0x7",
+          transactions: [],
+        };
+      throw new Error(`unexpected ${request.method}`);
+    }, requests),
+  ).validateCheckpoint(checkpoint(6n));
+
+  assert.equal(valid, false);
+  assert.deepEqual(
+    requests.map((request) => request.method),
+    ["eth_chainId", "eth_getBlockByNumber"],
+  );
+});
+
+test("checkpoint validation requires explicit Nitro execution context", async () => {
+  const requests: RpcRequest[] = [];
+  const operation = source(
+    rpcFetcher((request) => {
+      if (request.method === "eth_getBlockByNumber")
+        return { number: "0x2a", hash: `0x${"11".repeat(32)}`, transactions: [] };
+      throw new Error(`unexpected ${request.method}`);
+    }, requests),
+  ).validateCheckpoint(checkpoint(42n));
+
+  await assert.rejects(operation, (error: unknown) => error instanceof RpcError && error.code === "INVALID");
+  assert.deepEqual(
+    requests.map((request) => request.method),
+    ["eth_chainId", "eth_getBlockByNumber"],
   );
 });
 

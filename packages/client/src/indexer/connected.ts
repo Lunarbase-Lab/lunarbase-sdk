@@ -10,14 +10,24 @@ import type {
   ClientQuote,
   ContractFilter,
   DeploymentConfig,
+  IndexerCorrectionMetrics,
   IndexerHealth,
+  IndexerLifecycleListener,
 } from "../model.js";
 import { compareCursor } from "../source.js";
-import { QuoteIndexer, validateCoreLogIdentity } from "./engine.js";
+import { validateCoreLogIdentity } from "./cursor_policy.js";
+import { QuoteIndexer } from "./engine.js";
 import { validateFilterTopics } from "./filter.js";
-import { delay, pumpSource, SourceActivity } from "./source_task.js";
+import { pumpSource, SourceActivity } from "./source_task.js";
 import { BoundedUpdateQueue } from "./update_queue.js";
 import { monotonicMilliseconds, withDeadline } from "./lifecycle.js";
+import { RecoveryCoordinator } from "./recovery_coordinator.js";
+import {
+  DEFAULT_CORRECTION_HISTORY_BLOCKS,
+  DEFAULT_CORRECTION_HISTORY_BYTES,
+  MAX_CORRECTION_HISTORY_BLOCKS,
+  MAX_CORRECTION_HISTORY_BYTES,
+} from "./correction_journal.js";
 
 const RECOVERY_PAGE_BLOCKS = 1_000n;
 const DEFAULT_SHUTDOWN_TIMEOUT_MILLISECONDS = 10_000;
@@ -32,6 +42,10 @@ export interface ClientConnectConfig {
   readonly queueBound: number;
   /** Maximum retained bytes waiting for the ordered reducer. */
   readonly queueByteBound: number;
+  /** Maximum eventful blocks retained for optimistic rollback. */
+  readonly correctionHistoryBlockBound?: number;
+  /** Maximum compact before-image bytes retained for optimistic rollback. */
+  readonly correctionHistoryByteBound?: number;
   /** Delay before reopening a failed realtime subscription. */
   readonly reconnectDelayMilliseconds: number;
   /** Maximum interval without an update before readiness is revoked. */
@@ -105,6 +119,7 @@ export class ConnectedQuoteClient {
         sourceController.signal,
         optionalCheckpoint,
       );
+      activity.onInactive(() => indexer.markNotReady());
       const recovery = new RecoveryCoordinator(indexer, source, ownedConfig, queue, activity, sourceController.signal);
       const reducerTask = reduceSource(
         indexer,
@@ -112,13 +127,16 @@ export class ConnectedQuoteClient {
         recovery,
         reducerController.signal,
         () => sourceController.signal.aborted,
-      ).catch(() => {
-        indexer.markNotReady();
-        sourceController.abort();
-        reducerController.abort();
-        queue.close();
-        activity.setActive(false);
-      });
+      )
+        .catch((error) => {
+          recovery.rejectPending(error);
+          indexer.markNotReady();
+          sourceController.abort();
+          reducerController.abort();
+          queue.close();
+          activity.setActive(false);
+        })
+        .finally(() => recovery.rejectPending(new IndexerError("SOURCE", "ordered reducer stopped")));
       return new ConnectedQuoteClient(
         indexer,
         sourceController,
@@ -159,6 +177,16 @@ export class ConnectedQuoteClient {
     return this.stopping ? { ...health, ready: false } : health;
   }
 
+  /** Returns compact correction/journal counters for monitoring. */
+  correctionMetrics(): IndexerCorrectionMetrics {
+    return this.indexer.correctionMetrics();
+  }
+
+  /** Observes correction and true-gap notices outside reducer execution. */
+  onLifecycle(listener: IndexerLifecycleListener): () => void {
+    return this.indexer.onLifecycle(listener);
+  }
+
   /** Returns a checkpoint only while the current state is publishable. */
   checkpoint(): Checkpoint | undefined {
     return !this.stopping && this.indexer.health().ready ? this.indexer.checkpoint() : undefined;
@@ -167,7 +195,7 @@ export class ConnectedQuoteClient {
   /** Forces one serialized canonical recovery while subscription buffering continues. */
   recover(): Promise<void> {
     this.requireRunning();
-    return this.recovery.run();
+    return this.recovery.request();
   }
 
   /** Stops all background work and revokes readiness. */
@@ -224,6 +252,8 @@ function validateConnectConfig(config: ClientConnectConfig, source: ChainDataSou
   for (const [name, value] of Object.entries({
     queueBound: config.queueBound,
     queueByteBound: config.queueByteBound,
+    correctionHistoryBlockBound: config.correctionHistoryBlockBound ?? DEFAULT_CORRECTION_HISTORY_BLOCKS,
+    correctionHistoryByteBound: config.correctionHistoryByteBound ?? DEFAULT_CORRECTION_HISTORY_BYTES,
     reconnectDelayMilliseconds: config.reconnectDelayMilliseconds,
     sourceStallTimeoutMilliseconds: config.sourceStallTimeoutMilliseconds,
     sourceOperationTimeoutMilliseconds: config.sourceOperationTimeoutMilliseconds,
@@ -231,11 +261,19 @@ function validateConnectConfig(config: ClientConnectConfig, source: ChainDataSou
     if (!Number.isSafeInteger(value) || value <= 0)
       throw new IndexerError("SOURCE", `${name} must be a positive safe integer`);
   if (config.queueByteBound < 1024) throw new IndexerError("SOURCE", "queueByteBound must be at least 1024 bytes");
+  if ((config.correctionHistoryByteBound ?? DEFAULT_CORRECTION_HISTORY_BYTES) < 1024)
+    throw new IndexerError("SOURCE", "correctionHistoryByteBound must be at least 1024 bytes");
+  if ((config.correctionHistoryBlockBound ?? DEFAULT_CORRECTION_HISTORY_BLOCKS) > MAX_CORRECTION_HISTORY_BLOCKS)
+    throw new IndexerError("SOURCE", "correctionHistoryBlockBound must be at most 128");
+  if ((config.correctionHistoryByteBound ?? DEFAULT_CORRECTION_HISTORY_BYTES) > MAX_CORRECTION_HISTORY_BYTES)
+    throw new IndexerError("SOURCE", "correctionHistoryByteBound must be at most 16 MiB");
 }
 
 function ownConnectConfig(config: ClientConnectConfig): ClientConnectConfig {
   return Object.freeze({
     ...config,
+    correctionHistoryBlockBound: config.correctionHistoryBlockBound ?? DEFAULT_CORRECTION_HISTORY_BLOCKS,
+    correctionHistoryByteBound: config.correctionHistoryByteBound ?? DEFAULT_CORRECTION_HISTORY_BYTES,
     deployment: ownDeploymentConfig(config.deployment),
     filter: ownContractFilter(config.filter),
   });
@@ -249,10 +287,28 @@ async function reduceSource(
   stopping: () => boolean,
 ): Promise<void> {
   let stateValid = true;
+  let consumedSequence = queue.drainedThroughSequence;
   while (!signal.aborted) {
-    const update = await queue.next(signal);
-    if (!update) return;
-    if (!stateValid) continue;
+    const requestedBarrier = recovery.requestedBarrier;
+    if (requestedBarrier !== undefined && consumedSequence >= requestedBarrier) {
+      consumedSequence = Math.max(consumedSequence, await recovery.serviceRequested());
+      continue;
+    }
+    const queued = await queue.nextWithSequence(signal);
+    if (!queued) {
+      if (signal.aborted || queue.closed) return;
+      continue;
+    }
+    const update = queued.update;
+    if (!stateValid) {
+      consumedSequence = Math.max(consumedSequence, queued.sequence);
+      continue;
+    }
+    const barrierAfterDequeue = recovery.requestedBarrier;
+    if (barrierAfterDequeue !== undefined && queued.sequence > barrierAfterDequeue) {
+      consumedSequence = Math.max(consumedSequence, await recovery.serviceRequested(queued));
+      continue;
+    }
     try {
       indexer.applyCoreUpdate(update);
     } catch {
@@ -260,9 +316,18 @@ async function reduceSource(
         indexer.markNotReady();
         stateValid = false;
       } else {
-        await recovery.run();
+        const recoveredThrough =
+          recovery.requestedBarrier === undefined
+            ? await recovery.run(queued)
+            : await recovery.serviceRequested(queued);
+        consumedSequence = Math.max(consumedSequence, recoveredThrough);
       }
+      continue;
     }
+    consumedSequence = Math.max(consumedSequence, queued.sequence);
+    const barrierAfterApply = recovery.requestedBarrier;
+    if (barrierAfterApply !== undefined && consumedSequence >= barrierAfterApply)
+      consumedSequence = Math.max(consumedSequence, await recovery.serviceRequested());
   }
 }
 
@@ -304,7 +369,7 @@ async function restoreCheckpoint(
   source: ChainDataSource,
   signal: AbortSignal,
 ): Promise<QuoteIndexer> {
-  const indexer = QuoteIndexer.fromCheckpoint(checkpoint, config.deployment);
+  const indexer = QuoteIndexer.fromCheckpoint(checkpoint, config.deployment, correctionLimits(config));
   const head = await withDeadline("checkpoint canonical head", config.sourceOperationTimeoutMilliseconds, signal, () =>
     source.canonicalHead(),
   );
@@ -355,61 +420,16 @@ async function snapshotIndexer(
   const snapshot = await withDeadline("bootstrap snapshot", config.sourceOperationTimeoutMilliseconds, signal, () =>
     source.snapshot(config.deployment),
   );
-  const indexer = QuoteIndexer.fromSnapshot(snapshot, config.deployment);
+  const indexer = QuoteIndexer.fromSnapshot(snapshot, config.deployment, correctionLimits(config));
   indexer.replayHandoff(queue.drainAll(), snapshot.cursor);
   return indexer;
 }
 
-class RecoveryCoordinator {
-  /** Currently running recovery shared by every caller. */
-  private current?: Promise<void>;
-
-  constructor(
-    private readonly indexer: QuoteIndexer,
-    private readonly source: ChainDataSource,
-    private readonly config: ClientConnectConfig,
-    private readonly queue: BoundedUpdateQueue,
-    private readonly activity: SourceActivity,
-    private readonly signal: AbortSignal,
-  ) {}
-
-  /** Starts or joins the sole canonical recovery. */
-  run(): Promise<void> {
-    this.indexer.markNotReady();
-    if (this.current) return this.current;
-    const operation = this.recoverUntilReady();
-    const tracked = operation.finally(() => {
-      if (this.current === tracked) this.current = undefined;
-    });
-    this.current = tracked;
-    return this.current;
-  }
-
-  private async recoverUntilReady(): Promise<void> {
-    while (!this.signal.aborted) {
-      try {
-        const active = await waitForActivity(
-          "recovery source activity",
-          this.activity,
-          this.config.sourceOperationTimeoutMilliseconds,
-          this.signal,
-        );
-        if (!active) return;
-        const snapshot = await withDeadline(
-          "recovery snapshot",
-          this.config.sourceOperationTimeoutMilliseconds,
-          this.signal,
-          () => this.source.snapshot(this.config.deployment),
-        );
-        this.indexer.installSnapshot(snapshot, this.queue.drainAll());
-        return;
-      } catch (error) {
-        this.indexer.markNotReady();
-        if (isPermanentBootstrapError(error)) throw error;
-        await delay(this.config.reconnectDelayMilliseconds, this.signal);
-      }
-    }
-  }
+function correctionLimits(config: ClientConnectConfig) {
+  return {
+    blockCapacity: config.correctionHistoryBlockBound ?? DEFAULT_CORRECTION_HISTORY_BLOCKS,
+    byteCapacity: config.correctionHistoryByteBound ?? DEFAULT_CORRECTION_HISTORY_BYTES,
+  };
 }
 
 function remaining(deadline: number): number {
@@ -435,5 +455,5 @@ function waitForActivity(
 function isPermanentBootstrapError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const code = (error as Error & { code?: string }).code;
-  return code === "INVALID" || code === "CODE_HASH_MISMATCH";
+  return code === "INVALID" || code === "INVALID_REQUEST" || code === "CODE_HASH_MISMATCH";
 }

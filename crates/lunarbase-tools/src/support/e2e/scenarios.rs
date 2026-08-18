@@ -179,20 +179,31 @@ async fn run_event_worker_scenarios(
     let mut restarted = spawn_event_worker(&arguments.event_worker_bin, mock, &redis.url, port)?;
     wait_for_ready(&url).await?;
     wait_for_stream_length(&redis.url, 2).await?;
-    wait_for_metric(&url, "lunarbase_event_worker_duplicates_total", 1).await?;
+    mock.publish(MockEvent::Log(MockLog {
+        block: 106,
+        log_index: 0,
+        payload: 0xa6,
+    }));
+    mock.publish_log(MockLog {
+        block: 107,
+        log_index: 0,
+        payload: 0xa7,
+    });
+    wait_for_metric(&url, "lunarbase_event_worker_events_total", 2).await?;
+    wait_for_stream_length(&redis.url, 3).await?;
     assert_consumer_reclaim(&redis.url).await?;
 
     let redis_crash_tested = redis.is_managed();
     if redis_crash_tested {
         redis.crash().await?;
         mock.publish_log(MockLog {
-            block: 107,
+            block: 108,
             log_index: 0,
-            payload: 0xa7,
+            payload: 0xa8,
         });
         wait_for_not_ready(&url).await?;
         redis.restart().await?;
-        wait_for_stream_length(&redis.url, 3).await?;
+        wait_for_stream_length(&redis.url, 4).await?;
         wait_for_ready(&url).await?;
     }
 

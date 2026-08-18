@@ -86,6 +86,8 @@ pub(super) fn spawn_event_worker(
             "8",
             "--source-queue-byte-bound",
             "65536",
+            "--correction-byte-bound",
+            "65536",
             "--redis-queue-bound",
             "2",
             "--redis-queue-byte-bound",

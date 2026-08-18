@@ -1,5 +1,9 @@
 //! Deterministic quote-critical update pressure for mixed-load benchmarks.
 
+#[cfg(test)]
+#[path = "quote_mixed_tests.rs"]
+mod tests;
+
 use alloy_sol_types::SolEvent;
 use futures_util::stream;
 use lunarbase_client::{
@@ -62,8 +66,14 @@ impl UpdateBus {
         }))
     }
 
-    fn publish(&self, update: ChainUpdate) -> bool {
-        update.retained_bytes() <= self.max_update_bytes && self.sender.send(update).is_ok()
+    fn publish(&self, mut update: ChainUpdate) -> bool {
+        let logical_bytes = update.retained_bytes();
+        if logical_bytes > self.max_update_bytes {
+            return false;
+        }
+        update.normalize_for_retention();
+        debug_assert_eq!(logical_bytes, update.retained_bytes());
+        self.sender.send(update).is_ok()
     }
 }
 

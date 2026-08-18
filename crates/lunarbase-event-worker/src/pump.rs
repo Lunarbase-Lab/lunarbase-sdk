@@ -52,7 +52,24 @@ pub(crate) fn spawn<S>(
 where
     S: ChainDataSource + 'static,
 {
-    tokio::spawn(run(source, filter, sender, runtime))
+    tokio::spawn(async move {
+        let _exit = PumpExitGuard {
+            active: runtime.active.clone(),
+            metrics: runtime.metrics.clone(),
+        };
+        run(source, filter, sender, runtime).await;
+    })
+}
+
+struct PumpExitGuard {
+    active: watch::Sender<bool>,
+    metrics: Arc<Metrics>,
+}
+
+impl Drop for PumpExitGuard {
+    fn drop(&mut self) {
+        mark_inactive_parts(&self.active, self.metrics.as_ref());
+    }
 }
 
 async fn run<S>(
@@ -68,7 +85,7 @@ async fn run<S>(
         if cancellation_requested(&mut runtime.shutdown).await {
             return;
         }
-        let _ = runtime.active.send(false);
+        mark_inactive(&runtime);
         let subscribed = tokio::select! {
             biased;
             () = wait_for_cancellation(&mut runtime.shutdown) => return,
@@ -77,6 +94,7 @@ async fn run<S>(
         match subscribed {
             Ok(stream) => {
                 ever_active = true;
+                runtime.metrics.source_connected();
                 let _ = runtime.active.send(true);
                 if !consume(stream, &sender, &mut runtime).await {
                     return;
@@ -98,7 +116,7 @@ async fn run<S>(
             }
             Err(error) => tracing::warn!(error = %error, "event source subscribe failed"),
         }
-        let _ = runtime.active.send(false);
+        mark_inactive(&runtime);
         runtime.metrics.source_reconnect();
         if sleep_or_cancel(runtime.reconnect_delay, &mut runtime.shutdown).await {
             return;
@@ -132,7 +150,13 @@ async fn consume(
                 reason: format!("source stalled for {:?}", runtime.stall_timeout),
             },
         };
-        let terminal = matches!(update, ChainUpdate::Gap { .. });
+        // Budget conversion is itself terminal. Inspect the logical charge
+        // before revoking readiness; `send` owns the single compaction.
+        let terminal = matches!(update, ChainUpdate::Gap { .. })
+            || update.retained_bytes() > runtime.byte_capacity;
+        if terminal {
+            mark_inactive(runtime);
+        }
         if !send(sender, update, runtime).await {
             return false;
         }
@@ -142,20 +166,25 @@ async fn consume(
     }
 }
 
+fn mark_inactive(runtime: &PumpRuntime) {
+    mark_inactive_parts(&runtime.active, runtime.metrics.as_ref());
+}
+
+fn mark_inactive_parts(active: &watch::Sender<bool>, metrics: &Metrics) {
+    // Revoke the versioned readiness lease before publishing inactivity. Once
+    // a receiver observes false, neither an old nor a newly sampled lease can
+    // publish Ready, including while a panicking pump is still unwinding.
+    metrics.source_disconnected();
+    let _ = active.send(false);
+}
+
 async fn send(
     sender: &mpsc::Sender<QueuedUpdate>,
     update: ChainUpdate,
     runtime: &mut PumpRuntime,
 ) -> bool {
-    let mut update = update;
-    let mut bytes = update.retained_bytes();
-    if bytes > runtime.byte_capacity {
-        update = ChainUpdate::Gap {
-            cursor: None,
-            reason: "source update exceeded event-worker queue byte budget".into(),
-        };
-        bytes = update.retained_bytes();
-    }
+    let update = normalize_update(update, runtime.byte_capacity);
+    let bytes = update.retained_bytes();
     let byte_permit = match runtime
         .byte_budget
         .clone()
@@ -199,6 +228,28 @@ async fn send(
         _byte_permit: byte_permit,
     });
     true
+}
+
+fn normalize_update(mut update: ChainUpdate, byte_capacity: usize) -> ChainUpdate {
+    if update.retained_bytes() <= byte_capacity {
+        update.normalize_for_retention();
+        debug_assert!(update.retained_bytes() <= byte_capacity);
+        return update;
+    }
+    ChainUpdate::Gap {
+        cursor: update_cursor(&update).cloned(),
+        reason: "source update exceeded event-worker queue byte budget".into(),
+    }
+}
+
+fn update_cursor(update: &ChainUpdate) -> Option<&lunarbase_client::model::ChainCursor> {
+    match update {
+        ChainUpdate::Head(head) => Some(&head.cursor),
+        ChainUpdate::Log(log) => Some(&log.cursor),
+        ChainUpdate::Reorg { new_head, .. } => Some(&new_head.cursor),
+        ChainUpdate::Correction(correction) => Some(&correction.new_tip.cursor),
+        ChainUpdate::Gap { cursor, .. } => cursor.as_ref(),
+    }
 }
 
 async fn wait_for_cancellation(shutdown: &mut watch::Receiver<bool>) {

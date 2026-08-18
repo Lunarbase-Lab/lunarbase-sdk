@@ -4,8 +4,8 @@ use alloy_primitives::B256;
 use futures_util::{StreamExt, TryStreamExt, stream};
 use lunarbase_client::bootstrap::BootstrapSnapshot;
 use lunarbase_client::model::{
-    BackfillRequest, ChainCursor, ChainUpdate, Checkpoint, Commitment, ContractFilter, ContractLog,
-    DeploymentConfig, Network, SourceError,
+    BackfillRequest, ChainCorrection, ChainCursor, ChainUpdate, Checkpoint, Commitment,
+    ContractFilter, ContractLog, DeploymentConfig, Network, SourceError,
 };
 use lunarbase_client::source::{ChainDataSource, SourceStream};
 use lunarbase_source_evm::fork::{ForkError, ForkResolver};
@@ -211,8 +211,84 @@ impl ArbitrumNitroSource {
                 log.cursor = self.with_nitro_execution_context(log.cursor).await?;
                 Ok(ChainUpdate::Log(log))
             }
+            ChainUpdate::Correction(correction) => self.enrich_correction(correction).await,
             update @ (ChainUpdate::Reorg { .. } | ChainUpdate::Gap { .. }) => Ok(update),
         }
+    }
+
+    async fn enrich_correction(
+        &self,
+        mut correction: Box<ChainCorrection>,
+    ) -> Result<ChainUpdate, SourceError> {
+        let mut unique_blocks = BTreeMap::new();
+        for block in std::iter::once(&correction.common_ancestor)
+            .chain(std::iter::once(&correction.old_tip))
+            .chain(std::iter::once(&correction.new_tip))
+            .chain(correction.old_branch.iter())
+            .chain(correction.new_branch.iter())
+        {
+            let hash = block.cursor.block_hash.ok_or_else(|| {
+                unavailable(format!(
+                    "Arbitrum correction block {} has no hash",
+                    block.cursor.block_number
+                ))
+            })?;
+            let key = (block.cursor.block_number, hash);
+            if block.cursor.execution_block_number != block.cursor.block_number {
+                self.contexts()
+                    .insert(key, block.cursor.execution_block_number)?;
+            }
+            unique_blocks
+                .entry(key)
+                .and_modify(|commitment| {
+                    if block.cursor.commitment == Commitment::Realtime {
+                        *commitment = Commitment::Realtime;
+                    }
+                })
+                .or_insert(block.cursor.commitment);
+        }
+        let contexts = stream::iter(unique_blocks)
+            .map(|((block_number, block_hash), commitment)| async move {
+                let (_, execution_block) = self
+                    .nitro_execution_context(block_number, block_hash, commitment)
+                    .await?;
+                Ok::<_, SourceError>(((block_number, block_hash), execution_block))
+            })
+            .buffer_unordered(EXECUTION_CONTEXT_CONCURRENCY)
+            .try_collect::<HashMap<_, _>>()
+            .await?;
+        let stamp = |cursor: &mut ChainCursor| -> Result<(), SourceError> {
+            let block_hash = cursor.block_hash.ok_or_else(|| {
+                unavailable(format!(
+                    "Arbitrum correction cursor {} has no hash",
+                    cursor.block_number
+                ))
+            })?;
+            cursor.execution_block_number = contexts
+                .get(&(cursor.block_number, block_hash))
+                .copied()
+                .ok_or_else(|| {
+                    unavailable(format!(
+                        "Arbitrum correction cursor {} is outside its branch",
+                        cursor.block_number
+                    ))
+                })?;
+            Ok(())
+        };
+        stamp(&mut correction.common_ancestor.cursor)?;
+        stamp(&mut correction.old_tip.cursor)?;
+        stamp(&mut correction.new_tip.cursor)?;
+        for block in correction
+            .old_branch
+            .iter_mut()
+            .chain(correction.new_branch.iter_mut())
+        {
+            stamp(&mut block.cursor)?;
+        }
+        for log in &mut correction.replacement_logs {
+            stamp(&mut log.cursor)?;
+        }
+        Ok(ChainUpdate::Correction(correction))
     }
 }
 
@@ -280,13 +356,19 @@ impl ChainDataSource for ArbitrumNitroSource {
 
     async fn subscribe(&self, filter: ContractFilter) -> Result<SourceStream, SourceError> {
         let stream = self.inner.subscribe(filter).await?;
-        if self.delivery_mode == EvmDeliveryMode::BlockOrdered {
-            return Ok(stream);
-        }
         let source = self.clone();
         Ok(Box::pin(stream.then(move |update| {
             let source = source.clone();
-            async move { source.enrich_update(update?).await }
+            async move {
+                let update = update?;
+                if source.delivery_mode == EvmDeliveryMode::BlockOrdered
+                    && !matches!(&update, ChainUpdate::Correction(_))
+                {
+                    Ok(update)
+                } else {
+                    source.enrich_update(update).await
+                }
+            }
         })))
     }
 
@@ -296,6 +378,106 @@ impl ChainDataSource for ArbitrumNitroSource {
     }
 
     async fn validate_checkpoint(&self, checkpoint: &Checkpoint) -> Result<bool, SourceError> {
-        self.inner.validate_checkpoint(checkpoint).await
+        if !self.inner.validate_checkpoint(checkpoint).await? {
+            return Ok(false);
+        }
+        let Some(block_hash) = checkpoint.cursor.block_hash else {
+            return Ok(false);
+        };
+        let (_, execution_block) = self
+            .nitro_execution_context(
+                checkpoint.cursor.block_number,
+                block_hash,
+                checkpoint.cursor.commitment,
+            )
+            .await?;
+        Ok(execution_block == checkpoint.cursor.execution_block_number)
+    }
+}
+
+#[cfg(test)]
+#[path = "source_correction_tests.rs"]
+mod correction_rpc_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::{Address, Bytes};
+    use lunarbase_client::model::BlockRef;
+
+    #[tokio::test]
+    async fn correction_enriches_every_nitro_execution_cursor() {
+        let rpc = RpcHttpClient::new("http://127.0.0.1:1").unwrap();
+        let source = ArbitrumNitroSource::new(rpc, "ws://127.0.0.1:1", 42_161);
+        let ancestor_hash = B256::new([0x81; 32]);
+        let old_hash = B256::new([0x82; 32]);
+        let new_hash = B256::new([0x83; 32]);
+        {
+            let mut contexts = source.contexts();
+            contexts.insert((10, ancestor_hash), 1_000).unwrap();
+            contexts.insert((11, old_hash), 1_001).unwrap();
+            contexts.insert((11, new_hash), 2_001).unwrap();
+        }
+
+        let ancestor = block(10, ancestor_hash, None, Commitment::Finalized);
+        let old = block(11, old_hash, Some(ancestor_hash), Commitment::Realtime);
+        let new = block(11, new_hash, Some(ancestor_hash), Commitment::Realtime);
+        let update = ChainUpdate::Correction(Box::new(ChainCorrection {
+            common_ancestor: ancestor,
+            old_tip: old.clone(),
+            new_tip: new.clone(),
+            old_branch: vec![old],
+            new_branch: vec![new],
+            replacement_logs: vec![ContractLog {
+                address: Address::new([1; 20]),
+                transaction_hash: Some(B256::new([0x84; 32])),
+                topics: Vec::new(),
+                data: Bytes::new(),
+                removed: false,
+                cursor: event_cursor(11, new_hash),
+            }],
+        }));
+
+        let ChainUpdate::Correction(correction) = source.enrich_update(update).await.unwrap()
+        else {
+            panic!("correction update expected");
+        };
+        assert_eq!(
+            correction.common_ancestor.cursor.execution_block_number,
+            1_000
+        );
+        assert_eq!(correction.old_tip.cursor.execution_block_number, 1_001);
+        assert_eq!(
+            correction.old_branch[0].cursor.execution_block_number,
+            1_001
+        );
+        assert_eq!(correction.new_tip.cursor.execution_block_number, 2_001);
+        assert_eq!(
+            correction.new_branch[0].cursor.execution_block_number,
+            2_001
+        );
+        assert_eq!(
+            correction.replacement_logs[0].cursor.execution_block_number,
+            2_001
+        );
+    }
+
+    fn block(
+        number: u64,
+        hash: B256,
+        parent_hash: Option<B256>,
+        commitment: Commitment,
+    ) -> BlockRef {
+        BlockRef::new(
+            ChainCursor::block(42_161, number, Some(hash), commitment),
+            parent_hash,
+        )
+    }
+
+    fn event_cursor(number: u64, hash: B256) -> ChainCursor {
+        let mut cursor = ChainCursor::block(42_161, number, Some(hash), Commitment::Realtime);
+        cursor.transaction_index = Some(0);
+        cursor.log_index = Some(0);
+        cursor
     }
 }

@@ -67,7 +67,10 @@ async fn graceful_shutdown_returns_state_after_the_reducer_stops() {
         .unwrap()
         .unwrap();
 
-    assert_eq!(checkpoint.cursor.block_number, 101);
+    assert_eq!(
+        checkpoint.cursor.block_number, 100,
+        "a realtime head cannot be persisted as complete before late logs arrive"
+    );
     assert!(!client.is_ready());
     assert!(client.checkpoint().unwrap().is_none());
 }

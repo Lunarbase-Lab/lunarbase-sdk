@@ -1,10 +1,10 @@
 //! Stable identities and bounded materialization for fork corrections.
 
 use super::{
-    DurableEvent, DurableHead, EventError, RECORD_ID_DOMAIN, REORG_ID_DOMAIN, append_bytes,
-    cursor_order, encode_cursor, encode_id,
+    DurableEvent, DurableHead, EventError, RECORD_ID_DOMAIN, REORG_ID_DOMAIN, cursor_order,
+    encode_cursor, encode_id,
 };
-use alloy_primitives::{Address, B256, keccak256};
+use alloy_primitives::{Address, B256, Keccak256, keccak256};
 use lunarbase_client::model::{BlockRef, ContractLog};
 use lunarbase_source_evm::fork::ForkResolution;
 use std::collections::BTreeMap;
@@ -40,17 +40,11 @@ impl ReorgCorrection {
         logs: Vec<ContractLog>,
         core: Address,
     ) -> Result<Self, EventError> {
-        let ancestor_hash = required_hash(&resolution.common_ancestor)?;
-        let old_tip_hash = required_hash(&resolution.old_tip)?;
-        let new_tip_hash = required_hash(&resolution.new_tip)?;
+        required_hash(&resolution.common_ancestor)?;
+        required_hash(&resolution.old_tip)?;
+        required_hash(&resolution.new_tip)?;
         required_hash(&finalized)?;
-        let reorg_id = reorg_id(
-            resolution.old_tip.cursor.chain_id,
-            core,
-            ancestor_hash,
-            old_tip_hash,
-            new_tip_hash,
-        );
+        let reorg_id = reorg_id(resolution, &logs, core);
         let allowed = resolution
             .new_branch
             .iter()
@@ -203,16 +197,70 @@ impl ReorgCorrection {
     }
 }
 
-fn reorg_id(chain_id: u64, core: Address, ancestor: B256, old_tip: B256, new_tip: B256) -> String {
-    let mut preimage = [0_u8; REORG_ID_DOMAIN.len() + 8 + 20 + 96];
-    let mut offset = 0;
-    append_bytes(&mut preimage, &mut offset, REORG_ID_DOMAIN);
-    append_bytes(&mut preimage, &mut offset, &chain_id.to_be_bytes());
-    append_bytes(&mut preimage, &mut offset, core.as_slice());
-    append_bytes(&mut preimage, &mut offset, ancestor.as_slice());
-    append_bytes(&mut preimage, &mut offset, old_tip.as_slice());
-    append_bytes(&mut preimage, &mut offset, new_tip.as_slice());
-    encode_id(keccak256(preimage))
+fn reorg_id(resolution: &ForkResolution, logs: &[ContractLog], core: Address) -> String {
+    let mut hasher = Keccak256::new();
+    hasher.update(REORG_ID_DOMAIN);
+    hasher.update(core.as_slice());
+    hash_block(&mut hasher, &resolution.common_ancestor);
+    hash_block(&mut hasher, &resolution.old_tip);
+    hash_block(&mut hasher, &resolution.new_tip);
+    hash_blocks(&mut hasher, &resolution.old_branch);
+    hash_blocks(&mut hasher, &resolution.new_branch);
+    hash_u64(&mut hasher, logs.len() as u64);
+    for log in logs {
+        hash_log(&mut hasher, log);
+    }
+    encode_id(hasher.finalize())
+}
+
+fn hash_blocks(hasher: &mut Keccak256, blocks: &[BlockRef]) {
+    hash_u64(hasher, blocks.len() as u64);
+    for block in blocks {
+        hash_block(hasher, block);
+    }
+}
+
+fn hash_block(hasher: &mut Keccak256, block: &BlockRef) {
+    hash_u64(hasher, block.cursor.chain_id);
+    hash_u64(hasher, block.cursor.block_number);
+    hash_u64(hasher, block.cursor.execution_block_number);
+    hash_optional_hash(hasher, block.cursor.block_hash);
+    hash_optional_hash(hasher, block.parent_hash);
+}
+
+fn hash_log(hasher: &mut Keccak256, log: &ContractLog) {
+    hasher.update(log.address.as_slice());
+    hash_u64(hasher, log.cursor.chain_id);
+    hash_u64(hasher, log.cursor.block_number);
+    hash_u64(hasher, log.cursor.execution_block_number);
+    hash_optional_hash(hasher, log.cursor.block_hash);
+    hash_optional_hash(hasher, log.transaction_hash);
+    hash_optional_u32(hasher, log.cursor.transaction_index);
+    hash_optional_u32(hasher, log.cursor.log_index);
+    hash_u64(hasher, log.topics.len() as u64);
+    for topic in &log.topics {
+        hasher.update(topic.as_slice());
+    }
+    hash_u64(hasher, log.data.len() as u64);
+    hasher.update(log.data.as_ref());
+}
+
+fn hash_optional_hash(hasher: &mut Keccak256, value: Option<B256>) {
+    hasher.update([u8::from(value.is_some())]);
+    if let Some(value) = value {
+        hasher.update(value.as_slice());
+    }
+}
+
+fn hash_optional_u32(hasher: &mut Keccak256, value: Option<u32>) {
+    hasher.update([u8::from(value.is_some())]);
+    if let Some(value) = value {
+        hasher.update(value.to_be_bytes());
+    }
+}
+
+fn hash_u64(hasher: &mut Keccak256, value: u64) {
+    hasher.update(value.to_be_bytes());
 }
 
 fn lifecycle_record_id(logical_log_id: &str, reorg_id: &str, operation: &str) -> String {
@@ -242,3 +290,7 @@ fn required_hash(block: &BlockRef) -> Result<B256, EventError> {
 fn required_parent(block: &BlockRef) -> Result<B256, EventError> {
     block.parent_hash.ok_or(EventError::HeadIdentity)
 }
+
+#[cfg(test)]
+#[path = "reorg_tests.rs"]
+mod tests;

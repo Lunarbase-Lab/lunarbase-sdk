@@ -58,7 +58,7 @@ pub(super) fn promote_updates(updates: &mut [ChainUpdate], commitment: Commitmen
         match update {
             ChainUpdate::Head(head) => head.cursor.commitment = commitment,
             ChainUpdate::Log(log) => log.cursor.commitment = commitment,
-            ChainUpdate::Reorg { .. } | ChainUpdate::Gap { .. } => {}
+            ChainUpdate::Correction(_) | ChainUpdate::Reorg { .. } | ChainUpdate::Gap { .. } => {}
         }
     }
 }
@@ -167,6 +167,9 @@ pub(super) fn drain_completed_block(
                 let (kind, cursor) = match &other {
                     ChainUpdate::Head(head) => ("head", &head.cursor),
                     ChainUpdate::Log(log) => ("log", &log.cursor),
+                    ChainUpdate::Correction(correction) => {
+                        ("correction", &correction.new_tip.cursor)
+                    }
                     ChainUpdate::Reorg { new_head, .. } => ("reorg", &new_head.cursor),
                     ChainUpdate::Gap { cursor, .. } => {
                         let block = cursor.as_ref().map_or(0, |cursor| cursor.block_number);

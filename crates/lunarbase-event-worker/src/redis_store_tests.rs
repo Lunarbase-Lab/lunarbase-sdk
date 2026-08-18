@@ -73,6 +73,17 @@ async fn durable_redis_append_is_atomic_and_idempotent() {
     assert!(!duplicate.appended);
     assert_eq!(first.stream_id, duplicate.stream_id);
 
+    let mut altered_log = applied_log.clone();
+    altered_log.cursor.execution_block_number = 99;
+    altered_log.topics[0] = B256::new([0x42; 32]);
+    altered_log.data = Bytes::from_static(&[0x43; 64]);
+    let altered = Arc::new(DurableEvent::from_log(&altered_log).unwrap());
+    let error = store.append_event(altered).await.unwrap_err();
+    assert!(matches!(
+        error,
+        StoreError::Journal(detail) if detail.contains("LUNARBASE_LOG_ALREADY_ACTIVE")
+    ));
+
     assert_eq!(
         store.load_cursor(8453, core).await.unwrap(),
         Some(applied_log.cursor.clone())

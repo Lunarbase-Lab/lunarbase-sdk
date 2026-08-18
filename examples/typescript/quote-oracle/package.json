@@ -1,7 +1,7 @@
 {
   "name": "@lunarbase-lab/example-quote-oracle",
   "private": true,
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Cross-language quote parity test adapter",
   "license": "MIT OR Apache-2.0",
   "type": "module",

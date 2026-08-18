@@ -298,7 +298,7 @@ test("canonical log identity ignores transport sequence for duplicate detection"
   assert.equal(conflictBuffer.isPoisoned(), true);
 });
 
-test("event-level checkpoint floor covers only events through its cursor", () => {
+test("event-level floor skips covered logs and checkpoints only canonical state", () => {
   const checkpoint = QuoteIndexer.fromSnapshot(snapshot(), deployment()).checkpoint();
   assert.ok(checkpoint);
   if (!checkpoint) throw new Error("checkpoint was not produced");
@@ -312,8 +312,13 @@ test("event-level checkpoint floor covers only events through its cursor", () =>
 
   indexer.applyCoreUpdate({ kind: "Log", log: depositLog(eventCursor(2n), 5n) });
   assert.equal(indexer.checkpoint()?.state.lanes.get(ASSET)?.totalPrincipalAmount, 0n);
+  assert.equal(indexer.correctionMetrics().journalBlocks, 0);
 
   indexer.applyCoreUpdate({ kind: "Log", log: depositLog(eventCursor(4n), 5n) });
+  assert.equal(indexer.correctionMetrics().journalBlocks, 1);
+  assert.equal(indexer.checkpoint()?.state.lanes.get(ASSET)?.totalPrincipalAmount, 0n);
+
+  indexer.setCanonicalFloor({ ...cursor(), commitment: Commitment.Canonical });
   assert.equal(indexer.checkpoint()?.state.lanes.get(ASSET)?.totalPrincipalAmount, 5n);
 });
 

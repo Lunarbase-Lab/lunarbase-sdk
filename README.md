@@ -18,7 +18,7 @@ or consumer latency to quote requests.
 | Monad source        | [Workspace/Git only](crates/lunarbase-source-monad/README.md)                  | [Workspace only](packages/source-monad/README.md)                           | Maintenance     |
 | Arbitrum source     | [lunarbase-pmm-v2-source-arbitrum](crates/lunarbase-source-arbitrum/README.md) | [@lunarbase-lab/pmm-v2-source-arbitrum](packages/source-arbitrum/README.md) | Maintenance     |
 
-All public packages use version 0.3.1.
+All public packages use version 0.4.0.
 
 Maintenance packages receive compatibility, reliability, and security fixes.
 The Monad sources are built and tested from the workspace but are not published
@@ -31,17 +31,17 @@ Ring and does not implement the resumable protocol-v2 lifecycle.
 Rust:
 
 ```sh
-cargo add lunarbase-pmm-v2-math@0.3.1
-cargo add lunarbase-pmm-v2-client@0.3.1
-cargo add lunarbase-pmm-v2-source-evm@0.3.1
+cargo add lunarbase-pmm-v2-math@0.4.0
+cargo add lunarbase-pmm-v2-client@0.4.0
+cargo add lunarbase-pmm-v2-source-evm@0.4.0
 ```
 
 TypeScript:
 
 ```sh
-pnpm add @lunarbase-lab/pmm-v2-math@0.3.1
-pnpm add @lunarbase-lab/pmm-v2-client@0.3.1
-pnpm add @lunarbase-lab/pmm-v2-source-evm@0.3.1
+pnpm add @lunarbase-lab/pmm-v2-math@0.4.0
+pnpm add @lunarbase-lab/pmm-v2-client@0.4.0
+pnpm add @lunarbase-lab/pmm-v2-source-evm@0.4.0
 ```
 
 Choose source-arbitrum instead of source-evm for Arbitrum. Monad integrations

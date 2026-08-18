@@ -12,6 +12,7 @@ import * as Hex from "ox/Hex";
 import { createPublicClient, http, type BlockTag, type PublicClient } from "viem";
 import {
   Commitment as CommitmentValue,
+  Network as NetworkValue,
   compareCursor,
   contractLogRetainedBytes,
   CORE_ABI,
@@ -364,8 +365,11 @@ export class RpcHttpBackend {
       Hex.fromNumber(checkpoint.cursor.blockNumber),
       this.chainId,
       CommitmentValue.Canonical,
+      this.network === NetworkValue.Arbitrum,
     );
     if (
+      canonical.blockNumber !== checkpoint.cursor.blockNumber ||
+      canonical.executionBlockNumber !== checkpoint.cursor.executionBlockNumber ||
       canonical.blockHash === undefined ||
       checkpoint.cursor.blockHash === undefined ||
       canonical.blockHash.toLowerCase() !== checkpoint.cursor.blockHash.toLowerCase()
