@@ -92,9 +92,11 @@ jobs:
             cmake \
             libhugetlbfs-dev \
             redis-server
-          echo "CC=clang-19" >> "$GITHUB_ENV"
-          echo "CXX=clang++-19" >> "$GITHUB_ENV"
-          echo "LIBCLANG_PATH=/usr/lib/llvm-19/lib" >> "$GITHUB_ENV"
+          {
+            echo "CC=clang-19"
+            echo "CXX=clang++-19"
+            echo "LIBCLANG_PATH=/usr/lib/llvm-19/lib"
+          } >> "$GITHUB_ENV"
           echo "/usr/lib/llvm-19/bin" >> "$GITHUB_PATH"
           clang-19 --version
           test -f /usr/lib/llvm-19/lib/libclang.so
