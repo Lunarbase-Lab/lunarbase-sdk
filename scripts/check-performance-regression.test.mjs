@@ -13,7 +13,7 @@ test("release publication is not blocked by the optional performance benchmark",
   assert.ok(publishStart > 0);
   const publish = workflow.slice(publishStart);
 
-  assert.doesNotMatch(workflow, /\n  performance:/);
+  assert.doesNotMatch(workflow, /\n[ ]{2}performance:/);
   assert.doesNotMatch(workflow, /lunarbase-performance/);
   assert.match(publish, /needs: \[binaries, gate\]/);
 });
