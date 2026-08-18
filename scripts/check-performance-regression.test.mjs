@@ -7,20 +7,15 @@ import test from "node:test";
 
 const checker = resolve("scripts/check-performance-regression.mjs");
 
-test("release publication depends on a dedicated immutable-baseline performance gate", () => {
+test("release publication is not blocked by the optional performance benchmark", () => {
   const workflow = readFileSync(resolve(".github/workflows/release.yml"), "utf8");
-  const performanceStart = workflow.indexOf("\n  performance:");
   const publishStart = workflow.indexOf("\n  publish:");
-  assert.ok(performanceStart > 0 && publishStart > performanceStart);
-  const performance = workflow.slice(performanceStart, publishStart);
+  assert.ok(publishStart > 0);
   const publish = workflow.slice(publishStart);
 
-  assert.match(performance, /runs-on: \[self-hosted, linux, x64, lunarbase-performance\]/);
-  assert.match(performance, /LUNARBASE_PERFORMANCE_BASELINE_REF/);
-  assert.match(performance, /\^\[0-9a-fA-F\]\{40\}\$/);
-  assert.match(performance, /make performance-capture/g);
-  assert.match(performance, /make performance-gate/);
-  assert.match(publish, /needs: \[binaries, gate, performance\]/);
+  assert.doesNotMatch(workflow, /\n  performance:/);
+  assert.doesNotMatch(workflow, /lunarbase-performance/);
+  assert.match(publish, /needs: \[binaries, gate\]/);
 });
 
 test("accepts stable timing, mixed-load, RSS, and allocation reports", () => {
