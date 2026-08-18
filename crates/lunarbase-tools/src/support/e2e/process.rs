@@ -1,5 +1,5 @@
 use crate::support::e2e::environment::{E2eError, MockChain};
-use crate::support::e2e::{ASSET, CORE, EMPTY_CODE_HASH, IMPLEMENTATION, ROUTER};
+use crate::support::e2e::{ASSET, CORE, EMPTY_CODE_HASH, IMPLEMENTATION};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -19,8 +19,7 @@ pub(super) fn write_config(
         r#"network = "base"
 chain_id = 8453
 core = "{CORE}"
-router = "{ROUTER}"
-expect_whitelisted = true
+fee_class = "whitelisted"
 deployment_block = 0
 expected_implementation = "{IMPLEMENTATION}"
 expected_implementation_code_hash = "{EMPTY_CODE_HASH}"
@@ -50,6 +49,72 @@ pub(super) fn spawn_indexer(binary: &Path, config: &Path) -> Result<Child, E2eEr
         .stderr(Stdio::inherit())
         .kill_on_drop(true);
     Ok(command.spawn()?)
+}
+
+pub(super) fn spawn_event_worker(
+    binary: &Path,
+    mock: &MockChain,
+    redis_url: &str,
+    port: u16,
+) -> Result<Child, E2eError> {
+    let mut command = Command::new(binary);
+    command
+        .args([
+            "--network",
+            "base",
+            "--chain-id",
+            "8453",
+            "--core",
+            CORE,
+            "--deployment-block",
+            "0",
+            "--http-rpc-url",
+            &mock.rpc_url(),
+            "--realtime-url",
+            &mock.websocket_url(),
+            "--redis-url",
+            redis_url,
+            "--redis-namespace",
+            "lunarbase-e2e",
+            "--consumer-group",
+            "lunarbase-e2e-consumers",
+            "--minimum-commitment",
+            "realtime",
+            "--bind",
+            &format!("127.0.0.1:{port}"),
+            "--source-queue-bound",
+            "8",
+            "--source-queue-byte-bound",
+            "65536",
+            "--correction-byte-bound",
+            "65536",
+            "--redis-queue-bound",
+            "2",
+            "--redis-queue-byte-bound",
+            "65536",
+            "--reconnect-delay-milliseconds",
+            "50",
+            "--source-stall-timeout-milliseconds",
+            "5000",
+            "--redis-timeout-milliseconds",
+            "250",
+            "--shutdown-timeout-seconds",
+            "4",
+        ])
+        .env("RUST_LOG", "lunarbase_event_worker=info")
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true);
+    Ok(command.spawn()?)
+}
+
+pub(super) async fn kill_force(child: &mut Child) -> Result<(), E2eError> {
+    if child.id().is_none() {
+        return Ok(());
+    }
+    child.start_kill()?;
+    child.wait().await?;
+    Ok(())
 }
 
 pub(super) async fn terminate(child: &mut Child) -> Result<(), E2eError> {

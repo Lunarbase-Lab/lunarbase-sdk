@@ -12,11 +12,17 @@ categories = ["api-bindings", "asynchronous"]
 [lib]
 name = "lunarbase_client"
 
+[features]
+default = []
+perf-trace = []
+
 [lints]
 workspace = true
 
 [dependencies]
 alloy-sol-types.workspace = true
+alloy-primitives.workspace = true
+arc-swap.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
 lunarbase-math.workspace = true

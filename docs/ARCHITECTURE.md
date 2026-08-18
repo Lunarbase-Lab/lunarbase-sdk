@@ -2,7 +2,7 @@
 
 ## Components
 
-The SDK is divided into four public capabilities:
+The SDK is divided into four public capabilities and one workspace service:
 
 1. Quote math evaluates exact-input and exact-output requests without network
    access.
@@ -12,6 +12,8 @@ The SDK is divided into four public capabilities:
    canonicality checks.
 4. lunarbase-indexer packages the client as an HTTP service with health,
    readiness, and metrics endpoints.
+5. lunarbase-event-worker independently persists raw Core logs to a durable
+   Redis Stream for at-least-once downstream processing.
 
 Rust and TypeScript implement the same compatibility profile and share the
 same deterministic quote vectors.
@@ -33,6 +35,28 @@ code hash, and math compatibility profile used for evaluation.
 
 quoteMany accepts at most 256 requests and evaluates the batch against one
 state position.
+
+Durable event delivery is a separate data plane:
+
+```text
+dedicated HTTP recovery + dedicated realtime source
+                         |
+                         v
+             bounded event worker -> atomic Redis Stream + cursor
+                                             |
+                                             v
+                                      consumer groups
+```
+
+Redis commands, event formatting, consumer backpressure, and event-worker
+queues do not share quote request execution. A slow Redis instance makes the
+event worker unready and eventually backpressures its own source instead of
+discarding accepted events.
+
+The fork-aware v2 event contract keeps raw payloads in the Redis Stream and
+stores only Stream-ID references in the non-finalized branch journal. See
+[durable event delivery](EVENT_DELIVERY.md) for lifecycle, reorganization, and
+consumer semantics.
 
 ## Consistency and recovery
 
@@ -67,6 +91,13 @@ are supplied by the operator.
 Graceful shutdown stops quote traffic, joins background work, and writes a
 final checkpoint when checkpointing is configured.
 
+The event worker has its own readiness and resource limits. Its Redis Stream,
+stable event-ID registry, and monotonic cursor are updated atomically. Redis
+must use AOF with `appendfsync always`; downstream processors acknowledge
+consumer-group entries only after idempotent side effects commit.
+Fork-aware event delivery, lifecycle IDs, and Redis journal pruning are defined
+in [EVENT_DELIVERY.md](EVENT_DELIVERY.md).
+
 ## Verification
 
 The release gate covers:
@@ -75,6 +106,10 @@ The release gate covers:
   unit tests
 - deterministic cross-language quote vectors
 - source ordering, bootstrap, recovery, checkpoint, and process-level tests
+- event-worker/Redis crash replay, duplicate delivery, consumer reclaim, queue
+  saturation, EVM reorg, and Monad competing-proposal/parser-gap tests
+- same-runner quote throughput, p99, peak RSS, allocation, and mixed quote/event
+  no-regression comparisons
 - Base, Monad, Arbitrum, and Linux adapter feature builds
 - dependency policy and production npm advisory checks
 - exact crate and npm package contents

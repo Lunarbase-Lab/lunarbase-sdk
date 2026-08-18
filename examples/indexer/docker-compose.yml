@@ -1,7 +1,7 @@
 services:
   redis:
     image: redis:7.4-alpine
-    command: ["redis-server", "--appendonly", "yes"]
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "always", "--maxmemory-policy", "noeviction"]
     restart: unless-stopped
     volumes:
       - lunarbase-redis:/data
@@ -11,7 +11,20 @@ services:
       timeout: 1s
       retries: 20
 
+  event-redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "always", "--maxmemory-policy", "noeviction"]
+    restart: unless-stopped
+    volumes:
+      - lunarbase-event-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 1s
+      retries: 20
+
   indexer:
+    image: lunarbase-sdk:local
     build:
       context: ../..
       args:
@@ -26,11 +39,10 @@ services:
     environment:
       RUST_LOG: lunarbase_indexer=info
       LUNARBASE_CORE: "${LUNARBASE_CORE:?set LUNARBASE_CORE}"
-      LUNARBASE_ROUTER: "${LUNARBASE_ROUTER:?set LUNARBASE_ROUTER}"
+      LUNARBASE_FEE_CLASS: "${LUNARBASE_FEE_CLASS:?set LUNARBASE_FEE_CLASS}"
       LUNARBASE_DEPLOYMENT_BLOCK: "${LUNARBASE_DEPLOYMENT_BLOCK:?set LUNARBASE_DEPLOYMENT_BLOCK}"
       LUNARBASE_EXPECTED_IMPLEMENTATION: "${LUNARBASE_EXPECTED_IMPLEMENTATION:?set LUNARBASE_EXPECTED_IMPLEMENTATION}"
       LUNARBASE_EXPECTED_IMPLEMENTATION_CODE_HASH: "${LUNARBASE_EXPECTED_IMPLEMENTATION_CODE_HASH:?set LUNARBASE_EXPECTED_IMPLEMENTATION_CODE_HASH}"
-      LUNARBASE_EXPECT_WHITELISTED: "${LUNARBASE_EXPECT_WHITELISTED:-true}"
       LUNARBASE_HTTP_RPC_URL: "${LUNARBASE_HTTP_RPC_URL:-http://host.docker.internal:8545}"
       LUNARBASE_REALTIME_URL: "${LUNARBASE_REALTIME_URL:-ws://host.docker.internal:8546}"
     ports:
@@ -39,5 +51,40 @@ services:
       - "host.docker.internal:host-gateway"
     stop_grace_period: 25s
 
+  event-worker:
+    image: lunarbase-sdk:local
+    restart: unless-stopped
+    entrypoint: ["/usr/local/bin/lunarbase-event-worker"]
+    depends_on:
+      event-redis:
+        condition: service_healthy
+    environment:
+      RUST_LOG: lunarbase_event_worker=info
+      LUNARBASE_EVENT_NETWORK: base
+      LUNARBASE_EVENT_CHAIN_ID: 8453
+      LUNARBASE_EVENT_CORE: "${LUNARBASE_CORE:?set LUNARBASE_CORE}"
+      LUNARBASE_EVENT_DEPLOYMENT_BLOCK: "${LUNARBASE_DEPLOYMENT_BLOCK:?set LUNARBASE_DEPLOYMENT_BLOCK}"
+      LUNARBASE_EVENT_HTTP_RPC_URL: "${LUNARBASE_EVENT_HTTP_RPC_URL:-http://host.docker.internal:8545}"
+      LUNARBASE_EVENT_REALTIME_URL: "${LUNARBASE_EVENT_REALTIME_URL:-ws://host.docker.internal:8546}"
+      LUNARBASE_EVENT_REDIS_URL: redis://event-redis:6379/
+      LUNARBASE_EVENT_MIN_COMMITMENT: "${LUNARBASE_EVENT_MIN_COMMITMENT:-realtime}"
+      LUNARBASE_EVENT_BIND: 0.0.0.0:9091
+      LUNARBASE_EVENT_SOURCE_QUEUE_BOUND: 4096
+      LUNARBASE_EVENT_SOURCE_QUEUE_BYTE_BOUND: 67108864
+      LUNARBASE_EVENT_BACKFILL_PAGE_BLOCKS: 1000
+      LUNARBASE_EVENT_FORK_WINDOW_BLOCKS: 4096
+      LUNARBASE_EVENT_FORK_WINDOW_BYTES: 2097152
+      LUNARBASE_EVENT_FORK_MAX_DEPTH: 4096
+      LUNARBASE_EVENT_CORRECTION_EVENT_BOUND: 8192
+      LUNARBASE_EVENT_CORRECTION_BYTE_BOUND: 16777216
+      LUNARBASE_EVENT_REDIS_QUEUE_BOUND: 8
+      LUNARBASE_EVENT_REDIS_QUEUE_BYTE_BOUND: 16777216
+    ports:
+      - "9091:9091"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    stop_grace_period: 20s
+
 volumes:
   lunarbase-redis:
+  lunarbase-event-redis:

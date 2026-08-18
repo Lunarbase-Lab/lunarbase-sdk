@@ -20,7 +20,7 @@ the same values directly:
 LUNARBASE_NETWORK=base \
 LUNARBASE_CHAIN_ID=8453 \
 LUNARBASE_CORE=0x... \
-LUNARBASE_ROUTER=0x... \
+LUNARBASE_FEE_CLASS=whitelisted \
 LUNARBASE_EXPECTED_IMPLEMENTATION=0x... \
 LUNARBASE_EXPECTED_IMPLEMENTATION_CODE_HASH=0x... \
 LUNARBASE_HTTP_RPC_URL=https://... \
@@ -33,10 +33,20 @@ TOML. Operational defaults cover bind address, queue bounds, reconnect timing,
 checkpoint cadence, and shutdown timeout; deployment identity and source
 endpoints are always explicit.
 
+`fee_class` is mandatory. `verified_router` is optional and enables the exact
+partner/treasury allocation; class-only deployments avoid its snapshot RPCs.
+
+The quote indexer intentionally has no event-delivery configuration or logger
+queue. Durable protocol events are handled by the separate
+`lunarbase-event-worker`, whose commitment policy uses
+`LUNARBASE_EVENT_MIN_COMMITMENT`.
+
 The adjacent [`prometheus-alerts.yml`](prometheus-alerts.yml) is an example for
 external monitoring and is not loaded by the indexer.
 
 For the Compose topology, copy [`.env.example`](.env.example) to `.env`,
-fill its required deployment values, and pass it with `--env-file`. The mounted
-TOML supplies Base runtime defaults; the environment supplies deployment
-identity and source endpoints.
+fill its required deployment values, and pass it with `--env-file`. Compose
+runs the quote indexer and durable event worker as separate processes with
+independent source connections, queues, health endpoints, and Redis resources.
+The mounted TOML supplies Base quote runtime defaults; the environment supplies
+deployment identity and both services' source endpoints.

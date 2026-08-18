@@ -1,6 +1,11 @@
 /** Ethereum subscription requests and normalized head parsing. */
-import { Commitment, type ChainCursor, type ChainUpdate, type ContractFilter } from "@lunarbase-lab/pmm-v2-client";
-import type { Hex } from "ox/Hex";
+import {
+  Commitment,
+  type BlockRef,
+  type ChainCursor,
+  type ChainUpdate,
+  type ContractFilter,
+} from "@lunarbase-lab/pmm-v2-client";
 import { parseHash, parseHexU64, RpcError } from "../rpc.js";
 
 export function subscriptionRequest(id: number, filter: ContractFilter, kind: "logs" | "pendingLogs"): string {
@@ -9,11 +14,7 @@ export function subscriptionRequest(id: number, filter: ContractFilter, kind: "l
   return JSON.stringify({ jsonrpc: "2.0", id, method: "eth_subscribe", params: [kind, options] });
 }
 
-export function parseHead(
-  value: unknown,
-  chainId: bigint,
-  requireExecutionBlockNumber = false,
-): { cursor: ChainCursor; parentHash?: Hex } {
+export function parseHead(value: unknown, chainId: bigint, requireExecutionBlockNumber = false): BlockRef {
   if (!value || typeof value !== "object") throw new RpcError("INVALID", "newHeads result is not an object");
   const object = value as Record<string, unknown>;
   if (requireExecutionBlockNumber && (object.l1BlockNumber === undefined || object.l1BlockNumber === null))

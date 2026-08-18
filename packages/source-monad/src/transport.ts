@@ -1,7 +1,9 @@
 /** Portable Monad parser-WebSocket source with canonical RPC recovery. */
 import {
+  BoundedRingBuffer,
   Commitment,
   Network,
+  ownContractFilter,
   type BackfillRequest,
   type BootstrapSnapshot,
   type ChainCursor,
@@ -26,6 +28,7 @@ import {
   type WebSocketLike,
 } from "@lunarbase-lab/pmm-v2-source-evm";
 import * as Hex from "ox/Hex";
+import type { Address } from "@lunarbase-lab/pmm-v2-math";
 import { MonadExecutionNormalizer, type ExecutionEvent, type ExecutionEventReader } from "./execution.js";
 
 /** Bounded parser-side WebSocket resources. */
@@ -34,6 +37,10 @@ export interface MonadParserConfig {
   readonly maxFrameBytes: number;
   /** Maximum decoded parser messages waiting for consumption. */
   readonly queueCapacity: number;
+  /** Maximum total bytes retained by decoded parser frames. */
+  readonly queueByteCapacity: number;
+  /** Maximum total bytes retained while subscription acknowledgements arrive. */
+  readonly prefetchByteCapacity: number;
   /** Maximum time for opening and acknowledging both subscriptions. */
   readonly handshakeTimeoutMilliseconds: number;
 }
@@ -41,6 +48,8 @@ export interface MonadParserConfig {
 export const DEFAULT_MONAD_PARSER_CONFIG: MonadParserConfig = Object.freeze({
   maxFrameBytes: 64 * 1024,
   queueCapacity: 4096,
+  queueByteCapacity: 16 * 1024 * 1024,
+  prefetchByteCapacity: 16 * 1024 * 1024,
   handshakeTimeoutMilliseconds: 10_000,
 });
 
@@ -49,7 +58,7 @@ interface EstablishedParserSocket {
   readonly queue: BoundedFrameQueue;
   readonly logsSubscription: string;
   readonly allSubscription: string;
-  readonly prefetched: string[];
+  readonly prefetched: BoundedRingBuffer<string>;
   readonly close: () => void;
 }
 
@@ -123,13 +132,14 @@ export class MonadParserSource implements ChainDataSource, ExecutionEventReader 
 
   /** Exposes raw portable parser records for live validation tooling. */
   async subscribeExecution(filter: ContractFilter, signal?: AbortSignal): Promise<AsyncIterable<ExecutionEvent>> {
-    const connection = await establishParserSocket(this.factory(this.wsEndpoint), filter, this.config, signal);
-    return this.readSocket(connection, filter, signal);
+    const ownedFilter = ownContractFilter(filter);
+    const connection = await establishParserSocket(this.factory(this.wsEndpoint), ownedFilter, this.config, signal);
+    return this.readSocket(connection, ownedFilter.address, signal);
   }
 
   private async *readSocket(
     connection: EstablishedParserSocket,
-    filter: ContractFilter,
+    expectedAddress: Address,
     signal?: AbortSignal,
   ): AsyncIterable<ExecutionEvent> {
     const { queue, logsSubscription, allSubscription, prefetched, close } = connection;
@@ -196,6 +206,7 @@ export class MonadParserSource implements ChainDataSource, ExecutionEventReader 
               sequence: head.sourceSequence ?? 0n,
               blockNumber: head.blockNumber,
               blockHash: head.blockHash,
+              parentHash: parserParentHash(result),
               commitment: head.commitment,
             },
           };
@@ -203,7 +214,7 @@ export class MonadParserSource implements ChainDataSource, ExecutionEventReader 
         }
         if (subscription === logsSubscription && type === "log" && result.kind === "event") {
           const log = parseParserLog(result, this.chainId, commitments);
-          if (log.address.toLowerCase() !== filter.address.toLowerCase()) continue;
+          if (log.address !== expectedAddress) continue;
           if (log.removed) {
             yield executionGap("Monad parser retracted a log; canonical recovery required");
             return;
@@ -240,12 +251,12 @@ async function establishParserSocket(
   signal?: AbortSignal,
 ): Promise<EstablishedParserSocket> {
   const handshakeDeadline = performance.now() + config.handshakeTimeoutMilliseconds;
-  const queue = new BoundedFrameQueue(config.queueCapacity);
+  const queue = new BoundedFrameQueue(config.queueCapacity, config.queueByteCapacity);
   const onOpen = () => queue.open();
   const onMessage = (event: SocketEvent) => {
     const frame = decodeFrame(event.data);
     if (frame === undefined) queue.fail(new Error("Monad parser delivered a non-text frame"));
-    else if (new TextEncoder().encode(frame).byteLength > config.maxFrameBytes)
+    else if (UTF8_ENCODER.encode(frame).byteLength > config.maxFrameBytes)
       queue.fail(new Error("Monad parser frame exceeded configured bound"));
     else queue.push(frame);
   };
@@ -259,6 +270,7 @@ async function establishParserSocket(
   const abort = () => queue.close();
   signal?.addEventListener("abort", abort, { once: true });
   const close = () => {
+    queue.close();
     signal?.removeEventListener("abort", abort);
     socket.removeEventListener?.("open", onOpen);
     socket.removeEventListener?.("message", onMessage);
@@ -273,7 +285,13 @@ async function establishParserSocket(
     await beforeHandshakeDeadline(queue.waitUntilOpen(signal), handshakeDeadline);
     socket.send(subscriptionRequest(1, "logs", sidecarFilter(filter)));
     socket.send(subscriptionRequest(2, "all"));
-    const acknowledgements = await readParserAcknowledgements(queue, config.queueCapacity, handshakeDeadline, signal);
+    const acknowledgements = await readParserAcknowledgements(
+      queue,
+      config.queueCapacity,
+      config.prefetchByteCapacity,
+      handshakeDeadline,
+      signal,
+    );
     return { socket, queue, close, ...acknowledgements };
   } catch (error) {
     close();
@@ -284,14 +302,15 @@ async function establishParserSocket(
 async function readParserAcknowledgements(
   queue: BoundedFrameQueue,
   prefetchCapacity: number,
+  prefetchByteCapacity: number,
   handshakeDeadline: number,
   signal?: AbortSignal,
 ): Promise<Pick<EstablishedParserSocket, "logsSubscription" | "allSubscription" | "prefetched">> {
-  const state: ParserHandshakeState = { prefetched: [] };
+  const state: ParserHandshakeState = { prefetched: new BoundedRingBuffer(prefetchCapacity) };
   while (!state.logsSubscription || !state.allSubscription) {
     const frame = await beforeHandshakeDeadline(queue.next(signal), handshakeDeadline);
     if (frame === undefined) throw new RpcError("TRANSPORT", "Monad parser closed during handshake");
-    observeParserHandshakeFrame(state, frame, prefetchCapacity);
+    observeParserHandshakeFrame(state, frame, prefetchCapacity, prefetchByteCapacity);
   }
   return {
     logsSubscription: state.logsSubscription,
@@ -303,10 +322,16 @@ async function readParserAcknowledgements(
 interface ParserHandshakeState {
   logsSubscription?: string;
   allSubscription?: string;
-  readonly prefetched: string[];
+  readonly prefetched: BoundedRingBuffer<string>;
+  prefetchedBytes?: number;
 }
 
-function observeParserHandshakeFrame(state: ParserHandshakeState, frame: string, prefetchCapacity: number): void {
+function observeParserHandshakeFrame(
+  state: ParserHandshakeState,
+  frame: string,
+  prefetchCapacity: number,
+  prefetchByteCapacity: number,
+): void {
   let parsed: unknown;
   try {
     parsed = JSON.parse(frame) as unknown;
@@ -320,9 +345,11 @@ function observeParserHandshakeFrame(state: ParserHandshakeState, frame: string,
     throw new RpcError("TRANSPORT", `Monad parser subscription error: ${JSON.stringify(value.error)}`);
 
   if (!("id" in value)) {
-    if (state.prefetched.length >= prefetchCapacity)
-      throw new RpcError("INVALID", "Monad parser handshake prefetch exceeded configured queue capacity");
+    const bytes = UTF8_ENCODER.encode(frame).byteLength;
+    if (state.prefetched.length >= prefetchCapacity || bytes > prefetchByteCapacity - (state.prefetchedBytes ?? 0))
+      throw new RpcError("INVALID", "Monad parser handshake prefetch count or byte budget exceeded");
     state.prefetched.push(frame);
+    state.prefetchedBytes = (state.prefetchedBytes ?? 0) + bytes;
     return;
   }
   if (typeof value.id !== "number" || !Number.isSafeInteger(value.id) || (value.id !== 1 && value.id !== 2))
@@ -336,6 +363,8 @@ function observeParserHandshakeFrame(state: ParserHandshakeState, frame: string,
     throw new RpcError("INVALID", `Monad parser acknowledgement ${value.id} changed subscription id`);
   state[key] = value.result;
 }
+
+const UTF8_ENCODER = new TextEncoder();
 
 function beforeHandshakeDeadline<T>(operation: Promise<T>, deadline: number): Promise<T> {
   const remaining = deadline - performance.now();
@@ -398,6 +427,11 @@ function parserHeadHash(value: Record<string, unknown>): Hex.Hex | undefined {
     header?.blockTag && typeof header.blockTag === "object" ? (header.blockTag as Record<string, unknown>) : undefined;
   const candidate = value.blockHash ?? blockTag?.id;
   return candidate === undefined || candidate === null ? undefined : parseHash(candidate, "head.blockHash");
+}
+
+function parserParentHash(value: Record<string, unknown>): Hex.Hex | undefined {
+  const candidate = value.parentHash;
+  return candidate === undefined || candidate === null ? undefined : parseHash(candidate, "head.parentHash");
 }
 
 function parseParserLog(

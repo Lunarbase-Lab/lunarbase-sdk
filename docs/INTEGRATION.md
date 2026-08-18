@@ -5,23 +5,31 @@
 Every integration uses the math package and may add the realtime client plus
 one network source:
 
-| Network     | Rust source                      | npm source                            |
-| ----------- | -------------------------------- | ------------------------------------- |
-| EVM or Base | lunarbase-pmm-v2-source-evm      | @lunarbase-lab/pmm-v2-source-evm      |
-| Monad       | lunarbase-pmm-v2-source-monad    | @lunarbase-lab/pmm-v2-source-monad    |
-| Arbitrum    | lunarbase-pmm-v2-source-arbitrum | @lunarbase-lab/pmm-v2-source-arbitrum |
+| Network     | Rust source                      | npm source                              |
+| ----------- | -------------------------------- | --------------------------------------- |
+| EVM or Base | lunarbase-pmm-v2-source-evm      | @lunarbase-lab/pmm-v2-source-evm        |
+| Monad       | Workspace/Git only               | Not published (workspace compatibility) |
+| Arbitrum    | lunarbase-pmm-v2-source-arbitrum | @lunarbase-lab/pmm-v2-source-arbitrum   |
 
-Use package version 0.3.1 consistently.
+Use package version 0.4.0 consistently.
+
+The Monad sources are not part of the registry release inventory. Rust protocol
+v2 uses pinned upstream Git dependencies. The TypeScript workspace adapter
+cannot access the native Monad Event Ring and does not implement protocol-v2
+identity, lifecycle, ACK, or resume semantics. Pin the SDK repository or build
+the workspace applications for Rust Monad deployments; do not use the
+compatibility-only TypeScript adapter as a production Event Ring source.
 
 ## Configure a deployment
 
-Provide the network, chain ID, Core and router addresses, expected router
-whitelist status, deployment block, implementation address, implementation
-runtime-code hash, and RPC endpoints. Use explicit lane assets when the
-deployment inventory is already known.
+Provide the network, chain ID, Core address, mandatory fee class, deployment
+block, implementation address, implementation runtime-code hash, and RPC
+endpoints. Use explicit lane assets when the deployment inventory is already
+known. A verified router is optional and only enables exact partner/treasury
+allocation.
 
 Validate these values in deployment automation. Do not accept quote-request
-overrides for deployment identity or router policy.
+overrides for deployment identity or fee policy.
 
 ## Start the client
 

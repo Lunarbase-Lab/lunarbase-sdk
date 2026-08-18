@@ -3,8 +3,9 @@
 use crate::metrics::Metrics;
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Request, State},
     http::{HeaderMap, StatusCode, header},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -12,11 +13,12 @@ use lunarbase_client::indexer::client::ConnectedQuoteClient;
 use lunarbase_client::indexer::errors::IndexerError;
 use lunarbase_client::indexer::quote_types::{ClientBatchQuote, ClientQuote};
 use lunarbase_client::model::{ChainCursor, Commitment};
-use lunarbase_math::{Address, B256, U256};
+use lunarbase_math::{Address, B256, FeeClass, U256};
 use lunarbase_math::{QuoteMode, QuoteOutcome, QuoteRequest, QuoteResult, UnavailableReason};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{future::Future, net::SocketAddr, str::FromStr, sync::Arc, time::Instant};
+use tokio::sync::Semaphore;
 
 #[derive(Clone)]
 struct ApiState {
@@ -24,24 +26,61 @@ struct ApiState {
     metrics: Arc<Metrics>,
 }
 
+#[derive(Clone)]
+struct AdmissionState {
+    permits: Arc<Semaphore>,
+    metrics: Arc<Metrics>,
+}
+
+impl AdmissionState {
+    fn try_acquire(
+        &self,
+    ) -> Result<tokio::sync::SemaphorePermit<'_>, tokio::sync::TryAcquireError> {
+        self.permits.try_acquire()
+    }
+}
+
 /// Serves all HTTP endpoints until `shutdown` resolves.
 pub async fn serve(
     bind: SocketAddr,
     client: Arc<ConnectedQuoteClient>,
     metrics: Arc<Metrics>,
+    max_in_flight_quotes: usize,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<(), std::io::Error> {
+    let admission = AdmissionState {
+        permits: Arc::new(Semaphore::new(max_in_flight_quotes)),
+        metrics: metrics.clone(),
+    };
+    let quote_routes = Router::new()
+        .route("/v1/quote", post(quote))
+        .route("/v1/quotes", post(quotes))
+        .route_layer(middleware::from_fn_with_state(admission, admit_quote));
     let router = Router::new()
         .route("/healthz", get(live))
         .route("/readyz", get(ready))
         .route("/metrics", get(prometheus))
-        .route("/v1/quote", post(quote))
-        .route("/v1/quotes", post(quotes))
+        .merge(quote_routes)
         .with_state(ApiState { client, metrics });
     let listener = tokio::net::TcpListener::bind(bind).await?;
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown)
         .await
+}
+
+async fn admit_quote(
+    State(state): State<AdmissionState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let Ok(_permit) = state.try_acquire() else {
+        state.metrics.quote_overload_rejection();
+        return api_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "quote service is at its concurrency limit".into(),
+        );
+    };
+    next.run(request).await
 }
 
 async fn live() -> impl IntoResponse {
@@ -58,6 +97,8 @@ async fn ready(State(state): State<ApiState>) -> Response {
                 "executionBlockNumber": health.execution_block_number,
                 "implementationCodeHash": hash_hex(health.implementation_code_hash),
                 "mathCompatibilityVersion": health.math_compatibility_version,
+                "feeClass": fee_class_name(health.fee_class),
+                "verifiedRouter": health.verified_router.map(address_hex),
             })),
         )
             .into_response(),
@@ -68,6 +109,8 @@ async fn ready(State(state): State<ApiState>) -> Response {
                 "cursor": health.cursor.as_ref().map(ApiCursor::from),
                 "implementationCodeHash": hash_hex(health.implementation_code_hash),
                 "mathCompatibilityVersion": health.math_compatibility_version,
+                "feeClass": fee_class_name(health.fee_class),
+                "verifiedRouter": health.verified_router.map(address_hex),
             })),
         )
             .into_response(),
@@ -189,7 +232,9 @@ struct ApiQuoteResponse {
     cursor: ApiCursor,
     execution_block_number: u64,
     implementation_code_hash: String,
-    math_compatibility_version: String,
+    math_compatibility_version: &'static str,
+    fee_class: &'static str,
+    verified_router: Option<String>,
     result: ApiQuoteOutcome,
 }
 
@@ -200,6 +245,8 @@ impl From<ClientQuote> for ApiQuoteResponse {
             execution_block_number: quote.execution_block_number,
             implementation_code_hash: hash_hex(quote.implementation_code_hash),
             math_compatibility_version: quote.math_compatibility_version,
+            fee_class: fee_class_name(quote.fee_class),
+            verified_router: quote.verified_router.map(address_hex),
             result: ApiQuoteOutcome::from(quote.outcome),
         }
     }
@@ -211,7 +258,9 @@ struct ApiBatchResponse {
     cursor: ApiCursor,
     execution_block_number: u64,
     implementation_code_hash: String,
-    math_compatibility_version: String,
+    math_compatibility_version: &'static str,
+    fee_class: &'static str,
+    verified_router: Option<String>,
     results: Vec<ApiQuoteOutcome>,
 }
 
@@ -222,6 +271,8 @@ impl From<ClientBatchQuote> for ApiBatchResponse {
             execution_block_number: batch.execution_block_number,
             implementation_code_hash: hash_hex(batch.implementation_code_hash),
             math_compatibility_version: batch.math_compatibility_version,
+            fee_class: fee_class_name(batch.fee_class),
+            verified_router: batch.verified_router.map(address_hex),
             results: batch
                 .outcomes
                 .into_iter()
@@ -277,13 +328,19 @@ enum ApiQuoteOutcome {
         amount_out: String,
         fee_asset: String,
         fee_amount: String,
-        partner_fee: String,
-        treasury_fee: String,
+        fee_allocation: Option<ApiFeeAllocation>,
     },
     Unavailable {
         reason: &'static str,
         asset: Option<String>,
     },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApiFeeAllocation {
+    partner_fee: String,
+    treasury_fee: String,
 }
 
 impl From<QuoteOutcome> for ApiQuoteOutcome {
@@ -301,8 +358,10 @@ fn available(result: QuoteResult) -> ApiQuoteOutcome {
         amount_out: result.amount_out.to_string(),
         fee_asset: address_hex(result.fee_asset),
         fee_amount: result.fee_amount.to_string(),
-        partner_fee: result.partner_fee.to_string(),
-        treasury_fee: result.treasury_fee.to_string(),
+        fee_allocation: result.fee_allocation.map(|allocation| ApiFeeAllocation {
+            partner_fee: allocation.partner_fee.to_string(),
+            treasury_fee: allocation.treasury_fee.to_string(),
+        }),
     }
 }
 
@@ -357,10 +416,34 @@ fn hash_hex(value: B256) -> String {
     format!("{value:#x}")
 }
 
+fn fee_class_name(value: FeeClass) -> &'static str {
+    match value {
+        FeeClass::Whitelisted => "whitelisted",
+        FeeClass::NonWhitelisted => "nonWhitelisted",
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::api::{ApiQuoteOutcome, ApiQuoteRequest};
+    use crate::{
+        api::{AdmissionState, ApiFeeAllocation, ApiQuoteOutcome, ApiQuoteRequest},
+        metrics::Metrics,
+    };
     use serde_json::json;
+    use std::sync::Arc;
+    use tokio::sync::Semaphore;
+
+    #[test]
+    fn admission_rejects_instead_of_queueing() {
+        let admission = AdmissionState {
+            permits: Arc::new(Semaphore::new(1)),
+            metrics: Arc::new(Metrics::default()),
+        };
+        let permit = admission.try_acquire().unwrap();
+        assert!(admission.try_acquire().is_err());
+        drop(permit);
+        assert!(admission.try_acquire().is_ok());
+    }
 
     #[test]
     fn outcome_fields_are_camel_case() {
@@ -369,13 +452,15 @@ mod tests {
             amount_out: "2".into(),
             fee_asset: "0x03".into(),
             fee_amount: "4".into(),
-            partner_fee: "5".into(),
-            treasury_fee: "6".into(),
+            fee_allocation: Some(ApiFeeAllocation {
+                partner_fee: "5".into(),
+                treasury_fee: "6".into(),
+            }),
         })
         .unwrap();
         assert_eq!(value["status"], "available");
         assert_eq!(value["amountIn"], "1");
-        assert_eq!(value["treasuryFee"], "6");
+        assert_eq!(value["feeAllocation"]["treasuryFee"], "6");
         assert!(value.get("amount_in").is_none());
     }
 

@@ -2,3 +2,4 @@
 export * from "./rpc.js";
 export * from "./ws.js";
 export * from "./base.js";
+export * from "./fork.js";

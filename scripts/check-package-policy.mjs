@@ -9,12 +9,13 @@ const expectedNpmPackages = new Map([
   ["source-monad", "@lunarbase-lab/pmm-v2-source-monad"],
 ]);
 
+const privateNpmPackages = new Set(["source-monad"]);
+
 const expectedCargoPackages = new Map([
   ["lunarbase-client", "lunarbase-pmm-v2-client"],
   ["lunarbase-math", "lunarbase-pmm-v2-math"],
   ["lunarbase-source-arbitrum", "lunarbase-pmm-v2-source-arbitrum"],
   ["lunarbase-source-evm", "lunarbase-pmm-v2-source-evm"],
-  ["lunarbase-source-monad", "lunarbase-pmm-v2-source-monad"],
 ]);
 
 const expectedNpmKeywords = new Map([
@@ -38,13 +39,6 @@ const expectedCargoMetadata = new Map([
     "lunarbase-source-evm",
     {
       keywords: ["lunarbase", "evm", "base", "rpc", "websocket"],
-      categories: ["api-bindings", "asynchronous", "network-programming"],
-    },
-  ],
-  [
-    "lunarbase-source-monad",
-    {
-      keywords: ["lunarbase", "monad", "evm", "rpc", "websocket"],
       categories: ["api-bindings", "asynchronous", "network-programming"],
     },
   ],
@@ -90,7 +84,7 @@ export function checkPackagePolicy({ root, addFailure, checkWording, repoPath })
   const expectedDirectories = [...expectedNpmPackages.keys()].sort();
   if (packageDirectories.join("\n") !== expectedDirectories.join("\n")) {
     addFailure(
-      `public npm package directories must be exactly: ${expectedDirectories.join(", ")}; found: ${packageDirectories.join(", ")}`,
+      `workspace npm package directories must be exactly: ${expectedDirectories.join(", ")}; found: ${packageDirectories.join(", ")}`,
     );
   }
 
@@ -109,11 +103,15 @@ export function checkPackagePolicy({ root, addFailure, checkWording, repoPath })
     if (manifest.name !== expectedName) {
       addFailure(`${repoPath(manifestPath)}: npm package name must be ${expectedName}; found ${String(manifest.name)}`);
     }
-    if (manifest.private === true) {
-      addFailure(`${repoPath(manifestPath)}: public npm package cannot be private`);
+    const expectedPrivate = privateNpmPackages.has(directory);
+    if ((manifest.private === true) !== expectedPrivate) {
+      addFailure(`${repoPath(manifestPath)}: private must be ${String(expectedPrivate)}`);
     }
-    if (manifest.publishConfig?.access !== "public") {
-      addFailure(`${repoPath(manifestPath)}: publishConfig.access must be public`);
+    if (expectedPrivate && manifest.publishConfig !== undefined) {
+      addFailure(`${repoPath(manifestPath)}: private workspace package cannot define publishConfig`);
+    }
+    if (!expectedPrivate && manifest.publishConfig?.access !== "public") {
+      addFailure(`${repoPath(manifestPath)}: public package publishConfig.access must be public`);
     }
     if (JSON.stringify(manifest.keywords) !== JSON.stringify(expectedNpmKeywords.get(directory))) {
       addFailure(`${repoPath(manifestPath)}: public keywords do not match the package registry profile`);

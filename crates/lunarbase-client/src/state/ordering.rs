@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 
 type CursorKey = (u64, u32, u32, u64, u32, u8);
 
+const DEFAULT_BYTES_PER_UPDATE: usize = 64 * 1024;
+
 /// Bounded single-writer reorder buffer for transport/decode work.
 ///
 /// Network sources may decode messages concurrently, but the reducer must
@@ -15,6 +17,10 @@ type CursorKey = (u64, u32, u32, u64, u32, u8);
 pub struct CursorReorderBuffer {
     /// Maximum number of updates retained before continuity fails closed.
     capacity: usize,
+    /// Maximum retained memory charged across all pending updates.
+    byte_capacity: usize,
+    /// Current conservative retained-memory charge.
+    pending_bytes: usize,
     /// Updates indexed by normalized deterministic source position.
     pending: BTreeMap<CursorKey, ChainUpdate>,
     /// Sticky continuity-failure flag cleared only by constructing a new buffer.
@@ -24,13 +30,21 @@ pub struct CursorReorderBuffer {
 impl CursorReorderBuffer {
     /// Creates a bounded deterministic reorder buffer.
     pub fn new(capacity: usize) -> Result<Self, SourceError> {
-        if capacity == 0 {
+        let byte_capacity = capacity.saturating_mul(DEFAULT_BYTES_PER_UPDATE);
+        Self::with_limits(capacity, byte_capacity)
+    }
+
+    /// Creates a deterministic reorder buffer bounded by count and bytes.
+    pub fn with_limits(capacity: usize, byte_capacity: usize) -> Result<Self, SourceError> {
+        if capacity == 0 || byte_capacity == 0 {
             return Err(SourceError::Unavailable(
-                "reorder buffer capacity must be non-zero".into(),
+                "reorder buffer count and byte capacities must be non-zero".into(),
             ));
         }
         Ok(Self {
             capacity,
+            byte_capacity,
+            pending_bytes: 0,
             pending: BTreeMap::new(),
             poisoned: false,
         })
@@ -46,6 +60,11 @@ impl CursorReorderBuffer {
         self.pending.is_empty()
     }
 
+    /// Returns the conservative retained-memory charge of pending updates.
+    pub fn retained_bytes(&self) -> usize {
+        self.pending_bytes
+    }
+
     /// Returns whether the buffer has entered fail-closed state.
     pub fn is_poisoned(&self) -> bool {
         self.poisoned
@@ -57,7 +76,7 @@ impl CursorReorderBuffer {
     ///
     /// Returns a gap for overflow, conflicting payloads at one cursor, or any
     /// insertion after the buffer has already been poisoned.
-    pub fn push(&mut self, update: ChainUpdate) -> Result<(), SourceError> {
+    pub fn push(&mut self, mut update: ChainUpdate) -> Result<(), SourceError> {
         if self.poisoned {
             return Err(SourceError::Gap(
                 "reorder buffer is poisoned; resnapshot required".into(),
@@ -68,12 +87,18 @@ impl CursorReorderBuffer {
             self.poisoned = true;
             return Err(SourceError::Gap("multiple updates share one cursor".into()));
         }
-        if self.pending.len() >= self.capacity {
+        let update_bytes = update.retained_bytes();
+        if self.pending.len() >= self.capacity
+            || update_bytes > self.byte_capacity.saturating_sub(self.pending_bytes)
+        {
             self.poisoned = true;
             return Err(SourceError::Gap(
-                "reorder buffer overflow; resnapshot required".into(),
+                "reorder buffer count or byte budget exceeded; resnapshot required".into(),
             ));
         }
+        update.normalize_for_retention();
+        debug_assert_eq!(update_bytes, update.retained_bytes());
+        self.pending_bytes += update_bytes;
         self.pending.insert(key, update);
         Ok(())
     }
@@ -86,24 +111,32 @@ impl CursorReorderBuffer {
         let key = watermark_key(watermark);
         let keys: Vec<_> = self.pending.range(..=key).map(|(key, _)| *key).collect();
         keys.into_iter()
-            .filter_map(|key| self.pending.remove(&key))
+            .filter_map(|key| self.remove(&key))
             .collect()
     }
 
     /// Releases every buffered update in deterministic key order.
     pub fn drain_all(&mut self) -> Vec<ChainUpdate> {
+        self.pending_bytes = 0;
         std::mem::take(&mut self.pending).into_values().collect()
+    }
+
+    fn remove(&mut self, key: &CursorKey) -> Option<ChainUpdate> {
+        let update = self.pending.remove(key)?;
+        self.pending_bytes = self.pending_bytes.saturating_sub(update.retained_bytes());
+        Some(update)
     }
 }
 
 fn update_key(update: &ChainUpdate) -> CursorKey {
     match update {
-        ChainUpdate::Head(cursor) => cursor_key(cursor, 0),
+        ChainUpdate::Head(head) => cursor_key(&head.cursor, 0),
         ChainUpdate::Log(log) => cursor_key(&log.cursor, 1),
-        ChainUpdate::Reorg { new_head, .. } => cursor_key(new_head, 2),
+        ChainUpdate::Correction(correction) => branch_end_key(&correction.new_tip.cursor, 2),
+        ChainUpdate::Reorg { new_head, .. } => branch_end_key(&new_head.cursor, 3),
         ChainUpdate::Gap { cursor, .. } => cursor
             .as_ref()
-            .map_or((u64::MAX, 0, 0, 0, 0, 3), |cursor| cursor_key(cursor, 3)),
+            .map_or((u64::MAX, 0, 0, 0, 0, 4), |cursor| cursor_key(cursor, 4)),
     }
 }
 
@@ -123,6 +156,17 @@ fn watermark_key(cursor: &ChainCursor) -> CursorKey {
     }
 }
 
+fn branch_end_key(cursor: &ChainCursor, rank: u8) -> CursorKey {
+    (
+        cursor.block_number,
+        u32::MAX,
+        u32::MAX,
+        u64::MAX,
+        u32::MAX,
+        rank,
+    )
+}
+
 fn cursor_key(cursor: &ChainCursor, rank: u8) -> CursorKey {
     let (block, transaction, log, source_sequence, source_sub_index) = cursor.event_order();
     (
@@ -137,7 +181,7 @@ fn cursor_key(cursor: &ChainCursor, rank: u8) -> CursorKey {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{ChainCursor, ChainUpdate, Commitment, ContractLog};
+    use crate::model::{BlockRef, ChainCursor, ChainUpdate, Commitment, ContractLog};
     use crate::state::ordering::CursorReorderBuffer;
     use lunarbase_math::{Address, Bytes};
 
@@ -155,23 +199,27 @@ mod tests {
         }
     }
 
+    fn head(cursor: ChainCursor) -> ChainUpdate {
+        ChainUpdate::Head(BlockRef::new(cursor, None))
+    }
+
     #[test]
     fn reorders_unique_updates_without_eviction() {
         let mut buffer = CursorReorderBuffer::new(3).unwrap();
-        let later = ChainUpdate::Head(cursor(11, None, None));
-        let earlier = ChainUpdate::Head(cursor(10, None, None));
+        let later = head(cursor(11, None, None));
+        let earlier = head(cursor(10, None, None));
         buffer.push(later.clone()).unwrap();
         buffer.push(earlier.clone()).unwrap();
         assert_eq!(
             buffer.drain_all(),
-            vec![ChainUpdate::Head(cursor(10, None, None)), later,]
+            vec![head(cursor(10, None, None)), later,]
         );
     }
 
     #[test]
     fn repeated_cursor_requires_canonical_recovery() {
         let mut buffer = CursorReorderBuffer::new(3).unwrap();
-        let update = ChainUpdate::Head(cursor(10, None, None));
+        let update = head(cursor(10, None, None));
         buffer.push(update.clone()).unwrap();
         assert!(buffer.push(update).is_err());
         assert!(buffer.is_poisoned());
@@ -189,12 +237,10 @@ mod tests {
             cursor: cursor(10, Some(3), Some(7)),
         });
         buffer.push(log.clone()).unwrap();
-        buffer
-            .push(ChainUpdate::Head(cursor(10, None, None)))
-            .unwrap();
+        buffer.push(head(cursor(10, None, None))).unwrap();
         assert_eq!(
             buffer.drain_through(&cursor(10, None, None)),
-            vec![ChainUpdate::Head(cursor(10, None, None)), log]
+            vec![head(cursor(10, None, None)), log]
         );
         assert!(buffer.is_empty());
     }
@@ -202,19 +248,50 @@ mod tests {
     #[test]
     fn overflow_poison_is_sticky() {
         let mut buffer = CursorReorderBuffer::new(1).unwrap();
-        buffer
-            .push(ChainUpdate::Head(cursor(1, None, None)))
-            .unwrap();
-        assert!(
-            buffer
-                .push(ChainUpdate::Head(cursor(2, None, None)))
-                .is_err()
-        );
+        buffer.push(head(cursor(1, None, None))).unwrap();
+        assert!(buffer.push(head(cursor(2, None, None))).is_err());
         assert!(buffer.is_poisoned());
-        assert!(
-            buffer
-                .push(ChainUpdate::Head(cursor(3, None, None)))
-                .is_err()
-        );
+        assert!(buffer.push(head(cursor(3, None, None))).is_err());
+    }
+
+    #[test]
+    fn byte_budget_is_released_on_drain_and_overflow_fails_closed() {
+        let first = head(cursor(1, None, None));
+        let bytes = first.retained_bytes();
+        let mut buffer = CursorReorderBuffer::with_limits(10, bytes).unwrap();
+        buffer.push(first.clone()).unwrap();
+        assert_eq!(buffer.retained_bytes(), bytes);
+        assert_eq!(buffer.drain_all(), vec![first]);
+        assert_eq!(buffer.retained_bytes(), 0);
+
+        buffer.push(head(cursor(2, None, None))).unwrap();
+        assert!(buffer.push(head(cursor(3, None, None))).is_err());
+        assert!(buffer.is_poisoned());
+    }
+
+    #[test]
+    fn byte_budget_retains_only_the_visible_tail_slice() {
+        let backing = Bytes::from(vec![0x5a; 1 << 20]);
+        let data = backing.slice(backing.len() - 1..);
+        drop(backing);
+        let update = ChainUpdate::Log(ContractLog {
+            address: Address::ZERO,
+            transaction_hash: None,
+            topics: Vec::new(),
+            data,
+            removed: false,
+            cursor: cursor(10, Some(0), Some(0)),
+        });
+        let logical_bytes = update.retained_bytes();
+        let mut buffer = CursorReorderBuffer::with_limits(1, logical_bytes).unwrap();
+
+        buffer.push(update).unwrap();
+        assert_eq!(buffer.retained_bytes(), logical_bytes);
+        let ChainUpdate::Log(log) = buffer.drain_all().pop().unwrap() else {
+            panic!("queued update must remain a log");
+        };
+        assert_eq!(log.data.as_ref(), [0x5a]);
+        let data: Vec<u8> = log.data.into();
+        assert_eq!(data.capacity(), data.len());
     }
 }

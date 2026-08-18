@@ -2,20 +2,19 @@
 
 use crate::bootstrap::BootstrapSnapshot;
 use crate::indexer::client::ConnectedQuoteClient;
-use crate::indexer::client_types::ClientConnectConfig;
+use crate::indexer::client_types::{ClientConnectConfig, CoreEventSinkPolicy};
 use crate::indexer::engine::QuoteIndexer;
-use crate::indexer::errors::{ClientRuntimeEvent, IndexerError};
+use crate::indexer::errors::IndexerError;
 use crate::model::{
-    BackfillRequest, ChainCursor, ChainUpdate, Checkpoint, Commitment, ContractFilter, ContractLog,
-    DeploymentConfig, MATH_COMPATIBILITY_VERSION, Network, SourceError,
+    BackfillRequest, BlockRef, ChainCursor, ChainUpdate, Checkpoint, Commitment, ContractFilter,
+    ContractLog, DeploymentConfig, MATH_COMPATIBILITY_VERSION, Network, SourceError,
 };
-use crate::protocol::abi::quote_critical_topics;
+use crate::protocol::abi::{TOPIC_LANE_ADDED, quote_critical_topics};
 use crate::source::{ChainDataSource, SourceStream};
 use crate::state::reducer::QuoteReducer;
 use lunarbase_math::arithmetic::WAD;
 use lunarbase_math::slot0::{LaneSlot0, encode_lane_slot0};
-use lunarbase_math::{Address, B256, Bytes, U256};
-use lunarbase_math::{LaneState, QuoteMode, QuoteRequest, QuoteState};
+use lunarbase_math::{Address, B256, Bytes, LaneState, QuoteMode, QuoteRequest, QuoteState, U256};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -125,40 +124,16 @@ impl ChainDataSource for MockSource {
 
     async fn canonical_head(&self) -> Result<ChainCursor, SourceError> {
         self.canonical_calls.fetch_add(1, Ordering::Relaxed);
-        Ok(cursor(100, Commitment::Finalized))
+        Ok(cursor(
+            self.snapshot_block.load(Ordering::Relaxed) as u64,
+            Commitment::Finalized,
+        ))
     }
 
     async fn validate_checkpoint(&self, _checkpoint: &Checkpoint) -> Result<bool, SourceError> {
         self.validate_calls.fetch_add(1, Ordering::Relaxed);
         Ok(self.checkpoint_valid.load(Ordering::Relaxed))
     }
-}
-
-#[tokio::test]
-async fn quote_and_batch_never_call_the_source() {
-    let source = Arc::new(MockSource::new(None));
-    let client = ConnectedQuoteClient::connect(config(), source.clone(), None)
-        .await
-        .unwrap();
-    let calls = source_calls(&source);
-    let single = client.quote(&request()).unwrap();
-    let batch = client
-        .quote_many(&[request(), request(), request()])
-        .unwrap();
-    assert_eq!(batch.cursor, single.cursor);
-    assert!(
-        batch
-            .outcomes
-            .iter()
-            .all(|outcome| outcome == &single.outcome)
-    );
-    assert_eq!(source_calls(&source), calls);
-    let oversized = vec![request(); 257];
-    assert!(matches!(
-        client.quote_many(&oversized),
-        Err(IndexerError::InvalidRequest(_))
-    ));
-    client.shutdown().await;
 }
 
 #[tokio::test]
@@ -219,28 +194,31 @@ async fn checkpoint_recovery_delivers_each_backfill_log_once() {
 }
 
 #[tokio::test]
-async fn closed_event_sink_is_fatal_during_checkpoint_recovery() {
+async fn closed_event_observer_does_not_block_checkpoint_recovery() {
     let checkpoint = checkpoint_before_recovery().await;
     let source = Arc::new(MockSource::new(None));
     source.set_backfill_logs(vec![unknown_log(100)]);
     let (event_sender, event_receiver) = mpsc::channel(1);
     drop(event_receiver);
 
-    let result = ConnectedQuoteClient::connect_with_event_sink(
+    let client = ConnectedQuoteClient::connect_with_event_sink(
         config(),
         source.clone(),
         Some(checkpoint),
         event_sender,
     )
-    .await;
+    .await
+    .unwrap();
 
-    assert!(matches!(result, Err(IndexerError::EventSinkClosed)));
+    assert_eq!(client.runtime_stats().event_observer_drops, 1);
+    assert!(client.is_ready());
     assert_eq!(source.backfill_calls.load(Ordering::Relaxed), 1);
     assert_eq!(
         source.snapshot_calls.load(Ordering::Relaxed),
         0,
-        "fatal sink closure must not fall back to a snapshot"
+        "observer closure must not fall back to a snapshot"
     );
+    client.shutdown().await;
 }
 
 async fn checkpoint_before_recovery() -> Checkpoint {
@@ -269,7 +247,10 @@ async fn subscription_event_during_snapshot_is_applied_after_handoff() {
     wait_until(|| source.subscribe_calls.load(Ordering::Relaxed) == 1).await;
     let log = unknown_log(101);
     source.publish(ChainUpdate::Log(log.clone()));
-    source.publish(ChainUpdate::Head(cursor(101, Commitment::Realtime)));
+    source.publish(ChainUpdate::Head(BlockRef::new(
+        cursor(101, Commitment::Realtime),
+        None,
+    )));
     assert!(
         tokio::time::timeout(Duration::from_millis(20), event_receiver.recv())
             .await
@@ -290,7 +271,7 @@ async fn subscription_event_during_snapshot_is_applied_after_handoff() {
 }
 
 #[tokio::test]
-async fn closed_required_event_sink_aborts_bootstrap() {
+async fn closed_event_observer_does_not_abort_bootstrap() {
     let gate = Arc::new(Notify::new());
     let source = Arc::new(MockSource::new(Some(gate.clone())));
     let (event_sender, event_receiver) = mpsc::channel(1);
@@ -305,14 +286,10 @@ async fn closed_required_event_sink_aborts_bootstrap() {
     source.publish(ChainUpdate::Log(unknown_log(101)));
     gate.notify_waiters();
 
-    let error = match task.await.unwrap() {
-        Ok(client) => {
-            client.shutdown().await;
-            panic!("closed required event sink unexpectedly connected")
-        }
-        Err(error) => error,
-    };
-    assert!(matches!(error, IndexerError::EventSinkClosed));
+    let client = task.await.unwrap().unwrap();
+    assert_eq!(client.runtime_stats().event_observer_drops, 1);
+    assert!(client.is_ready());
+    client.shutdown().await;
 }
 
 #[tokio::test]
@@ -408,14 +385,13 @@ async fn recovery_emits_backfill_before_buffered_live_logs_once() {
 }
 
 #[tokio::test]
-async fn closed_event_sink_is_fatal_during_live_gap_recovery() {
+async fn closed_event_observer_does_not_block_live_gap_recovery() {
     let source = Arc::new(MockSource::new(None));
     let (event_sender, event_receiver) = mpsc::channel(1);
     let client =
         ConnectedQuoteClient::connect_with_event_sink(config(), source.clone(), None, event_sender)
             .await
             .unwrap();
-    let mut runtime_events = client.subscribe_runtime_events();
     source.set_snapshot_block(101);
     source.set_backfill_logs(vec![unknown_log(101)]);
     drop(event_receiver);
@@ -423,23 +399,13 @@ async fn closed_event_sink_is_fatal_during_live_gap_recovery() {
 
     source.publish(ChainUpdate::Gap {
         cursor: None,
-        reason: "intentional fatal event replay gap".into(),
+        reason: "intentional event replay gap".into(),
     });
 
-    tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            if matches!(
-                runtime_events.recv().await.unwrap(),
-                ClientRuntimeEvent::BackgroundTaskStopped { task: "reducer" }
-            ) {
-                break;
-            }
-        }
-    })
-    .await
-    .unwrap();
-    assert!(!client.is_ready());
-    assert_eq!(client.runtime_stats().recovery_failures, 1);
+    wait_until(|| client.runtime_stats().recoveries >= 1).await;
+    assert!(client.is_ready());
+    assert_eq!(client.runtime_stats().recovery_failures, 0);
+    assert_eq!(client.runtime_stats().event_observer_drops, 1);
     client.shutdown().await;
 }
 
@@ -480,7 +446,11 @@ fn unknown_log(block: u64) -> ContractLog {
 
 #[test]
 fn realtime_source_sequence_allows_progressive_hashes_at_one_height() {
-    let mut reducer = QuoteReducer::new(QuoteState::default(), ROUTER);
+    let mut reducer = QuoteReducer::new(
+        QuoteState::default(),
+        lunarbase_math::FeeClass::Whitelisted,
+        None,
+    );
     let mut first = cursor(101, Commitment::Realtime);
     first.source_sequence = Some(1);
     reducer.bootstrap(first);
@@ -502,7 +472,7 @@ fn same_height_handoff_with_another_hash_fails_closed() {
     conflicting.source_sequence = Some(1);
 
     assert!(matches!(
-        indexer.apply_handoff(vec![ChainUpdate::Head(conflicting)]),
+        indexer.apply_handoff(vec![ChainUpdate::Head(BlockRef::new(conflicting, None))]),
         Err(IndexerError::Reducer(
             crate::state::reducer::ReducerError::BlockHashMismatch
         ))
@@ -583,7 +553,22 @@ fn same_block_source_buffer_log_conflicting_with_snapshot_fails_closed() {
     ));
 }
 
+mod event_sink_policy;
+
 mod checkpoint_validation;
+
+mod fee_policy;
+
+mod source_identity;
+
+mod lifecycle;
+
+mod correction_ancestor;
+mod correction_regressions;
+mod optimistic_correction;
+mod quote_path;
+mod recovery_correction;
+mod recovery_watermark;
 
 fn config() -> ClientConnectConfig {
     ClientConnectConfig {
@@ -591,8 +576,8 @@ fn config() -> ClientConnectConfig {
             network: Network::Base,
             chain_id: 8453,
             core: CORE,
-            router: ROUTER,
-            expect_whitelisted: true,
+            fee_class: lunarbase_math::FeeClass::Whitelisted,
+            verified_router: None,
             deployment_block: 1,
             expected_implementation: Address::new([8; 20]),
             expected_implementation_code_hash: B256::new([7; 32]),
@@ -604,8 +589,10 @@ fn config() -> ClientConnectConfig {
             topics: quote_critical_topics().to_vec(),
         },
         buffer_capacity: 16,
+        buffer_byte_capacity: 1024 * 1024,
         reconnect_delay: Duration::from_millis(10),
         source_stall_timeout: Duration::from_secs(1),
+        source_operation_timeout: Duration::from_secs(1),
     }
 }
 
@@ -628,6 +615,7 @@ fn snapshot(block: u64) -> BootstrapSnapshot {
         cursor: cursor(block, Commitment::Finalized),
         implementation: Address::new([8; 20]),
         implementation_code_hash: B256::new([7; 32]),
+        verified_router: None,
     }
 }
 
@@ -652,16 +640,6 @@ fn request() -> QuoteRequest {
         amount: U256::from(1_000),
         mode: QuoteMode::ExactIn,
     }
-}
-
-fn source_calls(source: &MockSource) -> [usize; 5] {
-    [
-        source.snapshot_calls.load(Ordering::Relaxed),
-        source.backfill_calls.load(Ordering::Relaxed),
-        source.subscribe_calls.load(Ordering::Relaxed),
-        source.canonical_calls.load(Ordering::Relaxed),
-        source.validate_calls.load(Ordering::Relaxed),
-    ]
 }
 
 async fn wait_until(mut predicate: impl FnMut() -> bool) {

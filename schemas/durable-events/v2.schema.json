@@ -1,0 +1,366 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LunarBase durable Redis Stream record v2",
+  "description": "Exact UTF-8 field map of one v2 Redis Stream entry. Numeric values remain canonical decimal strings.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "recordType", "operation", "recordId", "chainId", "core"],
+  "properties": {
+    "schemaVersion": {
+      "const": "2"
+    },
+    "recordType": {
+      "enum": ["log", "reorg", "gap"]
+    },
+    "operation": {
+      "enum": ["applied", "reverted", "begin", "commit", "halt"]
+    },
+    "recordId": {
+      "$ref": "#/$defs/id"
+    },
+    "chainId": {
+      "$ref": "#/$defs/uint64"
+    },
+    "core": {
+      "$ref": "#/$defs/address"
+    },
+    "logicalLogId": {
+      "$ref": "#/$defs/id"
+    },
+    "lifecycleRevision": {
+      "$ref": "#/$defs/positive"
+    },
+    "commitment": {
+      "enum": ["realtime", "block-ordered", "finalized"]
+    },
+    "blockNumber": {
+      "$ref": "#/$defs/uint64"
+    },
+    "executionBlockNumber": {
+      "$ref": "#/$defs/uint64"
+    },
+    "blockHash": {
+      "$ref": "#/$defs/hash"
+    },
+    "parentHash": {
+      "$ref": "#/$defs/hash"
+    },
+    "transactionHash": {
+      "$ref": "#/$defs/hash"
+    },
+    "transactionIndex": {
+      "$ref": "#/$defs/uint32"
+    },
+    "logIndex": {
+      "$ref": "#/$defs/uint32"
+    },
+    "sourceSequence": {
+      "$ref": "#/$defs/uint64"
+    },
+    "sourceSubIndex": {
+      "$ref": "#/$defs/uint32"
+    },
+    "topics": {
+      "type": "string",
+      "contentMediaType": "application/json",
+      "contentSchema": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 4,
+        "items": {
+          "$ref": "#/$defs/hash"
+        }
+      }
+    },
+    "data": {
+      "$ref": "#/$defs/bytes"
+    },
+    "reorgId": {
+      "$ref": "#/$defs/id"
+    },
+    "ancestorBlockNumber": {
+      "$ref": "#/$defs/uint64"
+    },
+    "ancestorExecutionBlockNumber": {
+      "$ref": "#/$defs/uint64"
+    },
+    "ancestorBlockHash": {
+      "$ref": "#/$defs/hash"
+    },
+    "oldTipBlockNumber": {
+      "$ref": "#/$defs/uint64"
+    },
+    "oldTipExecutionBlockNumber": {
+      "$ref": "#/$defs/uint64"
+    },
+    "oldTipBlockHash": {
+      "$ref": "#/$defs/hash"
+    },
+    "oldTipParentHash": {
+      "$ref": "#/$defs/hash"
+    },
+    "newTipBlockNumber": {
+      "$ref": "#/$defs/uint64"
+    },
+    "newTipExecutionBlockNumber": {
+      "$ref": "#/$defs/uint64"
+    },
+    "newTipBlockHash": {
+      "$ref": "#/$defs/hash"
+    },
+    "newTipParentHash": {
+      "$ref": "#/$defs/hash"
+    },
+    "finalizedBlockNumber": {
+      "$ref": "#/$defs/uint64"
+    },
+    "finalizedBlockHash": {
+      "$ref": "#/$defs/hash"
+    },
+    "revertedLogCount": {
+      "$ref": "#/$defs/uint64"
+    },
+    "appliedLogCount": {
+      "$ref": "#/$defs/uint64"
+    },
+    "gapReason": {
+      "enum": [
+        "ancestor-outside-window",
+        "finalized-conflict",
+        "identity-mismatch",
+        "invalid-order",
+        "journal-budget",
+        "source-gap"
+      ]
+    },
+    "gapDetails": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "lastTrustedBlockNumber": {
+      "$ref": "#/$defs/uint64"
+    },
+    "lastTrustedBlockHash": {
+      "$ref": "#/$defs/hash"
+    },
+    "firstAffectedBlockNumber": {
+      "$ref": "#/$defs/uint64"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "recordType": {
+            "const": "log"
+          }
+        },
+        "required": ["recordType"]
+      },
+      "then": {
+        "required": [
+          "logicalLogId",
+          "lifecycleRevision",
+          "commitment",
+          "blockNumber",
+          "executionBlockNumber",
+          "blockHash",
+          "transactionHash",
+          "transactionIndex",
+          "logIndex",
+          "topics",
+          "data"
+        ],
+        "properties": {
+          "operation": {
+            "enum": ["applied", "reverted"]
+          }
+        },
+        "propertyNames": {
+          "not": {
+            "enum": [
+              "ancestorBlockNumber",
+              "ancestorExecutionBlockNumber",
+              "ancestorBlockHash",
+              "oldTipBlockNumber",
+              "oldTipExecutionBlockNumber",
+              "oldTipBlockHash",
+              "oldTipParentHash",
+              "newTipBlockNumber",
+              "newTipExecutionBlockNumber",
+              "newTipBlockHash",
+              "newTipParentHash",
+              "finalizedBlockNumber",
+              "finalizedBlockHash",
+              "revertedLogCount",
+              "appliedLogCount",
+              "gapReason",
+              "gapDetails",
+              "lastTrustedBlockNumber",
+              "lastTrustedBlockHash",
+              "firstAffectedBlockNumber"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "recordType": {
+            "const": "reorg"
+          }
+        },
+        "required": ["recordType"]
+      },
+      "then": {
+        "required": [
+          "reorgId",
+          "ancestorBlockNumber",
+          "ancestorExecutionBlockNumber",
+          "ancestorBlockHash",
+          "oldTipBlockNumber",
+          "oldTipExecutionBlockNumber",
+          "oldTipBlockHash",
+          "oldTipParentHash",
+          "newTipBlockNumber",
+          "newTipExecutionBlockNumber",
+          "newTipBlockHash",
+          "newTipParentHash",
+          "finalizedBlockNumber",
+          "finalizedBlockHash",
+          "revertedLogCount",
+          "appliedLogCount"
+        ],
+        "properties": {
+          "operation": {
+            "enum": ["begin", "commit"]
+          }
+        },
+        "propertyNames": {
+          "not": {
+            "enum": [
+              "logicalLogId",
+              "lifecycleRevision",
+              "commitment",
+              "blockNumber",
+              "executionBlockNumber",
+              "blockHash",
+              "parentHash",
+              "transactionHash",
+              "transactionIndex",
+              "logIndex",
+              "sourceSequence",
+              "sourceSubIndex",
+              "topics",
+              "data",
+              "gapReason",
+              "gapDetails",
+              "lastTrustedBlockNumber",
+              "lastTrustedBlockHash",
+              "firstAffectedBlockNumber"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "const": "reverted"
+          }
+        },
+        "required": ["operation"]
+      },
+      "then": {
+        "required": ["reorgId"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "recordType": {
+            "const": "gap"
+          }
+        },
+        "required": ["recordType"]
+      },
+      "then": {
+        "required": ["gapReason", "lastTrustedBlockNumber", "lastTrustedBlockHash"],
+        "properties": {
+          "operation": {
+            "const": "halt"
+          }
+        },
+        "propertyNames": {
+          "not": {
+            "enum": [
+              "logicalLogId",
+              "lifecycleRevision",
+              "commitment",
+              "blockNumber",
+              "executionBlockNumber",
+              "blockHash",
+              "parentHash",
+              "transactionHash",
+              "transactionIndex",
+              "logIndex",
+              "sourceSequence",
+              "sourceSubIndex",
+              "topics",
+              "data",
+              "reorgId",
+              "ancestorBlockNumber",
+              "ancestorExecutionBlockNumber",
+              "ancestorBlockHash",
+              "oldTipBlockNumber",
+              "oldTipExecutionBlockNumber",
+              "oldTipBlockHash",
+              "oldTipParentHash",
+              "newTipBlockNumber",
+              "newTipExecutionBlockNumber",
+              "newTipBlockHash",
+              "newTipParentHash",
+              "finalizedBlockNumber",
+              "finalizedBlockHash",
+              "revertedLogCount",
+              "appliedLogCount"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "address": {
+      "type": "string",
+      "pattern": "^0x[0-9a-f]{40}$"
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^0x[0-9a-f]{64}$"
+    },
+    "bytes": {
+      "type": "string",
+      "pattern": "^0x(?:[0-9a-f]{2})*$"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^v2:0x[0-9a-f]{64}$"
+    },
+    "uint32": {
+      "type": "string",
+      "pattern": "^(?:0|[1-9][0-9]{0,9})$"
+    },
+    "uint64": {
+      "type": "string",
+      "pattern": "^(?:0|[1-9][0-9]{0,19})$"
+    },
+    "positive": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*$"
+    }
+  }
+}

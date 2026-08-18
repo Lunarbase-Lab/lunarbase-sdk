@@ -12,7 +12,9 @@ import * as Hex from "ox/Hex";
 import { createPublicClient, http, type BlockTag, type PublicClient } from "viem";
 import {
   Commitment as CommitmentValue,
+  Network as NetworkValue,
   compareCursor,
+  contractLogRetainedBytes,
   CORE_ABI,
   CORE_EVENTS,
   CORE_EVENT_TOPICS,
@@ -20,7 +22,11 @@ import {
   decodeImplementation,
   ERC1967_IMPLEMENTATION_SLOT,
   laneDiscoveryTopics,
+  ownBackfillRequest,
+  ownContractFilter,
+  ownDeploymentConfig,
   type BackfillRequest,
+  type BlockRef,
   type BootstrapSnapshot,
   type ChainCursor,
   type Checkpoint,
@@ -29,14 +35,16 @@ import {
   type Network,
 } from "@lunarbase-lab/pmm-v2-client";
 import { RpcError } from "./rpc/error.js";
-import { normalizeViemLog, parseHash, parseHexU64 } from "./rpc/log.js";
+import { DEFAULT_HTTP_RPC_LIMITS, boundedFetcher, validateHttpLimits, type HttpRpcLimits } from "./rpc/http_limits.js";
+import { ChainVerification } from "./rpc/identity.js";
+import { normalizeViemBlockRef, normalizeViemLog, parseHash, parseHexU64 } from "./rpc/log.js";
 
 export { RpcError };
+export { DEFAULT_HTTP_RPC_LIMITS, type HttpRpcLimits } from "./rpc/http_limits.js";
 export { parseHexU64 };
 export { parseHash, parseRpcLog } from "./rpc/log.js";
 
 const BLOCK_TAGS = new Set<BlockTag>(["earliest", "finalized", "latest", "pending", "safe"]);
-const LOG_RANGE_CHUNK_BLOCKS = 10_000n;
 const SNAPSHOT_CONCURRENCY = 16;
 const addressKey = parseAddress;
 
@@ -51,23 +59,27 @@ export class JsonRpcHttpClient {
   readonly client: PublicClient;
   /** Injected fetch implementation retained for strict response-envelope validation. */
   private readonly strictFetcher: typeof fetch;
+  /** Hard request/response and normalized backfill limits. */
+  readonly limits: HttpRpcLimits;
 
   /** Creates a strict read-only JSON-RPC client with an injectable fetcher. */
   constructor(
     /** Validated HTTP JSON-RPC endpoint retained for diagnostics. */
     readonly endpoint: string,
     fetcher: typeof fetch = fetch,
+    limits: Partial<HttpRpcLimits> = {},
   ) {
     const url = new URL(endpoint);
     if (url.protocol !== "http:" && url.protocol !== "https:")
       throw new RpcError("INVALID", "HTTP RPC URL must use http: or https:");
-    this.strictFetcher = fetcher;
+    this.limits = validateHttpLimits({ ...DEFAULT_HTTP_RPC_LIMITS, ...limits });
+    this.strictFetcher = boundedFetcher(fetcher, this.limits);
     this.client = createPublicClient({
       batch: { multicall: false },
       ccipRead: false,
       transport: http(url.toString(), {
         batch: false,
-        fetchFn: fetcher,
+        fetchFn: this.strictFetcher,
         retryCount: 0,
         timeout: 15_000,
       }),
@@ -154,6 +166,20 @@ export class JsonRpcHttpClient {
     };
   }
 
+  /**
+   * Resolves one exact block hash with parent linkage.
+   *
+   * Durable fork resolution uses this only after a parent discontinuity;
+   * normal head and log ingestion performs no auxiliary HTTP lookup.
+   */
+  async blockRefByHash(blockHash: Hex.Hex, chainId: bigint, commitment: ChainCursor["commitment"]): Promise<BlockRef> {
+    const expectedHash = parseHash(blockHash, "requested block hash");
+    const block = await this.remote(() =>
+      this.client.getBlock({ blockHash: expectedHash, includeTransactions: false }),
+    );
+    return normalizeViemBlockRef(block, expectedHash, chainId, commitment);
+  }
+
   private async strictExecutionBlockCursor(
     blockTag: string,
     chainId: bigint,
@@ -206,28 +232,42 @@ export class JsonRpcHttpClient {
     chainId: bigint,
     commitment: ChainCursor["commitment"],
   ): Promise<ContractLog[]> {
-    if (request.fromBlock > request.toBlock) throw new RpcError("INVALID", "log range starts after its end");
-    const events = eventsForTopics(request.filter.topics);
-    const pending = initialLogRanges(request.fromBlock, request.toBlock);
+    const from = request.fromBlock;
+    const to = request.toBlock;
+    const filter = ownContractFilter(request.filter);
+    if (from > to) throw new RpcError("INVALID", "log range starts after its end");
+    const expectedAddress = addressKey(filter.address);
+    const events = eventsForTopics(filter.topics);
+    const pending = initialLogRanges(from, to, this.limits.maxBackfillPageBlocks).reverse();
     const logs: ContractLog[] = [];
+    let retainedBytes = 0;
     while (pending.length > 0) {
-      const [fromBlock, toBlock] = pending.shift()!;
+      const [fromBlock, toBlock] = pending.pop()!;
       try {
         const chunk = await this.remote(() =>
           this.client.getLogs({
-            address: request.filter.address,
+            address: filter.address,
             events: events.length === 0 ? undefined : events,
             fromBlock,
             toBlock,
             strict: false,
           }),
         );
-        logs.push(...chunk.map((value) => normalizeViemLog(value, chainId, commitment)));
+        for (const value of chunk) {
+          const log = normalizeViemLog(value, chainId, commitment);
+          if (log.address !== expectedAddress)
+            throw new RpcError("INVALID", `RPC log address mismatch: expected ${expectedAddress}, got ${log.address}`);
+          const bytes = contractLogRetainedBytes(log);
+          if (logs.length >= this.limits.maxBackfillLogs || bytes > this.limits.maxBackfillBytes - retainedBytes)
+            throw new RpcError("LIMIT", "normalized backfill batch count or byte budget exceeded");
+          logs.push(log);
+          retainedBytes += bytes;
+        }
       } catch (error) {
         if (fromBlock >= toBlock || !isLogRangeLimit(error)) throw error;
         const middle = fromBlock + (toBlock - fromBlock) / 2n;
-        pending.unshift([middle + 1n, toBlock]);
-        pending.unshift([fromBlock, middle]);
+        pending.push([middle + 1n, toBlock]);
+        pending.push([fromBlock, middle]);
       }
     }
     logs.sort((left, right) => compareCursor(left.cursor, right.cursor));
@@ -239,21 +279,25 @@ export class JsonRpcHttpClient {
       return await operation();
     } catch (error) {
       if (error instanceof RpcError) throw error;
-      throw new RpcError("TRANSPORT", error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      if (/JSON-RPC request body exceeds|HTTP response (?:body|content-length) exceeds/i.test(message))
+        throw new RpcError("LIMIT", message);
+      throw new RpcError("TRANSPORT", message);
     }
   }
 }
 
-function initialLogRanges(fromBlock: bigint, toBlock: bigint): Array<[bigint, bigint]> {
+function initialLogRanges(fromBlock: bigint, toBlock: bigint, maxPageBlocks: bigint): Array<[bigint, bigint]> {
   const ranges: Array<[bigint, bigint]> = [];
-  for (let start = fromBlock; start <= toBlock; start += LOG_RANGE_CHUNK_BLOCKS) {
-    const end = start + LOG_RANGE_CHUNK_BLOCKS - 1n;
+  for (let start = fromBlock; start <= toBlock; start += maxPageBlocks) {
+    const end = start + maxPageBlocks - 1n;
     ranges.push([start, end < toBlock ? end : toBlock]);
   }
   return ranges;
 }
 
 function isLogRangeLimit(error: unknown): boolean {
+  if (error instanceof RpcError && error.code === "LIMIT") return /http response|content-length/i.test(error.message);
   const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
   return ["too many results", "response size", "block range", "query exceeds", "limit exceeded", "-32005"].some(
     (needle) => message.includes(needle),
@@ -262,6 +306,8 @@ function isLogRangeLimit(error: unknown): boolean {
 
 /** Canonical HTTP fallback for backfill, heads, and checkpoint validation. */
 export class RpcHttpBackend {
+  private readonly chainVerification = new ChainVerification();
+
   constructor(
     /** Strict read-only JSON-RPC client. */
     readonly rpc: JsonRpcHttpClient,
@@ -273,8 +319,24 @@ export class RpcHttpBackend {
     readonly snapshotTag = "latest",
   ) {}
 
+  /** Revalidates the independent HTTP endpoint for every subscription. */
+  verifyChainId(): Promise<void> {
+    return this.chainVerification.verify(() => this.checkChainId());
+  }
+
+  private ensureChainId(): Promise<void> {
+    return this.chainVerification.ensure(() => this.checkChainId());
+  }
+
+  private async checkChainId(): Promise<void> {
+    const actual = await this.rpc.chainId();
+    if (actual !== this.chainId)
+      throw new RpcError("INVALID", `HTTP RPC chain id mismatch: expected ${this.chainId}, got ${actual}`);
+  }
+
   /** Reads the block-tagged source head. */
-  canonicalHead(): Promise<ChainCursor> {
+  async canonicalHead(): Promise<ChainCursor> {
+    await this.ensureChainId();
     return this.rpc.blockCursor(
       this.snapshotTag,
       this.chainId,
@@ -283,18 +345,31 @@ export class RpcHttpBackend {
   }
 
   /** Backfills canonical logs through one `eth_getLogs` request. */
-  backfill(request: BackfillRequest): Promise<readonly ContractLog[]> {
-    return this.rpc.getLogs(request, this.chainId, CommitmentValue.Canonical);
+  async backfill(request: BackfillRequest): Promise<readonly ContractLog[]> {
+    const ownedRequest = ownBackfillRequest(request);
+    await this.ensureChainId();
+    return this.rpc.getLogs(ownedRequest, this.chainId, CommitmentValue.Canonical);
+  }
+
+  /** Resolves one exact block hash after verifying HTTP chain identity. */
+  async blockRefByHash(blockHash: Hex.Hex, commitment: ChainCursor["commitment"]): Promise<BlockRef> {
+    await this.ensureChainId();
+    return this.rpc.blockRefByHash(blockHash, this.chainId, commitment);
   }
 
   /** Confirms checkpoint canonicality and the ERC-1967 implementation identity. */
   async validateCheckpoint(checkpoint: Checkpoint): Promise<boolean> {
+    if (checkpoint.chainId !== this.chainId || checkpoint.cursor.chainId !== this.chainId) return false;
+    await this.ensureChainId();
     const canonical = await this.rpc.blockCursor(
       Hex.fromNumber(checkpoint.cursor.blockNumber),
       this.chainId,
       CommitmentValue.Canonical,
+      this.network === NetworkValue.Arbitrum,
     );
     if (
+      canonical.blockNumber !== checkpoint.cursor.blockNumber ||
+      canonical.executionBlockNumber !== checkpoint.cursor.executionBlockNumber ||
       canonical.blockHash === undefined ||
       checkpoint.cursor.blockHash === undefined ||
       canonical.blockHash.toLowerCase() !== checkpoint.cursor.blockHash.toLowerCase()
@@ -325,8 +400,9 @@ export class RpcSnapshotProvider {
     readonly snapshotTag = "latest",
   ) {}
 
-  /** Reads code, lanes, reserves, router policy, and the snapshot cursor. */
-  async snapshot(config: DeploymentConfig): Promise<BootstrapSnapshot> {
+  /** Reads chain-wide quote state and optional verified-router accounting. */
+  async snapshot(input: DeploymentConfig): Promise<BootstrapSnapshot> {
+    const config = ownDeploymentConfig(input);
     const rpcChainId = await this.rpc.chainId();
     if (rpcChainId !== config.chainId)
       throw new RpcError("INVALID", `HTTP RPC chain id mismatch: expected ${config.chainId}, got ${rpcChainId}`);
@@ -348,7 +424,7 @@ export class RpcSnapshotProvider {
 
     const assets = await this.resolveLaneAssets(config, cursor.blockNumber);
     const at = { blockHash: cursor.blockHash } as const;
-    const [cash, whitelisted, blacklistFeeMultiplier] = await Promise.all([
+    const [cash, blacklistFeeMultiplier] = await Promise.all([
       this.rpc.client.readContract({
         abi: CORE_ABI,
         address: config.core,
@@ -358,33 +434,16 @@ export class RpcSnapshotProvider {
       this.rpc.client.readContract({
         abi: CORE_ABI,
         address: config.core,
-        functionName: "whitelist",
-        args: [config.router],
-        ...at,
-      }),
-      this.rpc.client.readContract({
-        abi: CORE_ABI,
-        address: config.core,
         functionName: "blacklistFeeMultiplier",
         ...at,
       }),
     ]);
-    if (whitelisted !== config.expectWhitelisted)
-      throw new RpcError(
-        "INVALID",
-        `configured router whitelist mismatch: expected ${config.expectWhitelisted}, got ${whitelisted}`,
-      );
     const lanes = new Map<Address, ReturnType<typeof createLaneState>>();
-    const partnerFeeBps = new Map<Address, number>();
     const state: QuoteState = {
       cash,
       cashReserve: 0n,
       lanes,
-      feeProfile: {
-        whitelisted,
-        blacklistFeeMultiplier,
-        partnerFeeBps,
-      },
+      blacklistFeeMultiplier,
     };
 
     for (let offset = 0; offset < assets.length; offset += SNAPSHOT_CONCURRENCY) {
@@ -422,46 +481,75 @@ export class RpcSnapshotProvider {
     if (config.explicitLaneAssets.length > 0 && [...lanes.values()].some((lane) => !laneExists(lane)))
       throw new RpcError("INVALID", "explicit lane asset is not active at the snapshot block");
 
-    const partnerAssets = [...new Set([...assets, cash])];
-    for (let offset = 0; offset < partnerAssets.length; offset += SNAPSHOT_CONCURRENCY) {
-      const entries = await Promise.all(
-        partnerAssets.slice(offset, offset + SNAPSHOT_CONCURRENCY).map(async (asset) => {
-          const partner = await this.rpc.client.readContract({
-            abi: CORE_ABI,
-            address: config.core,
-            functionName: "partners",
-            args: [config.router, asset],
-            ...at,
-          });
-          if (BigInt(partner[1]) > BPS) throw new RpcError("INVALID", "partner fee exceeds BPS");
-          return [asset, partner[1]] as const;
-        }),
-      );
-      for (const [asset, fee] of entries) partnerFeeBps.set(addressKey(asset), fee);
+    let verifiedRouter: BootstrapSnapshot["verifiedRouter"];
+    if (config.verifiedRouter !== undefined) {
+      const whitelisted = await this.rpc.client.readContract({
+        abi: CORE_ABI,
+        address: config.core,
+        functionName: "whitelist",
+        args: [config.verifiedRouter],
+        ...at,
+      });
+      if (whitelisted !== (config.feeClass === "Whitelisted"))
+        throw new RpcError(
+          "INVALID",
+          `verified router fee class mismatch: expected ${config.feeClass}, got whitelisted=${whitelisted}`,
+        );
+      const partnerFeeBps = new Map<Address, number>();
+      const partnerAssets = [...new Set([...assets, cash].map(addressKey))];
+      for (let offset = 0; offset < partnerAssets.length; offset += SNAPSHOT_CONCURRENCY) {
+        const entries = await Promise.all(
+          partnerAssets.slice(offset, offset + SNAPSHOT_CONCURRENCY).map(async (asset) => {
+            const partner = await this.rpc.client.readContract({
+              abi: CORE_ABI,
+              address: config.core,
+              functionName: "partners",
+              args: [config.verifiedRouter!, asset],
+              ...at,
+            });
+            if (BigInt(partner[1]) > BPS) throw new RpcError("INVALID", "partner fee exceeds BPS");
+            return [asset, partner[1]] as const;
+          }),
+        );
+        for (const [asset, fee] of entries) partnerFeeBps.set(addressKey(asset), fee);
+      }
+      verifiedRouter = { router: config.verifiedRouter, partnerFeeBps };
     }
     const verified = await this.rpc.blockCursor(pinnedBlock, config.chainId, commitment);
     if (verified.blockHash?.toLowerCase() !== cursor.blockHash.toLowerCase())
       throw new RpcError("TRANSPORT", "snapshot block changed while state was reconstructed");
-    return { state, cursor, implementation, implementationCodeHash };
+    return {
+      state,
+      cursor,
+      implementation,
+      implementationCodeHash,
+      ...(verifiedRouter === undefined ? {} : { verifiedRouter }),
+    };
   }
 
   private async resolveLaneAssets(config: DeploymentConfig, snapshotBlock: bigint): Promise<Address[]> {
     if (config.explicitLaneAssets.length > 0) return config.explicitLaneAssets.map(addressKey);
-    const history = await this.rpc.getLogs(
-      {
-        fromBlock: config.deploymentBlock,
-        toBlock: snapshotBlock,
-        filter: { address: config.core, topics: laneDiscoveryTopics() },
-      },
-      config.chainId,
-      CommitmentValue.Canonical,
-    );
-    history.sort((left, right) => compareCursor(left.cursor, right.cursor));
     const active = new Set<Address>();
-    for (const log of history) {
-      const event = decodeCoreEvent(log);
-      if (event?.kind === "LaneAdded") active.add(addressKey(event.asset));
-      else if (event?.kind === "LaneRemoved") active.delete(addressKey(event.asset));
+    let pageStart = config.deploymentBlock;
+    while (pageStart <= snapshotBlock) {
+      const candidateEnd = pageStart + this.rpc.limits.maxBackfillPageBlocks - 1n;
+      const pageEnd = candidateEnd < snapshotBlock ? candidateEnd : snapshotBlock;
+      const history = await this.rpc.getLogs(
+        {
+          fromBlock: pageStart,
+          toBlock: pageEnd,
+          filter: { address: config.core, topics: laneDiscoveryTopics() },
+        },
+        config.chainId,
+        CommitmentValue.Canonical,
+      );
+      history.sort((left, right) => compareCursor(left.cursor, right.cursor));
+      for (const log of history) {
+        const event = decodeCoreEvent(log);
+        if (event?.kind === "LaneAdded") active.add(addressKey(event.asset));
+        else if (event?.kind === "LaneRemoved") active.delete(addressKey(event.asset));
+      }
+      pageStart = pageEnd + 1n;
     }
     return [...active];
   }

@@ -1,11 +1,12 @@
-//! Layered production configuration for one Core/router deployment.
+//! Layered production configuration for one Core deployment and fee policy.
 
 use clap::{Args, Parser};
 use lunarbase_client::indexer::client_types::ClientConnectConfig;
 use lunarbase_client::model::{
     ContractFilter, DeploymentConfig, MATH_COMPATIBILITY_VERSION, Network,
 };
-use lunarbase_math::{Address, B256};
+use lunarbase_client::protocol::abi::quote_critical_topics;
+use lunarbase_math::{Address, B256, FeeClass};
 use serde::Deserialize;
 use std::{net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
 use thiserror::Error;
@@ -35,12 +36,12 @@ pub struct ConfigValues {
     /// LunarBase Core contract address encoded as an EVM hex string.
     #[arg(long, env = "LUNARBASE_CORE")]
     pub core: Option<String>,
-    /// Single configured router whose fee profile is tracked.
-    #[arg(long, env = "LUNARBASE_ROUTER")]
-    pub router: Option<String>,
-    /// Required bootstrap whitelist status for the configured router.
-    #[arg(long, env = "LUNARBASE_EXPECT_WHITELISTED", value_name = "BOOL")]
-    pub expect_whitelisted: Option<bool>,
+    /// Economic quote class: `whitelisted` or `non-whitelisted`.
+    #[arg(long, env = "LUNARBASE_FEE_CLASS")]
+    pub fee_class: Option<String>,
+    /// Optional router whose partner/treasury allocation is chain-verified.
+    #[arg(long, env = "LUNARBASE_VERIFIED_ROUTER")]
+    pub verified_router: Option<String>,
     /// First deployment block included in lane discovery.
     #[arg(long, env = "LUNARBASE_DEPLOYMENT_BLOCK")]
     pub deployment_block: Option<u64>,
@@ -74,12 +75,21 @@ pub struct ConfigValues {
     /// Maximum normalized updates waiting for the single reducer.
     #[arg(long, env = "LUNARBASE_QUEUE_BOUND")]
     pub queue_bound: Option<usize>,
+    /// Maximum retained bytes waiting for the single reducer.
+    #[arg(long, env = "LUNARBASE_QUEUE_BYTE_BOUND")]
+    pub queue_byte_bound: Option<usize>,
     /// Delay before reopening a failed realtime subscription.
     #[arg(long, env = "LUNARBASE_RECONNECT_DELAY_MILLISECONDS")]
     pub reconnect_delay_milliseconds: Option<u64>,
     /// Maximum interval without a source update before fail-closed recovery.
     #[arg(long, env = "LUNARBASE_SOURCE_STALL_TIMEOUT_MILLISECONDS")]
     pub source_stall_timeout_milliseconds: Option<u64>,
+    /// Maximum duration of one source handshake, snapshot, or recovery RPC.
+    #[arg(long, env = "LUNARBASE_SOURCE_OPERATION_TIMEOUT_MILLISECONDS")]
+    pub source_operation_timeout_milliseconds: Option<u64>,
+    /// Maximum quote HTTP requests executing concurrently; excess is rejected.
+    #[arg(long, env = "LUNARBASE_MAX_IN_FLIGHT_QUOTES")]
+    pub max_in_flight_quotes: Option<usize>,
     /// Optional Redis URL used solely to accelerate restarts.
     #[arg(long, env = "LUNARBASE_REDIS_URL")]
     pub redis_url: Option<String>,
@@ -102,6 +112,8 @@ pub struct Config {
     pub realtime_url: String,
     /// Parsed HTTP listen address.
     pub bind: SocketAddr,
+    /// Hard admission bound for concurrently executing quote requests.
+    pub max_in_flight_quotes: usize,
     /// Optional Redis checkpoint endpoint.
     pub redis_url: Option<String>,
     /// Period between background checkpoint attempts.
@@ -151,8 +163,8 @@ impl ConfigValues {
         self.network = overrides.network.or(self.network);
         self.chain_id = overrides.chain_id.or(self.chain_id);
         self.core = overrides.core.or(self.core);
-        self.router = overrides.router.or(self.router);
-        self.expect_whitelisted = overrides.expect_whitelisted.or(self.expect_whitelisted);
+        self.fee_class = overrides.fee_class.or(self.fee_class);
+        self.verified_router = overrides.verified_router.or(self.verified_router);
         self.deployment_block = overrides.deployment_block.or(self.deployment_block);
         self.expected_implementation = overrides
             .expected_implementation
@@ -170,12 +182,17 @@ impl ConfigValues {
         }
         self.bind = overrides.bind.or(self.bind);
         self.queue_bound = overrides.queue_bound.or(self.queue_bound);
+        self.queue_byte_bound = overrides.queue_byte_bound.or(self.queue_byte_bound);
         self.reconnect_delay_milliseconds = overrides
             .reconnect_delay_milliseconds
             .or(self.reconnect_delay_milliseconds);
         self.source_stall_timeout_milliseconds = overrides
             .source_stall_timeout_milliseconds
             .or(self.source_stall_timeout_milliseconds);
+        self.source_operation_timeout_milliseconds = overrides
+            .source_operation_timeout_milliseconds
+            .or(self.source_operation_timeout_milliseconds);
+        self.max_in_flight_quotes = overrides.max_in_flight_quotes.or(self.max_in_flight_quotes);
         self.redis_url = overrides.redis_url.or(self.redis_url);
         self.checkpoint_interval_seconds = overrides
             .checkpoint_interval_seconds
@@ -197,7 +214,19 @@ impl ConfigValues {
         };
         let chain_id = required(self.chain_id, "chain_id")?;
         let core = parse_address(&required(self.core, "core")?, "core")?;
-        let router = parse_address(&required(self.router, "router")?, "router")?;
+        let fee_class = match required(self.fee_class, "fee_class")?
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "whitelisted" => FeeClass::Whitelisted,
+            "non-whitelisted" | "non_whitelisted" => FeeClass::NonWhitelisted,
+            _ => return invalid("fee_class", "expected whitelisted or non-whitelisted"),
+        };
+        let verified_router = self
+            .verified_router
+            .as_deref()
+            .map(|value| parse_address(value, "verified_router"))
+            .transpose()?;
         let explicit_lane_assets = self
             .explicit_lane_assets
             .iter()
@@ -223,12 +252,21 @@ impl ConfigValues {
                 detail: error.to_string(),
             })?;
         let queue_bound = self.queue_bound.unwrap_or_else(default_queue_bound);
+        let queue_byte_bound = self
+            .queue_byte_bound
+            .unwrap_or_else(default_queue_byte_bound);
         let reconnect_delay_milliseconds = self
             .reconnect_delay_milliseconds
             .unwrap_or_else(default_reconnect_milliseconds);
         let source_stall_timeout_milliseconds = self
             .source_stall_timeout_milliseconds
             .unwrap_or_else(default_source_stall_milliseconds);
+        let source_operation_timeout_milliseconds = self
+            .source_operation_timeout_milliseconds
+            .unwrap_or_else(default_source_operation_milliseconds);
+        let max_in_flight_quotes = self
+            .max_in_flight_quotes
+            .unwrap_or_else(default_max_in_flight_quotes);
         let checkpoint_interval_seconds = self
             .checkpoint_interval_seconds
             .unwrap_or_else(default_checkpoint_seconds);
@@ -236,12 +274,19 @@ impl ConfigValues {
             .shutdown_timeout_seconds
             .unwrap_or_else(default_shutdown_seconds);
         if queue_bound == 0
+            || queue_byte_bound < lunarbase_client::model::MIN_UPDATE_QUEUE_BYTE_CAPACITY
+            || queue_byte_bound > u32::MAX as usize
             || reconnect_delay_milliseconds == 0
             || source_stall_timeout_milliseconds == 0
+            || source_operation_timeout_milliseconds == 0
+            || max_in_flight_quotes == 0
             || checkpoint_interval_seconds == 0
             || shutdown_timeout_seconds == 0
         {
-            return invalid("runtime", "all queue and timing bounds must be non-zero");
+            return invalid(
+                "runtime",
+                "all queue and timing bounds must be non-zero and the byte queue must be at least 1024 bytes",
+            );
         }
         if self.redis_url.as_deref().is_some_and(str::is_empty) {
             return invalid("redis_url", "empty URL is not valid");
@@ -255,8 +300,8 @@ impl ConfigValues {
             network,
             chain_id,
             core,
-            router,
-            expect_whitelisted: self.expect_whitelisted.unwrap_or(true),
+            fee_class,
+            verified_router,
             deployment_block: self.deployment_block.unwrap_or(0),
             expected_implementation,
             expected_implementation_code_hash,
@@ -268,12 +313,14 @@ impl ConfigValues {
         let client = ClientConnectConfig {
             filter: ContractFilter {
                 address: core,
-                topics: Vec::new(),
+                topics: quote_critical_topics().to_vec(),
             },
             deployment,
             buffer_capacity: queue_bound,
+            buffer_byte_capacity: queue_byte_bound,
             reconnect_delay: Duration::from_millis(reconnect_delay_milliseconds),
             source_stall_timeout: Duration::from_millis(source_stall_timeout_milliseconds),
+            source_operation_timeout: Duration::from_millis(source_operation_timeout_milliseconds),
         };
         client.validate().map_err(|error| ConfigError::Invalid {
             field: "deployment",
@@ -284,6 +331,7 @@ impl ConfigValues {
             http_rpc_url,
             realtime_url,
             bind,
+            max_in_flight_quotes,
             redis_url: self.redis_url,
             checkpoint_interval: Duration::from_secs(checkpoint_interval_seconds),
             shutdown_timeout: Duration::from_secs(shutdown_timeout_seconds),
@@ -325,11 +373,20 @@ fn default_bind() -> String {
 fn default_queue_bound() -> usize {
     4096
 }
+fn default_queue_byte_bound() -> usize {
+    64 * 1024 * 1024
+}
 fn default_reconnect_milliseconds() -> u64 {
     1_000
 }
 fn default_source_stall_milliseconds() -> u64 {
     30_000
+}
+fn default_source_operation_milliseconds() -> u64 {
+    15_000
+}
+fn default_max_in_flight_quotes() -> usize {
+    1_024
 }
 fn default_checkpoint_seconds() -> u64 {
     30
@@ -342,6 +399,7 @@ fn default_shutdown_seconds() -> u64 {
 mod tests {
     use super::{Cli, ConfigError, ConfigValues};
     use clap::Parser;
+    use lunarbase_client::protocol::abi::quote_critical_topics;
 
     const CORE: &str = "0x0000000000000000000000000000000000000001";
     const ROUTER: &str = "0x0000000000000000000000000000000000000002";
@@ -353,7 +411,8 @@ mod tests {
             network: Some("base".into()),
             chain_id: Some(8453),
             core: Some(CORE.into()),
-            router: Some(ROUTER.into()),
+            fee_class: Some("whitelisted".into()),
+            verified_router: Some(ROUTER.into()),
             expected_implementation: Some(IMPLEMENTATION.into()),
             expected_implementation_code_hash: Some(CODE_HASH.into()),
             http_rpc_url: Some("http://localhost:8545".into()),
@@ -367,10 +426,19 @@ mod tests {
         let config = complete_values().validate().unwrap();
         assert_eq!(config.client.deployment.chain_id, 8453);
         assert_eq!(config.client.buffer_capacity, 4096);
-        assert!(config.client.deployment.expect_whitelisted);
-        assert!(
-            config.client.filter.topics.is_empty(),
-            "the runnable indexer must receive every Core event"
+        assert_eq!(config.max_in_flight_quotes, 1024);
+        assert_eq!(
+            config.client.source_operation_timeout,
+            std::time::Duration::from_secs(15)
+        );
+        assert_eq!(
+            config.client.deployment.fee_class,
+            lunarbase_math::FeeClass::Whitelisted
+        );
+        assert_eq!(
+            config.client.filter.topics,
+            quote_critical_topics(),
+            "the runnable indexer subscribes only to quote-critical events"
         );
     }
 
@@ -402,6 +470,19 @@ mod tests {
         assert!(matches!(
             ConfigValues::default().validate(),
             Err(ConfigError::Missing("network"))
+        ));
+    }
+
+    #[test]
+    fn rejects_zero_quote_admission_capacity() {
+        let mut values = complete_values();
+        values.max_in_flight_quotes = Some(0);
+        assert!(matches!(
+            values.validate(),
+            Err(ConfigError::Invalid {
+                field: "runtime",
+                ..
+            })
         ));
     }
 }

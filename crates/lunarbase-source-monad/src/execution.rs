@@ -1,8 +1,22 @@
 //! Monad execution-event model and normalization.
 
-use lunarbase_client::model::{ChainCursor, ChainUpdate, Commitment, ContractLog, SourceError};
+use lunarbase_client::model::{
+    BlockRef, ChainCursor, ChainUpdate, Commitment, ContractLog, SourceError,
+};
 use lunarbase_client::source::SourceStream;
 use lunarbase_math::{Address, B256, Bytes};
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+/// Controls when proposal logs leave the Monad source.
+pub enum MonadDeliveryMode {
+    /// Emits matching logs as soon as their raw execution events arrive.
+    #[default]
+    Realtime,
+    /// Emits matching logs in deterministic order after successful block execution.
+    BlockOrdered,
+    /// Emits only logs belonging to the proposal selected by consensus finality.
+    Finalized,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Block lifecycle notification from an execution-event source.
@@ -13,6 +27,8 @@ pub struct ExecutionHead {
     pub block_number: u64,
     /// Block identifier supplied by the execution source, when available.
     pub block_hash: Option<B256>,
+    /// Parent block or proposal identifier, when supplied by the source.
+    pub parent_hash: Option<B256>,
     /// Lifecycle confidence represented by this notification.
     pub commitment: Commitment,
 }
@@ -38,6 +54,8 @@ pub struct ExecutionLog {
     pub topics: Vec<B256>,
     /// Unindexed ABI-encoded event payload.
     pub data: Bytes,
+    /// Whether this log retracts a previously published proposal log.
+    pub removed: bool,
     /// Lifecycle confidence inherited from the nearest block notification.
     pub commitment: Commitment,
 }
@@ -49,6 +67,13 @@ pub enum ExecutionEvent {
     Head(ExecutionHead),
     /// Carries one EVM log in execution order.
     Log(ExecutionLog),
+    /// Announces that a previously published proposal was abandoned.
+    Reorg {
+        /// Last head belonging to the abandoned proposal.
+        old_head: ExecutionHead,
+        /// Replacement proposal selected by the observed lifecycle.
+        new_head: ExecutionHead,
+    },
     /// Reports lost, expired, or non-monotonic execution-event data.
     Gap {
         /// Last known normalized position, when the source can identify it.
@@ -56,6 +81,22 @@ pub enum ExecutionEvent {
         /// Diagnostic reason requiring canonical recovery.
         reason: String,
     },
+}
+
+impl ExecutionEvent {
+    /// Returns a conservative retained-memory charge for transport queues.
+    pub fn retained_bytes(&self) -> usize {
+        let dynamic = match self {
+            Self::Log(log) => log
+                .topics
+                .len()
+                .saturating_mul(std::mem::size_of::<B256>())
+                .saturating_add(log.data.len()),
+            Self::Gap { reason, .. } => reason.len(),
+            Self::Head(_) | Self::Reorg { .. } => 0,
+        };
+        std::mem::size_of::<Self>().saturating_add(dynamic)
+    }
 }
 
 /// Stream emitted by execution-event readers.
@@ -126,6 +167,10 @@ impl MonadExecutionNormalizer {
         match event {
             ExecutionEvent::Head(head) => Ok(Some(self.normalize_head(head))),
             ExecutionEvent::Log(log) => self.normalize_log(log),
+            ExecutionEvent::Reorg { old_head, new_head } => Ok(Some(ChainUpdate::Reorg {
+                old_head: self.head_ref(old_head),
+                new_head: self.head_ref(new_head),
+            })),
             ExecutionEvent::Gap { cursor, reason } => {
                 self.tracker.rewind();
                 Ok(Some(ChainUpdate::Gap { cursor, reason }))
@@ -146,7 +191,7 @@ impl MonadExecutionNormalizer {
             transaction_hash: None,
             topics: log.topics,
             data: log.data,
-            removed: false,
+            removed: log.removed,
             cursor: ChainCursor {
                 chain_id: self.chain_id,
                 block_number: log.block_number,
@@ -163,17 +208,24 @@ impl MonadExecutionNormalizer {
 
     /// Converts a Monad block lifecycle event into a normalized head.
     pub fn normalize_head(&self, head: ExecutionHead) -> ChainUpdate {
-        ChainUpdate::Head(ChainCursor {
-            chain_id: self.chain_id,
-            block_number: head.block_number,
-            execution_block_number: head.block_number,
-            block_hash: head.block_hash,
-            transaction_index: None,
-            log_index: None,
-            source_sequence: Some(head.sequence),
-            source_sub_index: None,
-            commitment: head.commitment,
-        })
+        ChainUpdate::Head(self.head_ref(head))
+    }
+
+    fn head_ref(&self, head: ExecutionHead) -> BlockRef {
+        BlockRef {
+            cursor: ChainCursor {
+                chain_id: self.chain_id,
+                block_number: head.block_number,
+                execution_block_number: head.block_number,
+                block_hash: head.block_hash,
+                transaction_index: None,
+                log_index: None,
+                source_sequence: Some(head.sequence),
+                source_sub_index: None,
+                commitment: head.commitment,
+            },
+            parent_hash: head.parent_hash,
+        }
     }
 
     /// Returns a normalized stream from raw execution events.

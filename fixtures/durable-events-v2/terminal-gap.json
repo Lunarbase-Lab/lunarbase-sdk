@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "2",
+  "recordType": "gap",
+  "operation": "halt",
+  "recordId": "v2:0x8888888888888888888888888888888888888888888888888888888888888888",
+  "chainId": "8453",
+  "core": "0x1111111111111111111111111111111111111111",
+  "gapReason": "source-gap",
+  "gapDetails": "source resume position is older than the retained upstream window",
+  "lastTrustedBlockNumber": "100",
+  "lastTrustedBlockHash": "0x8888888888888888888888888888888888888888888888888888888888888888",
+  "firstAffectedBlockNumber": "101"
+}

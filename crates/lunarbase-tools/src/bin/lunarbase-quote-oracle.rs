@@ -2,7 +2,9 @@
 
 use lunarbase_math::slot0::{LaneSlot0, encode_lane_slot0};
 use lunarbase_math::{Address, U256};
-use lunarbase_math::{LaneState, QuoteMode, QuoteOutcome, QuoteRequest, QuoteState};
+use lunarbase_math::{
+    FeeClass, LaneState, QuoteMode, QuoteOutcome, QuotePolicy, QuoteRequest, QuoteState,
+};
 use lunarbase_math::{quote, solidity_quote_amount};
 use serde::Deserialize;
 use std::fs;
@@ -65,7 +67,7 @@ fn max_reserve_string() -> String {
     u128::MAX.to_string()
 }
 
-fn build_state(vector: &Vector) -> (QuoteState, QuoteRequest, u64) {
+fn build_state(vector: &Vector) -> (QuoteState, QuotePolicy, QuoteRequest, u64) {
     let cash = address(&vector.cash);
     let asset_in = address(&vector.asset_in);
     let asset_out = address(&vector.asset_out);
@@ -79,17 +81,15 @@ fn build_state(vector: &Vector) -> (QuoteState, QuoteRequest, u64) {
         },
         ..Default::default()
     };
-    state.fee_profile.whitelisted = vector.whitelisted;
-    state.fee_profile.blacklist_fee_multiplier = u256(&vector.blacklist_fee_multiplier);
-    let fee_asset = if vector.mode == QuoteMode::ExactIn {
-        asset_out
-    } else {
-        asset_in
-    };
-    state
-        .fee_profile
-        .partner_fee_bps
-        .insert(fee_asset, vector.partner_fee_bps.parse().unwrap());
+    state.blacklist_fee_multiplier = u256(&vector.blacklist_fee_multiplier);
+    let policy = QuotePolicy::with_verified_partner_fee(
+        if vector.whitelisted {
+            FeeClass::Whitelisted
+        } else {
+            FeeClass::NonWhitelisted
+        },
+        vector.partner_fee_bps.parse().unwrap(),
+    );
     for (asset, lane) in [(asset_in, &vector.lane_in), (asset_out, &vector.lane_out)] {
         let Some(lane) = lane else { continue };
         let slot0 = encode_lane_slot0(&LaneSlot0 {
@@ -125,6 +125,7 @@ fn build_state(vector: &Vector) -> (QuoteState, QuoteRequest, u64) {
     };
     (
         state,
+        policy,
         request,
         vector.execution_block_number.parse().unwrap(),
     )
@@ -146,8 +147,8 @@ fn unavailable_words(request: &QuoteRequest, outcome: &QuoteOutcome) -> [U256; 7
     ]
 }
 fn output_words(vector: &Vector) -> [U256; 7] {
-    let (state, request, execution_block_number) = build_state(vector);
-    let outcome = match quote(&request, execution_block_number, &state) {
+    let (state, policy, request, execution_block_number) = build_state(vector);
+    let outcome = match quote(&request, execution_block_number, &state, policy) {
         Ok(outcome) => outcome,
         Err(_) => {
             return [
@@ -168,8 +169,14 @@ fn output_words(vector: &Vector) -> [U256; 7] {
             result.amount_out,
             address_word(result.fee_asset),
             result.fee_amount,
-            result.partner_fee,
-            result.treasury_fee,
+            result
+                .fee_allocation
+                .as_ref()
+                .map_or(U256::ZERO, |fee| fee.partner_fee),
+            result
+                .fee_allocation
+                .as_ref()
+                .map_or(result.fee_amount, |fee| fee.treasury_fee),
         ],
         unavailable => unavailable_words(&request, &unavailable),
     }

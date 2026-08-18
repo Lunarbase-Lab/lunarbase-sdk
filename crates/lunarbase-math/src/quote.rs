@@ -11,8 +11,8 @@ use crate::slot0::{
     lane_slot0_latest_update_block, lane_slot0_price, lane_slot0_slippage_k_bps,
 };
 use crate::state::{
-    LaneState, QuoteError, QuoteMode, QuoteOutcome, QuoteRequest, QuoteResult, QuoteState,
-    UnavailableReason,
+    FeeAllocation, LaneState, QuoteError, QuoteMode, QuoteOutcome, QuotePolicy, QuoteRequest,
+    QuoteResult, QuoteState, UnavailableReason,
 };
 use crate::types::{Address, MathError, U256};
 
@@ -66,6 +66,7 @@ fn lane_spread(
 }
 fn assemble_quote(
     state: &QuoteState,
+    policy: QuotePolicy,
     request: &QuoteRequest,
     fee_asset: Address,
     anchor: U256,
@@ -104,18 +105,25 @@ fn assemble_quote(
             UnavailableReason::InsufficientOutputReserve(request.asset_out),
         ));
     }
-    let (partner, treasury) = split_fee(fee, state.fee_profile.partner_fee_bps(fee_asset))?;
+    let fee_allocation = policy
+        .verified_partner_fee_bps
+        .map(|fee_bps| split_fee(fee, U256::from(fee_bps)))
+        .transpose()?
+        .map(|(partner_fee, treasury_fee)| FeeAllocation {
+            partner_fee,
+            treasury_fee,
+        });
     Ok(QuoteOutcome::Available(QuoteResult {
         amount_in,
         amount_out,
         fee_asset,
         fee_amount: fee,
-        partner_fee: partner,
-        treasury_fee: treasury,
+        fee_allocation,
     }))
 }
 fn quote_direct(
     state: &QuoteState,
+    policy: QuotePolicy,
     request: &QuoteRequest,
     lane_asset: Address,
     lane: &LaneState,
@@ -145,8 +153,8 @@ fn quote_direct(
         lane_slot0_bid_fee_bps(lane.slot0)
     };
     let fee_bps = calculate_fee_bps_for_router(
-        state.fee_profile.whitelisted,
-        state.fee_profile.blacklist_fee_multiplier,
+        policy.fee_class.is_whitelisted(),
+        state.blacklist_fee_multiplier,
         raw_fee,
     )?;
     let swap_cash = if cash_to_asset {
@@ -171,10 +179,19 @@ fn quote_direct(
         slippage,
         request.mode == QuoteMode::ExactIn,
     )?;
-    assemble_quote(state, request, fee_asset, anchor, fee, slippage_amount)
+    assemble_quote(
+        state,
+        policy,
+        request,
+        fee_asset,
+        anchor,
+        fee,
+        slippage_amount,
+    )
 }
 fn quote_route(
     state: &QuoteState,
+    policy: QuotePolicy,
     request: &QuoteRequest,
     input_lane: &LaneState,
     output_lane: &LaneState,
@@ -223,15 +240,15 @@ fn quote_route(
         checked_add(first_principal, second_principal)?,
         weighted_k,
     )?;
-    let whitelisted = state.fee_profile.whitelisted;
+    let whitelisted = policy.fee_class.is_whitelisted();
     let bid = calculate_fee_bps_for_router(
         whitelisted,
-        state.fee_profile.blacklist_fee_multiplier,
+        state.blacklist_fee_multiplier,
         lane_slot0_bid_fee_bps(input_lane.slot0),
     )?;
     let ask = calculate_fee_bps_for_router(
         whitelisted,
-        state.fee_profile.blacklist_fee_multiplier,
+        state.blacklist_fee_multiplier,
         lane_slot0_ask_fee_bps(output_lane.slot0),
     )?;
     let fee_bps = checked_add(bid, ask)?;
@@ -253,6 +270,7 @@ fn quote_route(
     };
     assemble_quote(
         state,
+        policy,
         request,
         fee_asset,
         anchor,
@@ -263,8 +281,8 @@ fn quote_route(
 /// Calculates a complete quote for a direct lane or a two-leg CASH route.
 ///
 /// The function applies the contract's zero/equal-asset sentinels, lane
-/// validity predicate, anchor conversion, configured fee profile,
-/// principal-based slippage, spread, output-reserve availability, and
+/// validity predicate, anchor conversion, selected fee class, principal-based
+/// slippage, spread, output-reserve availability, and optional verified
 /// partner/treasury split.
 ///
 /// `execution_block_number` must be the EVM-visible block number supplied by
@@ -278,6 +296,7 @@ pub fn quote(
     request: &QuoteRequest,
     execution_block_number: u64,
     state: &QuoteState,
+    policy: QuotePolicy,
 ) -> Result<QuoteOutcome, QuoteError> {
     if request.amount == U256::ZERO {
         return Ok(QuoteOutcome::Unavailable(UnavailableReason::ZeroAmount));
@@ -295,6 +314,7 @@ pub fn quote(
         return match lane {
             Ok(lane) => Ok(quote_direct(
                 state,
+                policy,
                 request,
                 request.asset_in,
                 lane,
@@ -309,6 +329,7 @@ pub fn quote(
         return match lane {
             Ok(lane) => Ok(quote_direct(
                 state,
+                policy,
                 request,
                 request.asset_out,
                 lane,
@@ -326,7 +347,13 @@ pub fn quote(
         Ok(lane) => lane,
         Err(reason) => return Ok(QuoteOutcome::Unavailable(reason)),
     };
-    Ok(quote_route(state, request, input_lane, output_lane)?)
+    Ok(quote_route(
+        state,
+        policy,
+        request,
+        input_lane,
+        output_lane,
+    )?)
 }
 /// Converts a rich quote outcome to the scalar returned by the Solidity API.
 ///

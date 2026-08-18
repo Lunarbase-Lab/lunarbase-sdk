@@ -13,9 +13,16 @@ npm install @lunarbase-lab/pmm-v2-math
 ## Use
 
 ```ts
-import { quote, solidityQuoteAmount, type QuoteRequest, type QuoteState } from "@lunarbase-lab/pmm-v2-math";
+import {
+  quote,
+  solidityQuoteAmount,
+  type QuotePolicy,
+  type QuoteRequest,
+  type QuoteState,
+} from "@lunarbase-lab/pmm-v2-math";
 
-const outcome = quote(request satisfies QuoteRequest, executionBlock, state satisfies QuoteState);
+const policy = { feeClass: "Whitelisted" } satisfies QuotePolicy;
+const outcome = quote(request satisfies QuoteRequest, executionBlock, state satisfies QuoteState, policy);
 const contractAmount = solidityQuoteAmount(request, outcome);
 ```
 

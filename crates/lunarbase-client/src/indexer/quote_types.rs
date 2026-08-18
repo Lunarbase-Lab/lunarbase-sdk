@@ -2,7 +2,7 @@
 
 use crate::model::{ChainCursor, Commitment};
 use lunarbase_math::B256;
-use lunarbase_math::QuoteOutcome;
+use lunarbase_math::{Address, FeeClass, QuoteOutcome};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// One quote plus the exact state cursor used for evaluation.
@@ -16,13 +16,17 @@ pub struct ClientQuote {
     /// Core implementation bytecode hash associated with the state snapshot.
     pub implementation_code_hash: B256,
     /// Quote-math compatibility profile used by this result.
-    pub math_compatibility_version: String,
+    pub math_compatibility_version: &'static str,
+    /// Economic fee class used to evaluate this quote.
+    pub fee_class: FeeClass,
+    /// Optional execution caller whose accounting split was verified.
+    pub verified_router: Option<Address>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-/// Batch evaluated under one shared state read guard and cursor.
+/// Batch evaluated under one immutable state snapshot and cursor.
 pub struct ClientBatchQuote {
-    /// Results evaluated under one shared state read guard.
+    /// Results evaluated under one immutable state snapshot.
     pub outcomes: Vec<QuoteOutcome>,
     /// Single normalized state position shared by every result.
     pub cursor: ChainCursor,
@@ -31,7 +35,11 @@ pub struct ClientBatchQuote {
     /// Core implementation bytecode hash associated with the shared snapshot.
     pub implementation_code_hash: B256,
     /// Quote-math compatibility profile used by this batch.
-    pub math_compatibility_version: String,
+    pub math_compatibility_version: &'static str,
+    /// Economic fee class shared by every result.
+    pub fee_class: FeeClass,
+    /// Optional execution caller whose accounting splits were verified.
+    pub verified_router: Option<Address>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -48,5 +56,9 @@ pub struct IndexerHealth {
     /// Expected Core implementation bytecode hash for this deployment.
     pub implementation_code_hash: B256,
     /// Quote-math compatibility profile used by this runtime.
-    pub math_compatibility_version: String,
+    pub math_compatibility_version: &'static str,
+    /// Economic fee class selected for every quote.
+    pub fee_class: FeeClass,
+    /// Optional execution caller whose accounting allocation is verified.
+    pub verified_router: Option<Address>,
 }

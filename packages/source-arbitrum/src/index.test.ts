@@ -1,5 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
+import { Commitment, type Checkpoint } from "@lunarbase-lab/pmm-v2-client";
 import { RpcError } from "@lunarbase-lab/pmm-v2-source-evm";
 import { ArbitrumNitroSource } from "./index.js";
 
@@ -24,7 +25,8 @@ function rpcFetcher(
   return (async (_input: string | URL | Request, init?: RequestInit) => {
     const request = JSON.parse(String(init?.body)) as RpcRequest;
     requests.push(request);
-    return new Response(JSON.stringify({ jsonrpc: "2.0", id: responseId(request), result: responder(request) }), {
+    const result = request.method === "eth_chainId" ? "0xa4b1" : responder(request);
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: responseId(request), result }), {
       headers: { "content-type": "application/json" },
     });
   }) as typeof fetch;
@@ -59,6 +61,22 @@ function rawLog(blockNumber: bigint, logIndex: bigint): Record<string, unknown> 
     logIndex: `0x${logIndex.toString(16)}`,
     removed: false,
   };
+}
+
+function checkpoint(executionBlockNumber: bigint): Checkpoint {
+  return {
+    chainId: 42161n,
+    core: ADDRESS,
+    expectedImplementation: ADDRESS,
+    expectedImplementationCodeHash: `0x${"22".repeat(32)}`,
+    cursor: {
+      chainId: 42161n,
+      blockNumber: 42n,
+      executionBlockNumber,
+      blockHash: `0x${"11".repeat(32)}`,
+      commitment: Commitment.Canonical,
+    },
+  } as unknown as Checkpoint;
 }
 
 test("Arbitrum uses standard logs subscriptions", () => {
@@ -115,8 +133,47 @@ test("canonical head is pinned to explicit Nitro execution context", async () =>
 
   assert.equal(cursor.executionBlockNumber, 7n);
   assert.deepEqual(
-    requests.map((request) => request.params[0]),
+    requests.filter((request) => request.method === "eth_getBlockByNumber").map((request) => request.params[0]),
     ["latest", "0x2a"],
+  );
+});
+
+test("checkpoint validation rejects a different Nitro execution context before contract reads", async () => {
+  const requests: RpcRequest[] = [];
+  const valid = await source(
+    rpcFetcher((request) => {
+      if (request.method === "eth_getBlockByNumber")
+        return {
+          number: "0x2a",
+          hash: `0x${"11".repeat(32)}`,
+          l1BlockNumber: "0x7",
+          transactions: [],
+        };
+      throw new Error(`unexpected ${request.method}`);
+    }, requests),
+  ).validateCheckpoint(checkpoint(6n));
+
+  assert.equal(valid, false);
+  assert.deepEqual(
+    requests.map((request) => request.method),
+    ["eth_chainId", "eth_getBlockByNumber"],
+  );
+});
+
+test("checkpoint validation requires explicit Nitro execution context", async () => {
+  const requests: RpcRequest[] = [];
+  const operation = source(
+    rpcFetcher((request) => {
+      if (request.method === "eth_getBlockByNumber")
+        return { number: "0x2a", hash: `0x${"11".repeat(32)}`, transactions: [] };
+      throw new Error(`unexpected ${request.method}`);
+    }, requests),
+  ).validateCheckpoint(checkpoint(42n));
+
+  await assert.rejects(operation, (error: unknown) => error instanceof RpcError && error.code === "INVALID");
+  assert.deepEqual(
+    requests.map((request) => request.method),
+    ["eth_chainId", "eth_getBlockByNumber"],
   );
 });
 
@@ -163,7 +220,7 @@ test("backfill rejects execution context from a different branch", async () => {
   await assert.rejects(operation, (error: unknown) => error instanceof RpcError && error.code === "INVALID");
   assert.deepEqual(
     requests.map((request) => request.method),
-    ["eth_getLogs", "eth_getBlockByNumber"],
+    ["eth_chainId", "eth_getLogs", "eth_getBlockByNumber"],
   );
 });
 
@@ -183,7 +240,7 @@ test("backfill rejects missing or conflicting log block hashes", async () => {
     await assert.rejects(operation, (error: unknown) => error instanceof RpcError && error.code === "INVALID");
     assert.deepEqual(
       requests.map((request) => request.method),
-      ["eth_getLogs"],
+      ["eth_chainId", "eth_getLogs"],
     );
   }
 });
@@ -209,7 +266,7 @@ test("backfill rejects absent or malformed Nitro execution context", async () =>
     await assert.rejects(operation, (error: unknown) => error instanceof RpcError && error.code === "INVALID");
     assert.deepEqual(
       requests.map((request) => request.method),
-      ["eth_getLogs", "eth_getBlockByNumber"],
+      ["eth_chainId", "eth_getLogs", "eth_getBlockByNumber"],
     );
   }
 });

@@ -1,7 +1,6 @@
-import { parseAddress, type Address } from "@lunarbase-lab/pmm-v2-math";
+import { parseAddress, type Address, type FeeClass } from "@lunarbase-lab/pmm-v2-math";
 import { z } from "zod";
 
-const DEMO_ROUTER = "0x000000000000000000000000000000000000dead";
 const addressSchema = z.string().transform((value, context): Address => {
   try {
     return parseAddress(value);
@@ -15,8 +14,8 @@ const environmentSchema = z.object({
   WS_URL: z.url().optional(),
   SOURCE_PROFILE: z.enum(["evm", "base-flashblocks"]).optional().default("evm"),
   CORE_ADDRESS: addressSchema,
-  ROUTER_ADDRESS: addressSchema.optional(),
-  EXPECT_WHITELISTED: z.stringbool().optional().default(false),
+  FEE_CLASS: z.enum(["whitelisted", "non-whitelisted"]),
+  VERIFIED_ROUTER_ADDRESS: addressSchema.optional(),
   DEPLOYMENT_BLOCK: z.coerce.bigint().nonnegative().optional().default(0n),
   LANE_ASSETS: z.string().optional(),
   QUOTE_AMOUNT: z.coerce.bigint().positive().optional().default(1_000_000_000_000_000_000n),
@@ -28,13 +27,12 @@ export interface EnvironmentConfig {
   readonly wsUrl: string;
   readonly sourceProfile: "evm" | "base-flashblocks";
   readonly core: Address;
-  readonly router: Address;
-  readonly expectWhitelisted: boolean;
+  readonly feeClass: FeeClass;
+  readonly verifiedRouter: Address | undefined;
   readonly deploymentBlock: bigint;
   readonly explicitLaneAssets: readonly Address[];
   readonly quoteAmount: bigint;
   readonly quoteIntervalMilliseconds: number;
-  readonly usesDemoRouter: boolean;
 }
 
 type Environment = Readonly<Record<string, string | undefined>>;
@@ -47,20 +45,18 @@ type Environment = Readonly<Record<string, string | undefined>>;
  */
 export function readEnvironment(environment: Environment = process.env): EnvironmentConfig {
   const parsed = environmentSchema.parse(environment);
-  const router = parsed.ROUTER_ADDRESS ?? parseAddress(DEMO_ROUTER);
   return {
     rpcUrl: parsed.RPC_URL,
     wsUrl: parsed.WS_URL ?? deriveWebSocketUrl(parsed.RPC_URL),
     sourceProfile: parsed.SOURCE_PROFILE,
     core: parsed.CORE_ADDRESS,
-    router,
-    expectWhitelisted: parsed.EXPECT_WHITELISTED,
+    feeClass: parsed.FEE_CLASS === "whitelisted" ? "Whitelisted" : "NonWhitelisted",
+    verifiedRouter: parsed.VERIFIED_ROUTER_ADDRESS,
     deploymentBlock: parsed.DEPLOYMENT_BLOCK,
     explicitLaneAssets:
       parsed.LANE_ASSETS === undefined ? [] : parsed.LANE_ASSETS.split(",").map((value) => parseAddress(value.trim())),
     quoteAmount: parsed.QUOTE_AMOUNT,
     quoteIntervalMilliseconds: parsed.QUOTE_INTERVAL_SECONDS * 1_000,
-    usesDemoRouter: parsed.ROUTER_ADDRESS === undefined,
   };
 }
 

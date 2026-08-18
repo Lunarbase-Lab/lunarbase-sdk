@@ -8,16 +8,17 @@ Status: **fully supported**.
 
 ```toml
 [dependencies]
-lunarbase-math = { package = "lunarbase-pmm-v2-math", version = "0.3.1" }
+lunarbase-math = { package = "lunarbase-pmm-v2-math", version = "0.4.0" }
 ```
 
 ## Use
 
 ```rust
-use lunarbase_math::prelude::{quote, QuoteRequest, QuoteState};
+use lunarbase_math::prelude::{FeeClass, QuotePolicy, QuoteRequest, QuoteState, quote};
 
 fn evaluate(request: &QuoteRequest, execution_block: u64, state: &QuoteState) {
-    let outcome = quote(request, execution_block, state);
+    let policy = QuotePolicy::base(FeeClass::Whitelisted);
+    let outcome = quote(request, execution_block, state, policy);
     println!("{outcome:?}");
 }
 ```

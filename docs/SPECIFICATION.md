@@ -15,9 +15,15 @@ exactly 32 bytes.
 
 ## Deployment identity
 
-A runtime is configured for one network, chain ID, Core address, router,
-expected router whitelist status, deployment block, implementation address,
-implementation code hash, and optional explicit lane set.
+A runtime is configured for one network, chain ID, Core address, fee class,
+deployment block, implementation address, implementation code hash, and
+optional explicit lane set. A verified router may be configured separately for
+accounting attribution; it is not part of quote-critical market state.
+
+FeeClass classifies the execution caller seen by Core (`msg.sender`): an
+integration router contract, or an EOA for a direct call. It does not classify
+the swap recipient. Both classes retain the lane base fee; the non-whitelisted
+class applies the contract's global multiplier.
 
 Updates from another chain or Core are rejected. Configuration changes require
 a new bootstrap.
@@ -71,16 +77,17 @@ A quote request contains:
 - amount: fixed input or output quantity
 - mode: ExactIn or ExactOut
 
-The deployment router and freshness policy are runtime configuration and
-cannot be overridden by a quote request.
+The fee class, optional verified router, and freshness policy are runtime
+configuration and cannot be overridden by a quote request.
 
 ## Quote outcome
 
-An available result contains amountIn, amountOut, feeAsset, feeAmount,
-partnerFee, and treasuryFee.
+An available result contains amountIn, amountOut, feeAsset, and feeAmount. It
+contains feeAllocation only when an exact router was verified at bootstrap.
+That allocation contains partnerFee and treasuryFee.
 
-The partner share is calculated from the explicit fee, not from the quote
-anchor: `partnerFee = floor(feeAmount * partnerFeeBps / BPS)`.
+When present, the partner share is calculated from the explicit fee, not from
+the quote anchor: `partnerFee = floor(feeAmount * partnerFeeBps / BPS)`.
 `treasuryFee` receives the exact remainder, so
 `partnerFee + treasuryFee = feeAmount`.
 
@@ -123,9 +130,10 @@ POST /v1/quotes accepts either an array of requests or an object with a
 requests array. Unknown request fields are rejected.
 
 A successful response contains result or results plus cursor,
-executionBlockNumber, implementationCodeHash, and mathCompatibilityVersion.
-Invalid input returns 400. A non-ready indexer returns 503. Health, readiness,
-and Prometheus metrics are available at /healthz, /readyz, and /metrics.
+executionBlockNumber, implementationCodeHash, mathCompatibilityVersion,
+feeClass, and optional verifiedRouter. Invalid input returns 400. A non-ready
+indexer returns 503. Health, readiness, and Prometheus metrics are available at
+/healthz, /readyz, and /metrics.
 
 ## Checkpoints
 
@@ -140,6 +148,8 @@ restart but does not change the state of a running ready process.
 ## Guarantees
 
 - Quote math performs no network or persistence access.
+- Durable event delivery is a separate worker contract documented in
+  [EVENT_DELIVERY.md](EVENT_DELIVERY.md) and is not part of quote evaluation.
 - Rust and TypeScript use the same deterministic compatibility vectors.
 - A successful batch is evaluated from one state position.
 - The runtime fails closed when source continuity or deployment identity is

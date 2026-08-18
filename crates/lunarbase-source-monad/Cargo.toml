@@ -8,9 +8,14 @@ repository.workspace = true
 description = "Monad execution-event data source for LunarBase"
 keywords = ["lunarbase", "monad", "evm", "rpc", "websocket"]
 categories = ["api-bindings", "asynchronous", "network-programming"]
+publish = false
 
 [lib]
 name = "lunarbase_source_monad"
+
+[features]
+default = []
+protocol-v2 = ["dep:monad-event-ring", "dep:monad-exec-events", "dep:serde"]
 
 [lints]
 workspace = true
@@ -21,8 +26,13 @@ futures-util.workspace = true
 lunarbase-client.workspace = true
 lunarbase-math.workspace = true
 lunarbase-source-evm.workspace = true
+serde = { workspace = true, optional = true }
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
 url.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+monad-event-ring = { version = "=0.1.0", git = "https://github.com/category-labs/monad-bft", tag = "release/exec-events-sdk-v1.0", optional = true }
+monad-exec-events = { version = "=0.1.0", git = "https://github.com/category-labs/monad-bft", tag = "release/exec-events-sdk-v1.0", optional = true }

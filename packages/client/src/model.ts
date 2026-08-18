@@ -1,9 +1,22 @@
 /** Provider-independent model shared by every TypeScript network client. */
-import type { Address, LaneState, QuoteOutcome, QuoteRequest, QuoteState, Word } from "@lunarbase-lab/pmm-v2-math";
+import type {
+  Address,
+  FeeClass,
+  LaneState,
+  QuoteOutcome,
+  QuoteRequest,
+  QuoteState,
+  Word,
+} from "@lunarbase-lab/pmm-v2-math";
 import type { Hex } from "ox/Hex";
 
+const TEXT_ENCODER = new TextEncoder();
+
+const CORRECTION_PROTOCOL_FIXED_BYTES = 504 + 288;
+const CORRECTION_PROTOCOL_BLOCK_REF_BYTES = 144;
+const CORRECTION_PROTOCOL_LOG_FIXED_BYTES = 216;
 /** Current checkpoint schema. */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 /** Quote-math compatibility profile implemented by this SDK. */
 export const MATH_COMPATIBILITY_VERSION = "lunarbase-pmm-v2";
 
@@ -60,6 +73,14 @@ export interface ChainCursor {
   commitment: Commitment;
 }
 
+/** Block identity and parent linkage carried by head-level updates. */
+export interface BlockRef {
+  /** Ordered source position and execution height for this block. */
+  readonly cursor: ChainCursor;
+  /** Hash of the parent block or proposal, when supplied by the source. */
+  readonly parentHash?: Hex;
+}
+
 /** Provider-neutral Core log. */
 export interface ContractLog {
   /** Contract that emitted the log. */
@@ -74,10 +95,26 @@ export interface ContractLog {
   cursor: ChainCursor;
 }
 
+/** Fully resolved canonical branch replacement emitted after an optimistic fork. */
+export interface ChainCorrection {
+  /** Last block shared by the previously published and replacement branches. */
+  readonly commonAncestor: BlockRef;
+  /** Previously published optimistic tip being superseded. */
+  readonly oldTip: BlockRef;
+  /** Canonical replacement tip after applying this correction. */
+  readonly newTip: BlockRef;
+  /** Old branch ordered from the child of `commonAncestor` through `oldTip`. */
+  readonly oldBranch: readonly BlockRef[];
+  /** New branch ordered from the child of `commonAncestor` through `newTip`. */
+  readonly newBranch: readonly BlockRef[];
+  /** Complete Core log replacement for `newBranch`, in canonical log order. */
+  readonly replacementLogs: readonly ContractLog[];
+}
+
 /** Core address and accepted event signatures. */
 export interface ContractFilter {
   /** Contract address accepted by the source. */
-  address: Address;
+  readonly address: Address;
   /** Allowed event signatures; an empty list accepts every topic zero. */
   topics: readonly Hex[];
 }
@@ -85,42 +122,82 @@ export interface ContractFilter {
 /** Inclusive canonical recovery range. */
 export interface BackfillRequest {
   /** First canonical block included in recovery. */
-  fromBlock: bigint;
+  readonly fromBlock: bigint;
   /** Last canonical block included in recovery. */
-  toBlock: bigint;
+  readonly toBlock: bigint;
   /** Contract and topic filter applied by the source. */
-  filter: ContractFilter;
+  readonly filter: ContractFilter;
 }
 
 /** Complete update vocabulary accepted by the ordered reducer. */
 export type ChainUpdate =
-  | { kind: "Head"; cursor: ChainCursor }
+  | { kind: "Head"; head: BlockRef }
   | { kind: "Log"; log: ContractLog }
-  | { kind: "Reorg"; oldHead: ChainCursor; newHead: ChainCursor }
+  | { kind: "Correction"; correction: ChainCorrection }
+  | { kind: "Reorg"; oldHead: BlockRef; newHead: BlockRef }
   | { kind: "Gap"; cursor?: ChainCursor; reason: string };
 
-/** Identity and endpoints for one Core/router deployment. */
+/** Conservatively charges one normalized log to bounded runtime queues. */
+export function contractLogRetainedBytes(log: ContractLog): number {
+  const topicBytes = log.topics.reduce((total, topic) => total + topic.length, 0);
+  return 256 + topicBytes + log.data.length;
+}
+
+/** Charges correction payload bytes using the shared 64-bit Rust wire envelope. */
+export function chainCorrectionProtocolBytes(correction: ChainCorrection): number {
+  const branchBytes = (correction.oldBranch.length + correction.newBranch.length) * CORRECTION_PROTOCOL_BLOCK_REF_BYTES;
+  return correction.replacementLogs.reduce(
+    (total, log) => total + CORRECTION_PROTOCOL_LOG_FIXED_BYTES + log.topics.length * 32 + decodedHexBytes(log.data),
+    CORRECTION_PROTOCOL_FIXED_BYTES + branchBytes,
+  );
+}
+
+function decodedHexBytes(value: Hex): number {
+  return Math.ceil(Math.max(0, value.length - 2) / 2);
+}
+
+/** Conservatively charges one normalized update to bounded runtime queues. */
+export function chainUpdateRetainedBytes(update: ChainUpdate): number {
+  switch (update.kind) {
+    case "Log":
+      return 64 + contractLogRetainedBytes(update.log);
+    case "Correction":
+      return (
+        512 +
+        (update.correction.oldBranch.length + update.correction.newBranch.length) * 384 +
+        update.correction.replacementLogs.reduce((total, log) => total + contractLogRetainedBytes(log), 0)
+      );
+    case "Gap":
+      return 192 + TEXT_ENCODER.encode(update.reason).byteLength;
+    case "Head":
+      return 384;
+    case "Reorg":
+      return 704;
+  }
+}
+
+/** Identity and runtime policy for one Core deployment. */
 export interface DeploymentConfig {
   /** Network source family required by this deployment. */
-  network: Network;
+  readonly network: Network;
   /** EIP-155 chain identifier expected from every source cursor. */
-  chainId: bigint;
+  readonly chainId: bigint;
   /** LunarBase Core contract whose quote-critical state is indexed. */
-  core: Address;
-  /** Single router whose whitelist and partner fees are tracked. */
-  router: Address;
-  /** Required whitelist status checked during bootstrap. */
-  expectWhitelisted: boolean;
+  readonly core: Address;
+  /** Mandatory economic fee class used by every quote. */
+  readonly feeClass: FeeClass;
+  /** Optional execution caller whose fee allocation is chain-verified. */
+  readonly verifiedRouter: Address | undefined;
   /** First block that can contain deployment lane events. */
-  deploymentBlock: bigint;
+  readonly deploymentBlock: bigint;
   /** Pinned ERC-1967 implementation behind the Core proxy. */
-  expectedImplementation: Address;
+  readonly expectedImplementation: Address;
   /** Pinned runtime bytecode hash of `expectedImplementation`. */
-  expectedImplementationCodeHash: Hex;
+  readonly expectedImplementationCodeHash: Hex;
   /** Quote-math compatibility profile expected by the client. */
-  contractCompatibilityVersion: string;
+  readonly contractCompatibilityVersion: string;
   /** Optional fixed lane assets that avoid a discovery replay. */
-  explicitLaneAssets: readonly Address[];
+  readonly explicitLaneAssets: readonly Address[];
 }
 
 /** Complete block-tagged state returned by a data source. */
@@ -133,9 +210,19 @@ export interface BootstrapSnapshot {
   implementation: Address;
   /** Keccak-256 runtime bytecode hash of `implementation`. */
   implementationCodeHash: Hex;
+  /** Optional router-specific accounting state verified at the same block. */
+  verifiedRouter?: VerifiedRouterSnapshot;
 }
 
-/** Versioned restart state bound to one deployment and configured router. */
+/** Router-specific accounting state kept outside quote-critical chain state. */
+export interface VerifiedRouterSnapshot {
+  /** Execution caller whose whitelist class and partner shares were verified. */
+  router: Address;
+  /** Partner share keyed by fee asset. */
+  partnerFeeBps: ReadonlyMap<Address, number>;
+}
+
+/** Versioned restart state bound only to chain-wide deployment state. */
 export interface Checkpoint {
   /** Persistence schema version; incompatible versions are discarded. */
   schemaVersion: number;
@@ -151,12 +238,8 @@ export interface Checkpoint {
   network: Network;
   /** Core contract whose state is serialized. */
   core: Address;
-  /** Configured router whose fee profile is embedded in the state. */
-  router: Address;
   /** First deployment block used for lane discovery and recovery. */
   deploymentBlock: bigint;
-  /** Router whitelist policy used when the state was bootstrapped. */
-  expectWhitelisted: boolean;
   /** Fixed lane policy used when the state was bootstrapped. */
   explicitLaneAssets: readonly Address[];
   /** Last fully applied and verified source position. */
@@ -223,11 +306,14 @@ export class ReducerError extends Error {
     readonly code:
       | "CHAIN_ID_MISMATCH"
       | "CURSOR_REGRESSION"
+      | "DUPLICATE_EVENT_CONFLICT"
       | "BLOCK_HASH_MISMATCH"
       | "REMOVED_LOG"
       | "INVALID_SLIPPAGE_K"
       | "INVALID_WIDTH"
       | "UNKNOWN_LANE"
+      | "FEE_CLASS_MISMATCH"
+      | "VERIFIED_ROUTER_REFRESH_REQUIRED"
       | "ARITHMETIC"
       | "IMPLEMENTATION_UPGRADED",
     message: string,
@@ -263,6 +349,10 @@ export interface ClientQuote {
   implementationCodeHash: Hex;
   /** Quote-math compatibility profile used by this result. */
   mathCompatibilityVersion: string;
+  /** Economic fee class used for this quote. */
+  feeClass: FeeClass;
+  /** Optional router whose accounting split was verified. */
+  verifiedRouter: Address | undefined;
 }
 
 /** Batch results calculated synchronously from one state cursor. */
@@ -277,6 +367,10 @@ export interface ClientBatchQuote {
   implementationCodeHash: Hex;
   /** Quote-math compatibility profile used by this batch. */
   mathCompatibilityVersion: string;
+  /** Economic fee class shared by every result. */
+  feeClass: FeeClass;
+  /** Optional router whose accounting splits were verified. */
+  verifiedRouter: Address | undefined;
 }
 
 /** Observable runtime state. */
@@ -291,6 +385,54 @@ export interface IndexerHealth {
   implementationCodeHash: string;
   /** Quote-math compatibility profile used by this runtime. */
   mathCompatibilityVersion: string;
+  /** Economic fee class selected for every quote. */
+  feeClass: FeeClass;
+  /** Optional router whose accounting allocation is verified. */
+  verifiedRouter: Address | undefined;
 }
 
-export type { Address, LaneState, QuoteOutcome, QuoteRequest, QuoteState, Word };
+/** Allocation and correction counters exposed for runtime monitoring. */
+export interface IndexerCorrectionMetrics {
+  /** Successfully applied branch replacements since construction. */
+  readonly appliedCorrections: number;
+  /** Eventful blocks currently retained in the compact undo journal. */
+  readonly journalBlocks: number;
+  /** Eventful history blocks cumulatively evicted by count or byte pressure. */
+  readonly journalEvictions: number;
+  /** Conservative bytes retained by compact before-images. */
+  readonly journalRetainedBytes: number;
+}
+
+/** Lifecycle transition published outside the synchronous quote hot path. */
+export type IndexerLifecycleEvent =
+  | {
+      /** A resolved fork was atomically applied without revoking readiness. */
+      readonly kind: "CorrectionApplied";
+      /** Last block shared by the old and replacement branches. */
+      readonly commonAncestor: BlockRef;
+      /** Optimistic tip superseded by the correction. */
+      readonly oldTip: BlockRef;
+      /** Replacement tip now visible to quotes. */
+      readonly newTip: BlockRef;
+      /** Number of replacement Core logs consumed by the reducer. */
+      readonly replacementLogCount: number;
+    }
+  | {
+      /** Continuity could not be proven and canonical recovery is required. */
+      readonly kind: "Gap";
+      /** Best known source position associated with the gap. */
+      readonly cursor?: ChainCursor;
+      /** Stable human-readable recovery reason. */
+      readonly reason: string;
+    }
+  | {
+      /** Lifecycle observers missed notices; quote continuity is unaffected. */
+      readonly kind: "ObserverGap";
+      /** Stable reason describing observer-only notice loss. */
+      readonly reason: string;
+    };
+
+/** Observer invoked asynchronously after a lifecycle transition is published. */
+export type IndexerLifecycleListener = (event: IndexerLifecycleEvent) => void;
+
+export type { Address, FeeClass, LaneState, QuoteOutcome, QuoteRequest, QuoteState, Word };

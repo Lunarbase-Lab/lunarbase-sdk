@@ -3,7 +3,7 @@
 use lunarbase_client::bootstrap::BootstrapSnapshot;
 use lunarbase_client::model::{
     BackfillRequest, ChainCursor, Checkpoint, Commitment, ContractFilter, ContractLog,
-    DeploymentConfig, Network, SourceError,
+    DeploymentConfig, MIN_UPDATE_QUEUE_BYTE_CAPACITY, Network, SourceError,
 };
 use lunarbase_client::source::{ChainDataSource, SourceStream};
 use lunarbase_math::{Address, B256};
@@ -14,9 +14,11 @@ use monad_event_ring::{
     DecodedEventRing, EventDescriptorInfo, EventNextResult, EventPayloadResult, EventRingPath,
 };
 use monad_exec_events::{
-    ExecEvent, ExecEventDescriptorExt, ExecEventReaderExt, ExecEventRing, ExecEventType,
+    CommitStateBlockBuilder, ExecEvent, ExecEventDescriptorExt, ExecEventReaderExt, ExecEventRing,
+    ExecEventType, ExecutedBlockBuilder,
 };
 use std::{
+    panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
     sync::{
         Arc,
@@ -25,11 +27,22 @@ use std::{
     thread,
     time::Duration,
 };
-use tokio::sync::mpsc;
+use tokio::{
+    runtime::Handle,
+    sync::{Semaphore, mpsc},
+};
 
 use lunarbase_source_monad::execution::{
-    ExecutionEvent, ExecutionEventStream, ExecutionHead, ExecutionLog, MonadExecutionNormalizer,
+    ExecutionEvent, ExecutionEventStream, ExecutionHead, ExecutionLog, MonadDeliveryMode,
+    MonadExecutionNormalizer,
 };
+
+mod lifecycle;
+mod queue;
+
+use queue::{QueuedExecutionEvent, send_error, send_gap, send_result};
+
+const MAX_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Native event-ring settings for a colocated Monad execution node.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -42,16 +55,29 @@ pub struct MonadEventRingConfig {
     pub chain_id: u64,
     /// Bounded handoff from the blocking shared-memory reader to Tokio.
     pub queue_bound: usize,
+    /// Maximum retained bytes in the blocking-reader to Tokio handoff.
+    pub queue_byte_bound: usize,
     /// Poll delay when the producer has not published another descriptor.
     pub poll_interval: Duration,
+    /// Point in proposal lifecycle at which matching logs are published.
+    pub delivery_mode: MonadDeliveryMode,
+    /// Emits removal logs for branches abandoned after earlier publication.
+    pub emit_removed_logs: bool,
 }
 
 impl MonadEventRingConfig {
     /// Validates identity and memory bounds before opening shared memory.
     pub fn validate(&self) -> Result<(), SourceError> {
-        if self.chain_id == 0 || self.core == Address::ZERO || self.queue_bound == 0 {
+        if self.chain_id == 0
+            || self.core == Address::ZERO
+            || self.queue_bound == 0
+            || self.queue_byte_bound < MIN_UPDATE_QUEUE_BYTE_CAPACITY
+            || self.queue_byte_bound > u32::MAX as usize
+            || self.poll_interval.is_zero()
+            || self.poll_interval > MAX_POLL_INTERVAL
+        {
             return Err(SourceError::Unavailable(
-                "Monad ring chain, Core, and queue bound must be valid".into(),
+                "Monad ring identity, count/byte queue, and poll bounds must be valid".into(),
             ));
         }
         Ok(())
@@ -67,7 +93,7 @@ pub struct MonadEventRingSource {
 }
 
 impl MonadEventRingSource {
-    /// Creates a native realtime source plus RPC bootstrap/recovery backend.
+    /// Creates a native lifecycle source plus RPC bootstrap/recovery backend.
     pub fn new(
         config: MonadEventRingConfig,
         rpc_endpoint: impl Into<String>,
@@ -128,11 +154,22 @@ pub async fn connect_event_ring(
 ) -> Result<ExecutionEventStream, SourceError> {
     config.validate()?;
     let (sender, mut receiver) = mpsc::channel(config.queue_bound);
+    let byte_budget = Arc::new(Semaphore::new(config.queue_byte_bound));
+    let runtime = Handle::current();
     let cancelled = Arc::new(AtomicBool::new(false));
     let worker_cancelled = cancelled.clone();
     let worker = thread::Builder::new()
         .name("lunarbase-monad-ring".into())
-        .spawn(move || read_ring(config, filter, sender, worker_cancelled))
+        .spawn(move || {
+            read_ring(
+                config,
+                filter,
+                sender,
+                byte_budget,
+                runtime,
+                worker_cancelled,
+            )
+        })
         .map_err(|error| {
             SourceError::Unavailable(format!("spawn Monad event-ring reader: {error}"))
         })?;
@@ -142,8 +179,9 @@ pub async fn connect_event_ring(
     };
     Ok(Box::pin(async_stream::stream! {
         let _guard = guard;
-        while let Some(event) = receiver.recv().await {
-            yield event;
+        while let Some(queued) = receiver.recv().await {
+            let QueuedExecutionEvent { result, _byte_permit } = queued;
+            yield result;
         }
     }))
 }
@@ -151,20 +189,41 @@ pub async fn connect_event_ring(
 fn read_ring(
     config: MonadEventRingConfig,
     filter: ContractFilter,
-    sender: mpsc::Sender<Result<ExecutionEvent, SourceError>>,
+    sender: mpsc::Sender<QueuedExecutionEvent>,
+    byte_budget: Arc<Semaphore>,
+    runtime: Handle,
     cancelled: Arc<AtomicBool>,
 ) {
     let path = match EventRingPath::resolve(config.event_ring_path) {
         Ok(path) => path,
-        Err(error) => return send_error(&sender, format!("resolve Monad event ring: {error}")),
+        Err(error) => {
+            return send_error(
+                &sender,
+                &byte_budget,
+                &runtime,
+                config.queue_byte_bound,
+                format!("resolve Monad event ring: {error}"),
+            );
+        }
     };
     let ring = match ExecEventRing::new(path) {
         Ok(ring) => ring,
-        Err(error) => return send_error(&sender, format!("open Monad event ring: {error}")),
+        Err(error) => {
+            return send_error(
+                &sender,
+                &byte_budget,
+                &runtime,
+                config.queue_byte_bound,
+                format!("open Monad event ring: {error}"),
+            );
+        }
     };
     let mut reader = ring.create_reader();
     reader.consensus_prev(Some(ExecEventType::BlockStart));
     let mut block_log_index = 0u32;
+    let mut lifecycle = (config.delivery_mode != MonadDeliveryMode::Realtime
+        || config.emit_removed_logs)
+        .then(|| CommitStateBlockBuilder::new(ExecutedBlockBuilder::new(false, false)));
 
     loop {
         if cancelled.load(Ordering::Acquire) {
@@ -172,7 +231,13 @@ fn read_ring(
         }
         let descriptor = match reader.next_descriptor() {
             EventNextResult::Gap => {
-                send_gap(&sender, "Monad event-ring descriptor gap");
+                send_gap(
+                    &sender,
+                    &byte_budget,
+                    &runtime,
+                    config.queue_byte_bound,
+                    "Monad event-ring descriptor gap",
+                );
                 return;
             }
             EventNextResult::NotReady => {
@@ -185,23 +250,112 @@ fn read_ring(
             EventNextResult::Ready(descriptor) => descriptor,
         };
         let info = descriptor.info();
+        if let Some(builder) = lifecycle.as_mut() {
+            let update = catch_unwind(AssertUnwindSafe(|| {
+                builder.process_event_descriptor(&descriptor)
+            }));
+            match update {
+                Err(_) => {
+                    send_gap(
+                        &sender,
+                        &byte_budget,
+                        &runtime,
+                        config.queue_byte_bound,
+                        "Monad official block builder rejected the lifecycle",
+                    );
+                    return;
+                }
+                Ok(Some(Ok(update))) => {
+                    let events = match lifecycle::convert_update(
+                        update,
+                        info.seqno,
+                        config.delivery_mode,
+                        config.emit_removed_logs,
+                        config.chain_id,
+                        &filter,
+                    ) {
+                        Ok(events) => events,
+                        Err(error) => {
+                            let _ = send_result(
+                                &sender,
+                                &byte_budget,
+                                &runtime,
+                                config.queue_byte_bound,
+                                Err(error),
+                            );
+                            return;
+                        }
+                    };
+                    for event in events {
+                        if !send_result(
+                            &sender,
+                            &byte_budget,
+                            &runtime,
+                            config.queue_byte_bound,
+                            Ok(event),
+                        ) {
+                            return;
+                        }
+                    }
+                }
+                Ok(Some(Err(_))) => {
+                    send_gap(
+                        &sender,
+                        &byte_budget,
+                        &runtime,
+                        config.queue_byte_bound,
+                        "Monad official block builder rejected the event stream",
+                    );
+                    return;
+                }
+                Ok(None) => {}
+            }
+            if config.delivery_mode != MonadDeliveryMode::Realtime {
+                continue;
+            }
+        }
         let block_number = descriptor.get_block_number();
         let event = match descriptor.try_read() {
             EventPayloadResult::Expired => {
-                send_gap(&sender, "Monad event-ring payload expired");
+                send_gap(
+                    &sender,
+                    &byte_budget,
+                    &runtime,
+                    config.queue_byte_bound,
+                    "Monad event-ring payload expired",
+                );
                 return;
             }
             EventPayloadResult::Ready(event) => event,
         };
-        match convert_event(event, info, block_number, &filter, &mut block_log_index) {
+        match convert_event(
+            event,
+            info,
+            block_number,
+            config.chain_id,
+            &filter,
+            &mut block_log_index,
+        ) {
             Ok(Some(event)) => {
-                if sender.blocking_send(Ok(event)).is_err() {
+                if !send_result(
+                    &sender,
+                    &byte_budget,
+                    &runtime,
+                    config.queue_byte_bound,
+                    Ok(event),
+                ) {
                     return;
                 }
             }
             Ok(None) => {}
             Err(error) => {
-                let _ = sender.blocking_send(Err(error));
+                let _ = send_result(
+                    &sender,
+                    &byte_budget,
+                    &runtime,
+                    config.queue_byte_bound,
+                    Err(error),
+                );
                 return;
             }
         }
@@ -212,17 +366,26 @@ fn convert_event(
     event: ExecEvent,
     info: EventDescriptorInfo<monad_exec_events::ExecEventDecoder>,
     block_number: Option<u64>,
+    chain_id: u64,
     filter: &ContractFilter,
     block_log_index: &mut u32,
 ) -> Result<Option<ExecutionEvent>, SourceError> {
     let sequence = info.seqno;
     Ok(match event {
+        ExecEvent::RecordError(_) => Some(ExecutionEvent::Gap {
+            cursor: None,
+            reason: "Monad execution ring reported a dropped record".into(),
+        }),
         ExecEvent::BlockStart(start) => {
+            if start.chain_id.limbs != [chain_id, 0, 0, 0] {
+                return Err(SourceError::NetworkMismatch);
+            }
             *block_log_index = 0;
             Some(head(
                 sequence,
                 start.block_tag.block_number,
                 None,
+                Some(B256::new(start.parent_eth_hash.bytes)),
                 Commitment::Realtime,
             ))
         }
@@ -230,11 +393,13 @@ fn convert_event(
             sequence,
             required_block_number(block_number)?,
             Some(B256::new(end.eth_block_hash.bytes)),
+            None,
             Commitment::Realtime,
         )),
         ExecEvent::BlockQC(qc) => Some(head(
             sequence,
             qc.block_tag.block_number,
+            None,
             None,
             Commitment::Canonical,
         )),
@@ -242,11 +407,13 @@ fn convert_event(
             sequence,
             tag.block_number,
             None,
+            None,
             Commitment::Finalized,
         )),
         ExecEvent::BlockVerified(verified) => Some(head(
             sequence,
             verified.block_number,
+            None,
             None,
             Commitment::Finalized,
         )),
@@ -286,6 +453,7 @@ fn convert_event(
                 address,
                 topics,
                 data: data_bytes.into_vec().into(),
+                removed: false,
                 commitment: Commitment::Realtime,
             }))
         }
@@ -310,25 +478,16 @@ fn head(
     sequence: u64,
     block_number: u64,
     block_hash: Option<B256>,
+    parent_hash: Option<B256>,
     commitment: Commitment,
 ) -> ExecutionEvent {
     ExecutionEvent::Head(ExecutionHead {
         sequence,
         block_number,
         block_hash,
+        parent_hash,
         commitment,
     })
-}
-
-fn send_gap(sender: &mpsc::Sender<Result<ExecutionEvent, SourceError>>, reason: &str) {
-    let _ = sender.blocking_send(Ok(ExecutionEvent::Gap {
-        cursor: None,
-        reason: reason.into(),
-    }));
-}
-
-fn send_error(sender: &mpsc::Sender<Result<ExecutionEvent, SourceError>>, reason: String) {
-    let _ = sender.blocking_send(Err(SourceError::Unavailable(reason)));
 }
 
 struct RingReaderGuard {
@@ -340,7 +499,21 @@ impl Drop for RingReaderGuard {
     fn drop(&mut self) {
         self.cancelled.store(true, Ordering::Release);
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            if let Ok(runtime) = Handle::try_current() {
+                runtime.spawn_blocking(move || {
+                    let _ = worker.join();
+                });
+            } else {
+                let _ = thread::Builder::new()
+                    .name("lunarbase-monad-ring-reaper".into())
+                    .spawn(move || {
+                        let _ = worker.join();
+                    });
+            }
         }
     }
 }
+
+#[cfg(test)]
+#[path = "native_tests.rs"]
+mod tests;

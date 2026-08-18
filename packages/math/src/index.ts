@@ -3,11 +3,13 @@ export { BPS, MathError, WAD, parseAddress } from "./constants.js";
 export type { Address, Word } from "./constants.js";
 export { createLaneState, laneExists, lanePaused } from "./types.js";
 export type {
-  FeeProfile,
+  FeeAllocation,
+  FeeClass,
   LaneState,
   LaneSlot0,
   QuoteMode,
   QuoteOutcome,
+  QuotePolicy,
   QuoteRequest,
   QuoteResult,
   QuoteState,

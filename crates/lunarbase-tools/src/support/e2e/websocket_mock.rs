@@ -1,5 +1,5 @@
 use crate::support::e2e::environment::{E2eError, MockEvent, MockState};
-use crate::support::e2e::helpers::{block_hash, stop_requested};
+use crate::support::e2e::helpers::{block_hash, raw_event_log, stop_requested};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -47,6 +47,10 @@ async fn websocket_connection_inner(
         .await
         .map_err(|error| E2eError::Scenario(error.to_string()))?;
     let (mut writer, mut reader) = socket.split();
+    // Register before acknowledgements can make the client publish source
+    // readiness; otherwise an immediate post-ready notification can be lost.
+    let mut events = state.events.subscribe();
+    let mut accepts_all_logs = false;
     for _ in 0..3 {
         let Some(Ok(message)) = reader.next().await else {
             return Ok(());
@@ -63,7 +67,10 @@ async fn websocket_connection_inner(
             .unwrap_or_default();
         let result = match (method, id) {
             ("eth_chainId", 3) => json!("0x2105"),
-            ("eth_subscribe", 1) => json!("pending"),
+            ("eth_subscribe", 1) => {
+                accepts_all_logs = request.pointer("/params/1/topics").is_none();
+                json!("pending")
+            }
             ("eth_subscribe", 2) => json!("flashblocks"),
             _ => {
                 return Err(E2eError::Scenario(format!(
@@ -78,7 +85,6 @@ async fn websocket_connection_inner(
             .await
             .map_err(|error| E2eError::Scenario(error.to_string()))?;
     }
-    let mut events = state.events.subscribe();
     loop {
         tokio::select! {
             incoming = reader.next() => {
@@ -95,8 +101,30 @@ async fn websocket_connection_inner(
             }
             event = events.recv() => {
                 let Ok(event) = event else { break };
+                if let MockEvent::Log(log) = event {
+                    if !accepts_all_logs {
+                        continue;
+                    }
+                    let notification = json!({
+                        "jsonrpc": "2.0",
+                        "method": "eth_subscription",
+                        "params": {
+                            "subscription": "pending",
+                            "result": raw_event_log(log)
+                        }
+                    });
+                    if writer
+                        .send(Message::Text(notification.to_string()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
                 let block = match event {
                     MockEvent::Header(block) | MockEvent::Gap(block) => block,
+                    MockEvent::Log(_) => unreachable!("log handled above"),
                 };
                 let notification = json!({
                     "jsonrpc": "2.0",

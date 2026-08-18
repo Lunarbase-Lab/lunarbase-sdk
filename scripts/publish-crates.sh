@@ -13,8 +13,8 @@ crate_list="$(
     'import { releaseCrates } from "./scripts/release-packages.mjs"; console.log(releaseCrates.map(({ name }) => name).join("\n"));'
 )"
 mapfile -t crates <<<"${crate_list}"
-if [[ "${#crates[@]}" -ne 5 ]] || [[ -z "${crates[0]}" ]]; then
-  echo "Expected exactly five release crates, found ${#crates[@]}" >&2
+if [[ "${#crates[@]}" -ne 4 ]] || [[ -z "${crates[0]}" ]]; then
+  echo "Expected exactly four release crates, found ${#crates[@]}" >&2
   exit 2
 fi
 

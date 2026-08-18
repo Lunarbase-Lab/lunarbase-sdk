@@ -9,8 +9,7 @@
 //! recover from the HTTP source before claiming freshness again.
 
 use crate::rpc::backend::RpcHttpBackend;
-use crate::rpc::client::RpcHttpClient;
-use crate::rpc::codec::parse_rpc_log;
+use crate::rpc::codec::parse_filtered_rpc_log;
 use crate::rpc::snapshot::RpcSnapshotProvider;
 use async_stream::stream;
 use futures_util::StreamExt;
@@ -26,73 +25,21 @@ use lunarbase_client::{
 use serde_json::Value;
 use std::{collections::VecDeque, sync::Arc, time::Instant};
 
+mod config;
 mod connection;
 mod ordering;
 pub(crate) mod protocol;
 
+pub use config::{EvmDeliveryMode, WsRpcConfig};
+
 use connection::{establish, websocket_payload};
 use ordering::{
-    drain_completed_block, is_at_or_before_watermark, observe_standard_head,
-    standard_head_deadline, take_ready_standard_head, validate_preceding_startup_logs,
+    backfill_pages, drain_completed_block, is_at_or_before_watermark, observe_standard_head,
+    promote_updates, retraction_updates, standard_head_deadline, take_ready_standard_head,
+    validate_finalized_advance, validate_finalized_page, validate_preceding_startup_logs,
     with_execution_context,
 };
 use protocol::{WsHead, head_discontinuity, parse_ws_head_with_execution_context, same_head};
-
-/// Bounds transport frames and the number of updates that may wait for a
-/// block-head watermark.  Both bounds are required for predictable memory
-/// use when an RPC provider stops producing heads or sends a burst of logs.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WsRpcConfig {
-    /// Maximum accepted WebSocket frame size before the stream fails closed.
-    pub max_frame_bytes: usize,
-    /// Maximum normalized updates retained while waiting for an ordering watermark.
-    pub reorder_capacity: usize,
-    /// Ethereum subscription method, either `logs` or provider-specific `pendingLogs`.
-    pub logs_subscription: String,
-    /// Accept multiple monotonically sequenced heads at one block height.
-    pub progressive_heads: bool,
-}
-
-impl Default for WsRpcConfig {
-    fn default() -> Self {
-        Self {
-            max_frame_bytes: 256 * 1024,
-            reorder_capacity: 4096,
-            logs_subscription: "logs".into(),
-            progressive_heads: false,
-        }
-    }
-}
-
-impl WsRpcConfig {
-    /// Returns the official Base `pendingLogs + newHeads` profile.
-    pub fn base_flashblocks() -> Self {
-        Self {
-            logs_subscription: "pendingLogs".into(),
-            progressive_heads: true,
-            ..Self::default()
-        }
-    }
-
-    /// Validates the hard bounds used to protect the WebSocket ingestion
-    /// queue. A zero bound would either make every frame invalid or make the
-    /// reorder buffer unable to accept its first update.
-    pub fn validate(&self) -> Result<(), SourceError> {
-        if self.max_frame_bytes == 0
-            || self.reorder_capacity == 0
-            || !matches!(self.logs_subscription.as_str(), "logs" | "pendingLogs")
-        {
-            return Err(SourceError::Unavailable(
-                "WS frame and reorder bounds must be non-zero".into(),
-            ));
-        }
-        Ok(())
-    }
-
-    fn holds_standard_logs_until_successor(&self) -> bool {
-        self.logs_subscription == "logs"
-    }
-}
 
 /// Generic EVM source with HTTP authority and WebSocket realtime updates.
 #[derive(Clone)]
@@ -105,73 +52,6 @@ pub struct EvmRpcSource {
     config: WsRpcConfig,
 }
 
-impl EvmRpcSource {
-    /// Creates a standard Ethereum WebSocket backend with conservative
-    /// defaults for frame size and out-of-order buffering.
-    pub fn new(
-        rpc: RpcHttpClient,
-        ws_endpoint: impl Into<String>,
-        network: Network,
-        chain_id: u64,
-        snapshot_tag: impl Into<String>,
-    ) -> Self {
-        Self::with_config(
-            rpc,
-            ws_endpoint,
-            network,
-            chain_id,
-            snapshot_tag,
-            WsRpcConfig::default(),
-        )
-    }
-
-    /// Creates the official Base Flashblocks source.
-    pub fn base_flashblocks(
-        rpc: RpcHttpClient,
-        ws_endpoint: impl Into<String>,
-        chain_id: u64,
-    ) -> Self {
-        Self::with_config(
-            rpc,
-            ws_endpoint,
-            Network::Base,
-            chain_id,
-            "latest",
-            WsRpcConfig::base_flashblocks(),
-        )
-    }
-
-    /// Creates a WebSocket backend with explicit resource limits.
-    ///
-    /// The HTTP client remains the source of block-tagged snapshots and
-    /// canonical backfills; `ws_endpoint` is used only for realtime logs and
-    /// head notifications.
-    pub fn with_config(
-        rpc: RpcHttpClient,
-        ws_endpoint: impl Into<String>,
-        network: Network,
-        chain_id: u64,
-        snapshot_tag: impl Into<String>,
-        config: WsRpcConfig,
-    ) -> Self {
-        Self {
-            http: RpcHttpBackend::new(rpc, network, chain_id, snapshot_tag),
-            ws_endpoint: Arc::from(ws_endpoint.into()),
-            config,
-        }
-    }
-
-    /// Returns the configured WebSocket endpoint.
-    pub fn endpoint(&self) -> &str {
-        &self.ws_endpoint
-    }
-
-    /// Returns the transport limits used by this backend.
-    pub fn config(&self) -> &WsRpcConfig {
-        &self.config
-    }
-}
-
 impl ChainDataSource for EvmRpcSource {
     fn network(&self) -> Network {
         self.http.network()
@@ -181,6 +61,7 @@ impl ChainDataSource for EvmRpcSource {
         &self,
         deployment: &DeploymentConfig,
     ) -> Result<BootstrapSnapshot, SourceError> {
+        self.validate_config()?;
         if deployment.network != self.http.network() {
             return Err(SourceError::NetworkMismatch);
         }
@@ -195,20 +76,24 @@ impl ChainDataSource for EvmRpcSource {
     }
 
     async fn backfill(&self, request: BackfillRequest) -> Result<Vec<ContractLog>, SourceError> {
+        self.validate_config()?;
         self.http.backfill(request).await
     }
 
     async fn subscribe(&self, filter: ContractFilter) -> Result<SourceStream, SourceError> {
-        self.config.validate()?;
-        let established = establish(
-            self.ws_endpoint.as_ref(),
-            &filter,
-            &self.config.logs_subscription,
-            self.http.chain_id(),
-            self.config.max_frame_bytes,
-            self.config.reorder_capacity,
-        )
-        .await?;
+        self.validate_config()?;
+        let (_, established) = tokio::try_join!(
+            self.http.verify_chain_id(),
+            establish(
+                self.ws_endpoint.as_ref(),
+                &filter,
+                &self.config.logs_subscription,
+                self.http.chain_id(),
+                self.config.max_frame_bytes,
+                self.config.reorder_capacity,
+                self.config.max_prefetch_bytes,
+            ),
+        )?;
         let logs_subscription = established.logs_subscription;
         let heads_subscription = established.heads_subscription;
         let mut buffered = established.buffered;
@@ -218,8 +103,16 @@ impl ChainDataSource for EvmRpcSource {
         let chain_id = self.http.chain_id();
         let http = self.http.clone();
         let config = self.config.clone();
+        let initial_finalized = if config.delivery_mode == EvmDeliveryMode::Finalized {
+            Some(http.snapshot_cursor(http.network()).await?)
+        } else {
+            None
+        };
         let stream = stream! {
-            let mut reorder = match CursorReorderBuffer::new(config.reorder_capacity) {
+            let mut reorder = match CursorReorderBuffer::with_limits(
+                config.reorder_capacity,
+                config.reorder_byte_capacity,
+            ) {
                 Ok(buffer) => buffer,
                 Err(error) => {
                     yield Err(error);
@@ -230,6 +123,7 @@ impl ChainDataSource for EvmRpcSource {
             let mut open_standard_heads = VecDeque::new();
             let mut first_standard_head_block = None;
             let mut published_watermark: Option<ChainCursor> = None;
+            let mut finalized_watermark = initial_finalized;
             let mut source_sequence = 0_u64;
 
             loop {
@@ -241,7 +135,6 @@ impl ChainDataSource for EvmRpcSource {
                     {
                         tokio::select! {
                             biased;
-                            message = reader.next() => message,
                             () = tokio::time::sleep_until(deadline.into()) => {
                                 let Some(completed_head) =
                                     take_ready_standard_head(&mut open_standard_heads, Instant::now())
@@ -269,12 +162,14 @@ impl ChainDataSource for EvmRpcSource {
                                     yield Err(error);
                                     break;
                                 }
+                                promote_updates(&mut updates, Commitment::Canonical);
                                 for update in updates {
                                     yield Ok(update);
                                 }
                                 published_watermark = Some(completed_head.cursor);
                                 continue;
-                            }
+                            },
+                            message = reader.next() => message,
                         }
                     } else {
                         reader.next().await
@@ -355,7 +250,15 @@ impl ChainDataSource for EvmRpcSource {
                 };
 
                 if logs_subscription == subscription {
-                    let mut log = match parse_rpc_log(result, chain_id, Commitment::Realtime) {
+                    if config.delivery_mode == EvmDeliveryMode::Finalized {
+                        continue;
+                    }
+                    let mut log = match parse_filtered_rpc_log(
+                        result,
+                        chain_id,
+                        config.delivery_mode.commitment(),
+                        &filter,
+                    ) {
                         Ok(log) => log,
                         Err(error) => {
                             yield Err(SourceError::Unavailable(format!("invalid RPC log notification: {error}")));
@@ -365,10 +268,9 @@ impl ChainDataSource for EvmRpcSource {
                     source_sequence = source_sequence.saturating_add(1);
                     log.cursor.source_sequence = Some(source_sequence);
                     if log.removed {
-                        yield Ok(ChainUpdate::Gap {
-                            cursor: Some(log.cursor),
-                            reason: "RPC retracted a subscription log; canonical recovery required".into(),
-                        });
+                        for update in retraction_updates(log) {
+                            yield Ok(update);
+                        }
                         break;
                     }
                     if config.holds_standard_logs_until_successor()
@@ -385,6 +287,10 @@ impl ChainDataSource for EvmRpcSource {
                     {
                         log.cursor.execution_block_number =
                             head.cursor.execution_block_number;
+                    }
+                    if config.delivery_mode == EvmDeliveryMode::Realtime {
+                        yield Ok(ChainUpdate::Log(log));
+                        continue;
                     }
                     let update = ChainUpdate::Log(log);
                     match reorder.push(update) {
@@ -421,8 +327,66 @@ impl ChainDataSource for EvmRpcSource {
                     {
                         continue;
                     }
+                    if config.delivery_mode == EvmDeliveryMode::Finalized {
+                        last_head = Some(head);
+                        let finalized_head = match http.snapshot_block_ref(http.network()).await {
+                            Ok(head) => head,
+                            Err(error) => {
+                                yield Err(error);
+                                break;
+                            }
+                        };
+                        let finalized = finalized_head.cursor.clone();
+                        let previous = finalized_watermark
+                            .as_ref()
+                            .expect("finalized mode initializes its watermark");
+                        match validate_finalized_advance(previous, &finalized) {
+                            Ok(false) => {
+                                yield Ok(ChainUpdate::Head(finalized_head));
+                                continue;
+                            }
+                            Err(error) => {
+                                yield Err(error);
+                                break;
+                            }
+                            Ok(true) => {}
+                        }
+                        let from_block = previous.block_number.saturating_add(1);
+                        for page in backfill_pages(
+                            from_block,
+                            finalized.block_number,
+                            config.backfill_page_blocks,
+                        ) {
+                            let request = BackfillRequest {
+                                from_block: *page.start(),
+                                to_block: *page.end(),
+                                filter: filter.clone(),
+                            };
+                            let logs = match http.backfill(request).await {
+                                Ok(logs) => logs,
+                                Err(error) => {
+                                    yield Err(error);
+                                    return;
+                                }
+                            };
+                            let logs = match validate_finalized_page(logs, &page) {
+                                Ok(logs) => logs,
+                                Err(error) => {
+                                    yield Err(error);
+                                    return;
+                                }
+                            };
+                            for log in logs {
+                                yield Ok(ChainUpdate::Log(log));
+                            }
+                        }
+                        yield Ok(ChainUpdate::Head(finalized_head));
+                        finalized_watermark = Some(finalized);
+                        continue;
+                    }
                     source_sequence = source_sequence.saturating_add(1);
                     head.cursor.source_sequence = Some(source_sequence);
+                    head.cursor.commitment = config.delivery_mode.commitment();
                     if config.holds_standard_logs_until_successor()
                         && first_standard_head_block.is_none()
                     {
@@ -440,10 +404,13 @@ impl ChainDataSource for EvmRpcSource {
                         }
                         if head_discontinuity(previous, &head, config.progressive_heads) {
                             yield Ok(ChainUpdate::Reorg {
-                                old_head: previous.cursor.clone(),
-                                new_head: head.cursor.clone(),
+                                old_head: previous.clone(),
+                                new_head: head.clone(),
                             });
-                            reorder = match CursorReorderBuffer::new(config.reorder_capacity) {
+                            reorder = match CursorReorderBuffer::with_limits(
+                                config.reorder_capacity,
+                                config.reorder_byte_capacity,
+                            ) {
                                 Ok(buffer) => buffer,
                                 Err(error) => {
                                     yield Err(error);
@@ -455,14 +422,23 @@ impl ChainDataSource for EvmRpcSource {
                         }
                     }
                     last_head = Some(head.clone());
-                    if config.holds_standard_logs_until_successor() {
-                        observe_standard_head(
+                    if config.delivery_mode == EvmDeliveryMode::Realtime {
+                        yield Ok(ChainUpdate::Head(head));
+                        continue;
+                    }
+                    if config.holds_standard_logs_until_successor()
+                        && let Err(error) = observe_standard_head(
                             &mut open_standard_heads,
                             head.clone(),
                             Instant::now(),
-                        );
+                            config.reorder_capacity,
+                            config.reorder_byte_capacity,
+                        )
+                    {
+                        yield Err(error);
+                        break;
                     }
-                    if let Err(error) = reorder.push(ChainUpdate::Head(head.cursor.clone())) {
+                    if let Err(error) = reorder.push(ChainUpdate::Head(head.clone())) {
                         yield Err(error);
                         break;
                     }
@@ -478,14 +454,18 @@ impl ChainDataSource for EvmRpcSource {
     }
 
     async fn canonical_head(&self) -> Result<ChainCursor, SourceError> {
+        self.validate_config()?;
         self.http.snapshot_cursor(self.http.network()).await
     }
 
     async fn validate_checkpoint(&self, checkpoint: &Checkpoint) -> Result<bool, SourceError> {
+        self.validate_config()?;
         self.http.validate_checkpoint(checkpoint).await
     }
 }
 
+#[cfg(test)]
+mod delivery_tests;
 #[cfg(test)]
 #[path = "ws_tests.rs"]
 mod tests;

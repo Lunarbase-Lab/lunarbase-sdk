@@ -135,6 +135,7 @@ fn parse_head(value: &Value, block_start: bool) -> Result<ExecutionHead, ParserP
         sequence: required_u64(value, "seqno")?,
         block_number: required_u64(value, "blockNumber")?,
         block_hash: parse_block_tag_hash(value)?,
+        parent_hash: parse_optional_hex32(value.get("parentHash"), "parentHash")?,
         commitment: if block_start {
             Commitment::Realtime
         } else {
@@ -193,6 +194,7 @@ fn parse_log(value: &Value) -> Result<ExecutionLog, ParserProtocolError> {
             })?,
         topics,
         data,
+        removed: false,
         commitment: Commitment::Realtime,
     })
 }

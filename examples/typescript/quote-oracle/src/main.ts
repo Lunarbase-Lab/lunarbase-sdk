@@ -8,6 +8,7 @@ import {
   solidityQuoteAmount,
   type LaneState,
   type Address,
+  type QuotePolicy,
   type QuoteRequest,
   type QuoteState,
 } from "@lunarbase-lab/pmm-v2-math";
@@ -80,7 +81,12 @@ const lane = (input: LaneVector, assetReserve: bigint): LaneState =>
     assetReserve,
     value(input.principal),
   );
-function build(vector: Vector): { state: QuoteState; request: QuoteRequest; executionBlockNumber: bigint } {
+function build(vector: Vector): {
+  state: QuoteState;
+  policy: QuotePolicy;
+  request: QuoteRequest;
+  executionBlockNumber: bigint;
+} {
   const cash = parseAddress(vector.cash);
   const assetIn = parseAddress(vector.assetIn);
   const assetOut = parseAddress(vector.assetOut);
@@ -90,14 +96,8 @@ function build(vector: Vector): { state: QuoteState; request: QuoteRequest; exec
     cash,
     cashReserve: assetOut.toLowerCase() === cash.toLowerCase() ? outputReserve : maxReserve,
     lanes: new Map<Address, LaneState>(),
-    feeProfile: {
-      whitelisted: vector.whitelisted,
-      blacklistFeeMultiplier: value(vector.blacklistFeeMultiplier),
-      partnerFeeBps: new Map<Address, number>(),
-    },
+    blacklistFeeMultiplier: value(vector.blacklistFeeMultiplier),
   };
-  const feeAsset = vector.mode === "ExactIn" ? assetOut : assetIn;
-  state.feeProfile.partnerFeeBps.set(feeAsset, Number(vector.partnerFeeBps));
   for (const [asset, input] of [
     [assetIn, vector.laneIn],
     [assetOut, vector.laneOut],
@@ -108,6 +108,10 @@ function build(vector: Vector): { state: QuoteState; request: QuoteRequest; exec
     }
   return {
     state,
+    policy: {
+      feeClass: vector.whitelisted ? "Whitelisted" : "NonWhitelisted",
+      verifiedPartnerFeeBps: Number(vector.partnerFeeBps),
+    },
     request: {
       assetIn,
       assetOut,
@@ -155,7 +159,7 @@ function output(vector: Vector): Hex.Hex {
   const built = build(vector);
   let words: bigint[];
   try {
-    const outcome = quote(built.request, built.executionBlockNumber, built.state);
+    const outcome = quote(built.request, built.executionBlockNumber, built.state, built.policy);
     words =
       outcome.kind === "Available"
         ? [
@@ -164,8 +168,8 @@ function output(vector: Vector): Hex.Hex {
             outcome.result.amountOut,
             BigInt(outcome.result.feeAsset),
             outcome.result.feeAmount,
-            outcome.result.partnerFee,
-            outcome.result.treasuryFee,
+            outcome.result.feeAllocation?.partnerFee ?? 0n,
+            outcome.result.feeAllocation?.treasuryFee ?? outcome.result.feeAmount,
           ]
         : [
             0n,

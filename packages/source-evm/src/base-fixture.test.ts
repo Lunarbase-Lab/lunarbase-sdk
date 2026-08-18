@@ -20,7 +20,7 @@ test("Base fixture accepts positioned pendingLogs with a zero block hash", async
       chainId: 8453n,
     },
     {
-      fetcher: (() => Promise.reject(new Error("unused"))) as typeof fetch,
+      fetcher: chainIdFetcher(),
       webSocketFactory: () => socket,
     },
   );
@@ -87,4 +87,14 @@ class FixtureSocket implements WebSocketLike {
   emit(type: string, event: SocketEvent): void {
     for (const listener of this.listeners.get(type) ?? []) listener(event);
   }
+}
+
+function chainIdFetcher(): typeof fetch {
+  return (async (_input: string | URL | Request, init?: RequestInit) => {
+    const request = JSON.parse(String(init?.body)) as { readonly id: number; readonly method: string };
+    assert.equal(request.method, "eth_chainId");
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: "0x2105" }), {
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
 }

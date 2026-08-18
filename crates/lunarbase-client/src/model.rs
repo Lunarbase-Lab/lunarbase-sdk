@@ -1,17 +1,27 @@
 //! Provider-independent runtime model shared by every network source.
 
-use lunarbase_math::QuoteState;
 use lunarbase_math::arithmetic::BPS;
 use lunarbase_math::slot0::{
     lane_slot0_ask_fee_bps, lane_slot0_bid_fee_bps, lane_slot0_slippage_k_bps,
 };
 use lunarbase_math::{Address, B256, Bytes, U256};
+use lunarbase_math::{FeeClass, QuoteState};
 use serde::{Deserialize, Serialize};
+
+/// Smallest byte budget that can always carry an internally generated gap.
+pub const MIN_UPDATE_QUEUE_BYTE_CAPACITY: usize = 1024;
 use std::collections::HashSet;
 use thiserror::Error;
 
+mod correction;
+mod retention;
+pub use correction::{
+    ChainCorrection, MAX_CORRECTION_BRANCH_BLOCKS, MAX_CORRECTION_LOGS,
+    MAX_CORRECTION_RETAINED_BYTES,
+};
+
 /// Current durable checkpoint schema.
-pub const SCHEMA_VERSION: u16 = 5;
+pub const SCHEMA_VERSION: u16 = 6;
 
 /// Quote-math compatibility profile implemented by both SDKs.
 pub const MATH_COMPATIBILITY_VERSION: &str = "lunarbase-pmm-v2";
@@ -121,18 +131,47 @@ impl ChainCursor {
     /// them to the common reducer. `source_sequence` is considered only when
     /// transaction and log coordinates are unavailable.
     pub fn event_order(&self) -> (u64, u32, u32, u64, u32) {
-        let transport_order = if self.transaction_index.is_none() && self.log_index.is_none() {
-            self.source_sequence.unwrap_or(0)
-        } else {
-            0
-        };
+        let (transport_order, transport_sub_index) =
+            if self.transaction_index.is_none() && self.log_index.is_none() {
+                (
+                    self.source_sequence.unwrap_or(0),
+                    self.source_sub_index.unwrap_or(0),
+                )
+            } else {
+                (0, 0)
+            };
         (
             self.block_number,
             self.transaction_index.unwrap_or(0),
             self.log_index.unwrap_or(0),
             transport_order,
-            self.source_sub_index.unwrap_or(0),
+            transport_sub_index,
         )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+/// Block identity and parent linkage carried by every head-level update.
+///
+/// Some proposal transports announce a height before the final EVM block hash
+/// is known. Those sources leave either hash absent and later publish a
+/// complete `BlockRef`; fork-aware durable consumers fail closed until both
+/// hashes are available.
+pub struct BlockRef {
+    /// Ordered source position and execution height for this block.
+    pub cursor: ChainCursor,
+    /// Hash of the parent block or proposal, when supplied by the source.
+    #[serde(default)]
+    pub parent_hash: Option<B256>,
+}
+
+impl BlockRef {
+    /// Creates a block reference without changing cursor ordering semantics.
+    pub const fn new(cursor: ChainCursor, parent_hash: Option<B256>) -> Self {
+        Self {
+            cursor,
+            parent_hash,
+        }
     }
 }
 
@@ -154,20 +193,39 @@ pub struct ContractLog {
     pub cursor: ChainCursor,
 }
 
+impl ContractLog {
+    /// Returns the retained-memory charge used for queue budgeting.
+    ///
+    /// Retention boundaries call [`Self::normalize_for_retention`] before
+    /// admitting this charge, so `data.len()` then describes an exact-size
+    /// owned allocation rather than a slice of a larger backing buffer.
+    pub fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            .saturating_add(
+                self.topics
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<B256>()),
+            )
+            .saturating_add(self.data.len())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 /// Complete normalized update vocabulary consumed by the reducer.
 pub enum ChainUpdate {
     /// Advances chain position without changing quote-critical contract state.
-    Head(ChainCursor),
+    Head(BlockRef),
     /// Applies one contract log at its normalized event position.
     Log(ContractLog),
     /// Signals that the previous head was replaced by another branch.
     Reorg {
         /// Last head observed on the abandoned branch.
-        old_head: ChainCursor,
+        old_head: BlockRef,
         /// First known head on the replacement branch.
-        new_head: ChainCursor,
+        new_head: BlockRef,
     },
+    /// Atomically replaces a bounded optimistic branch without interrupting quotes.
+    Correction(Box<ChainCorrection>),
     /// Signals missing or unordered source data that requires canonical recovery.
     Gap {
         /// Last trustworthy or first affected source position, when known.
@@ -175,6 +233,23 @@ pub enum ChainUpdate {
         /// Human-readable discontinuity reported by the source.
         reason: String,
     },
+}
+
+impl ChainUpdate {
+    /// Returns the retained-memory charge for bounded handoff queues.
+    ///
+    /// Queueing APIs normalize dynamic byte buffers before retaining an update.
+    pub fn retained_bytes(&self) -> usize {
+        let dynamic = match self {
+            Self::Log(log) => log
+                .retained_bytes()
+                .saturating_sub(std::mem::size_of::<ContractLog>()),
+            Self::Gap { reason, .. } => reason.capacity(),
+            Self::Correction(correction) => correction.retained_bytes(),
+            Self::Head(_) | Self::Reorg { .. } => 0,
+        };
+        std::mem::size_of::<Self>().saturating_add(dynamic)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -240,10 +315,10 @@ pub struct DeploymentConfig {
     pub chain_id: u64,
     /// LunarBase Core contract whose quote-critical state is indexed.
     pub core: Address,
-    /// Single router whose whitelist and partner-fee profile is tracked.
-    pub router: Address,
-    /// Whether bootstrap must reject a router that is not whitelisted.
-    pub expect_whitelisted: bool,
+    /// Mandatory economic fee class used by every quote from this runtime.
+    pub fee_class: FeeClass,
+    /// Optional execution caller whose accounting allocation is verified.
+    pub verified_router: Option<Address>,
     /// First block that can contain relevant deployment logs.
     pub deployment_block: u64,
     /// Pinned ERC-1967 implementation behind the Core proxy.
@@ -262,9 +337,12 @@ impl DeploymentConfig {
         if self.chain_id == 0 {
             return Err(SourceError::Unavailable("invalid chain id".into()));
         }
-        if self.core == Address::ZERO || self.router == Address::ZERO {
+        if self.core == Address::ZERO {
+            return Err(SourceError::Unavailable("Core must be non-zero".into()));
+        }
+        if self.verified_router == Some(Address::ZERO) {
             return Err(SourceError::Unavailable(
-                "Core and configured router must be non-zero".into(),
+                "verified router must be non-zero".into(),
             ));
         }
         if self.expected_implementation == Address::ZERO {
@@ -316,12 +394,8 @@ pub struct Checkpoint {
     pub network: Network,
     /// Core contract whose state is serialized.
     pub core: Address,
-    /// Configured router whose fee profile is embedded in the state.
-    pub router: Address,
     /// First deployment block used for lane discovery and recovery.
     pub deployment_block: u64,
-    /// Router whitelist policy used when the state was bootstrapped.
-    pub expect_whitelisted: bool,
     /// Fixed lane policy used when the state was bootstrapped.
     pub explicit_lane_assets: Vec<Address>,
     /// Last fully applied and verified source position.
@@ -343,9 +417,7 @@ impl Checkpoint {
             && self.chain_id == deployment.chain_id
             && self.network == deployment.network
             && self.core == deployment.core
-            && self.router == deployment.router
             && self.deployment_block == deployment.deployment_block
-            && self.expect_whitelisted == deployment.expect_whitelisted
             && same_address_set(&self.explicit_lane_assets, &deployment.explicit_lane_assets)
             && self.has_valid_structure()
     }
@@ -369,13 +441,6 @@ impl Checkpoint {
                 && lane_slot0_bid_fee_bps(lane.slot0) <= BPS
                 && U256::from(lane_slot0_slippage_k_bps(lane.slot0)) <= BPS
         });
-        let partner_fees_are_valid = self
-            .state
-            .fee_profile
-            .partner_fee_bps
-            .iter()
-            .all(|(asset, fee)| *asset != Address::ZERO && U256::from(*fee) <= BPS);
-
         self.chain_id != 0
             && self.cursor.chain_id == self.chain_id
             && self.cursor.block_number >= self.deployment_block
@@ -388,13 +453,10 @@ impl Checkpoint {
             && self.expected_implementation != Address::ZERO
             && self.expected_implementation_code_hash != B256::ZERO
             && self.core != Address::ZERO
-            && self.router != Address::ZERO
             && self.state.cash != Address::ZERO
-            && self.state.fee_profile.whitelisted == self.expect_whitelisted
             && unique_explicit_lanes.len() == self.explicit_lane_assets.len()
             && !unique_explicit_lanes.contains(&Address::ZERO)
             && lanes_are_valid
-            && partner_fees_are_valid
     }
 }
 

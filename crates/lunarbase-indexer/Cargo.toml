@@ -12,7 +12,7 @@ publish = false
 default = ["base"]
 evm = ["dep:lunarbase-source-evm"]
 base = ["evm"]
-monad = ["dep:lunarbase-source-monad"]
+monad = ["dep:lunarbase-source-monad", "lunarbase-source-monad/protocol-v2"]
 monad-native = [
     "monad",
     "dep:lunarbase-source-monad-native",
@@ -25,7 +25,6 @@ all-networks = ["base", "monad", "arbitrum"]
 workspace = true
 
 [dependencies]
-alloy-primitives.workspace = true
 axum.workspace = true
 clap.workspace = true
 lunarbase-source-arbitrum = { workspace = true, optional = true }

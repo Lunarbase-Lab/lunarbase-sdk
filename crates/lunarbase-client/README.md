@@ -8,7 +8,7 @@ Status: **fully supported**.
 
 ```toml
 [dependencies]
-lunarbase-client = { package = "lunarbase-pmm-v2-client", version = "0.3.1" }
+lunarbase-client = { package = "lunarbase-pmm-v2-client", version = "0.4.0" }
 ```
 
 Install one network source crate alongside the client.
@@ -30,3 +30,8 @@ client.shutdown().await;
 - Quote calls read one coherent in-memory state snapshot.
 - `ChainDataSource` covers bootstrap, backfill, ordered updates, and checkpoint validation.
 - Gaps and canonical mismatches suspend readiness until recovery completes.
+- The source/reducer handoff is bounded by both update count and retained bytes;
+  overflow fails closed into canonical recovery.
+- `connect` creates no event-delivery queue. The explicitly enabled event
+  observer is best-effort and nonblocking; use `lunarbase-event-worker` for
+  durable logs.

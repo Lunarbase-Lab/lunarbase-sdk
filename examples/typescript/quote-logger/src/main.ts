@@ -30,8 +30,8 @@ async function main(): Promise<void> {
     network,
     chainId,
     core: environment.core,
-    router: environment.router,
-    expectWhitelisted: environment.expectWhitelisted,
+    feeClass: environment.feeClass,
+    verifiedRouter: environment.verifiedRouter,
     deploymentBlock: environment.deploymentBlock,
     expectedImplementation: implementation,
     expectedImplementationCodeHash: implementationCodeHash,
@@ -42,18 +42,17 @@ async function main(): Promise<void> {
     deployment,
     filter: { address: environment.core, topics: quoteCriticalTopics() },
     queueBound: 4096,
+    queueByteBound: 64 * 1024 * 1024,
     reconnectDelayMilliseconds: 1_000,
     sourceStallTimeoutMilliseconds: 30_000,
+    sourceOperationTimeoutMilliseconds: 15_000,
   };
-  if (environment.usesDemoRouter)
-    writeLog("warn", "ROUTER_ADDRESS is unset; using a non-whitelisted demonstration fee profile", {
-      router: environment.router,
-    });
   writeLog("info", "connecting LunarBase client", {
     chainId,
     network,
     core: environment.core,
-    router: environment.router,
+    feeClass: environment.feeClass,
+    verifiedRouter: environment.verifiedRouter,
     rpcWs: environment.wsUrl,
   });
 

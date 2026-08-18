@@ -21,16 +21,14 @@ import {
 import {
   laneExists,
   lanePaused,
+  type FeeAllocation,
   type LaneState,
   type QuoteOutcome,
+  type QuotePolicy,
   type QuoteRequest,
   type QuoteState,
   type UnavailableReason,
 } from "./types.js";
-
-function partnerFee(state: QuoteState, asset: Address): bigint {
-  return BigInt(state.feeProfile.partnerFeeBps.get(asset.toLowerCase() as Address) ?? 0);
-}
 
 function laneOrReason(state: QuoteState, asset: Address, executionBlockNumber: bigint): LaneState | UnavailableReason {
   const lane = state.lanes.get(asset.toLowerCase() as Address);
@@ -56,6 +54,7 @@ function laneSpread(anchor: bigint, feeBps: bigint, slippageBps: bigint, exactIn
 
 function assembleQuote(
   state: QuoteState,
+  policy: QuotePolicy,
   request: QuoteRequest,
   feeAsset: Address,
   anchor: bigint,
@@ -82,15 +81,20 @@ function assembleQuote(
   const insufficient = amountOut > outputReserve || (request.mode === "ExactIn" && fee > outputReserve - amountOut);
   if (insufficient)
     return { kind: "Unavailable", reason: { kind: "InsufficientOutputReserve", asset: request.assetOut } };
-  const [partner, treasury] = splitFee(fee, partnerFee(state, feeAsset));
+  let feeAllocation: FeeAllocation | undefined;
+  if (policy.verifiedPartnerFeeBps !== undefined) {
+    const [partnerFee, treasuryFee] = splitFee(fee, BigInt(policy.verifiedPartnerFeeBps));
+    feeAllocation = { partnerFee, treasuryFee };
+  }
   return {
     kind: "Available",
-    result: { amountIn, amountOut, feeAsset, feeAmount: fee, partnerFee: partner, treasuryFee: treasury },
+    result: { amountIn, amountOut, feeAsset, feeAmount: fee, feeAllocation },
   };
 }
 
 function directQuote(
   state: QuoteState,
+  policy: QuotePolicy,
   request: QuoteRequest,
   laneAsset: Address,
   lane: LaneState,
@@ -105,11 +109,7 @@ function directQuote(
   const principal = principalCashValue(lane);
   if (principal === 0n) return { kind: "Unavailable", reason: { kind: "ZeroPrincipal", asset: laneAsset } };
   const rawFee = cashToAsset ? laneSlot0AskFeeBps(lane.slot0) : laneSlot0BidFeeBps(lane.slot0);
-  const feeBps = calculateFeeBpsForRouter(
-    state.feeProfile.whitelisted,
-    state.feeProfile.blacklistFeeMultiplier,
-    rawFee,
-  );
+  const feeBps = calculateFeeBpsForRouter(policy.feeClass === "Whitelisted", state.blacklistFeeMultiplier, rawFee);
   const swapCash = cashToAsset
     ? request.mode === "ExactIn"
       ? request.amount
@@ -119,11 +119,12 @@ function directQuote(
       : request.amount;
   const slippage = quoteLaneSlippageBps(swapCash, principal, BigInt(laneSlot0SlippageKBps(lane.slot0)));
   const [fee, slippageAmount] = laneSpread(anchor, feeBps, slippage, request.mode === "ExactIn");
-  return assembleQuote(state, request, feeAsset, anchor, fee, slippageAmount);
+  return assembleQuote(state, policy, request, feeAsset, anchor, fee, slippageAmount);
 }
 
 function routeQuote(
   state: QuoteState,
+  policy: QuotePolicy,
   request: QuoteRequest,
   inputLane: LaneState,
   outputLane: LaneState,
@@ -150,8 +151,8 @@ function routeQuote(
     BigInt(laneSlot0SlippageKBps(outputLane.slot0)),
   );
   const slippage = quoteLaneSlippageBps(intermediateCash, checkedAdd(firstPrincipal, secondPrincipal), weightedK);
-  const whitelisted = state.feeProfile.whitelisted;
-  const multiplier = state.feeProfile.blacklistFeeMultiplier;
+  const whitelisted = policy.feeClass === "Whitelisted";
+  const multiplier = state.blacklistFeeMultiplier;
   const bid = calculateFeeBpsForRouter(whitelisted, multiplier, laneSlot0BidFeeBps(inputLane.slot0));
   const ask = calculateFeeBpsForRouter(whitelisted, multiplier, laneSlot0AskFeeBps(outputLane.slot0));
   const feeBps = checkedAdd(bid, ask);
@@ -160,7 +161,7 @@ function routeQuote(
   const total =
     request.mode === "ExactIn" ? quoteLaneExactInFee(anchor, totalBps) : quoteLaneExactOutFee(anchor, totalBps);
   const feeAsset = request.mode === "ExactIn" ? request.assetOut : request.assetIn;
-  return assembleQuote(state, request, feeAsset, anchor, fee, checkedSub(total, fee));
+  return assembleQuote(state, policy, request, feeAsset, anchor, fee, checkedSub(total, fee));
 }
 
 /**
@@ -169,7 +170,12 @@ function routeQuote(
  * `executionBlockNumber` is the EVM-visible block tracked by the runtime.
  * Pure math never reads RPC, persistence, wall-clock freshness, or a router.
  */
-export function quote(request: QuoteRequest, executionBlockNumber: bigint, state: QuoteState): QuoteOutcome {
+export function quote(
+  request: QuoteRequest,
+  executionBlockNumber: bigint,
+  state: QuoteState,
+  policy: QuotePolicy,
+): QuoteOutcome {
   assertU256(request.amount, "amount");
   assertU256(executionBlockNumber, "executionBlockNumber");
   if (request.amount === 0n) return { kind: "Unavailable", reason: { kind: "ZeroAmount" } };
@@ -180,19 +186,19 @@ export function quote(request: QuoteRequest, executionBlockNumber: bigint, state
     const lane = laneOrReason(state, request.assetIn, executionBlockNumber);
     return "kind" in lane
       ? { kind: "Unavailable", reason: lane }
-      : directQuote(state, request, request.assetIn, lane, false, feeAsset);
+      : directQuote(state, policy, request, request.assetIn, lane, false, feeAsset);
   }
   if (request.assetIn.toLowerCase() === state.cash.toLowerCase()) {
     const lane = laneOrReason(state, request.assetOut, executionBlockNumber);
     return "kind" in lane
       ? { kind: "Unavailable", reason: lane }
-      : directQuote(state, request, request.assetOut, lane, true, feeAsset);
+      : directQuote(state, policy, request, request.assetOut, lane, true, feeAsset);
   }
   const input = laneOrReason(state, request.assetIn, executionBlockNumber);
   if ("kind" in input) return { kind: "Unavailable", reason: input };
   const output = laneOrReason(state, request.assetOut, executionBlockNumber);
   if ("kind" in output) return { kind: "Unavailable", reason: output };
-  return routeQuote(state, request, input, output);
+  return routeQuote(state, policy, request, input, output);
 }
 
 /**

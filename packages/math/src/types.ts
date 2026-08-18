@@ -54,14 +54,15 @@ export function createLaneState(slot0: Word, assetReserve: bigint, totalPrincipa
   };
 }
 
-/** Effective fees for the single router configured by this client instance. */
-export interface FeeProfile {
-  /** Whether the configured router bypasses the global blacklist multiplier. */
-  whitelisted: boolean;
-  /** Global fee multiplier applied only to non-whitelisted routers. */
-  blacklistFeeMultiplier: bigint;
-  /** Share of the explicit fee assigned to the configured router, keyed by fee asset. */
-  partnerFeeBps: ReadonlyMap<Address, number>;
+/** Economic fee class selected by the runtime for an execution caller. */
+export type FeeClass = "Whitelisted" | "NonWhitelisted";
+
+/** Per-evaluation policy kept outside immutable chain state. */
+export interface QuotePolicy {
+  /** Fee class used to calculate quote economics. */
+  feeClass: FeeClass;
+  /** Optional chain-verified partner share for this quote's fee asset. */
+  verifiedPartnerFeeBps?: number;
 }
 
 /** Immutable quote state snapshot shared by math and client layers. */
@@ -72,8 +73,8 @@ export interface QuoteState {
   cashReserve: bigint;
   /** Quote-critical lane state keyed by non-cash asset address. */
   lanes: ReadonlyMap<Address, LaneState>;
-  /** Effective fees for the single router configured by this runtime. */
-  feeProfile: FeeProfile;
+  /** Global multiplier applied only to non-whitelisted execution callers. */
+  blacklistFeeMultiplier: bigint;
 }
 
 /** Selects whether the caller fixes input or output amount. */
@@ -91,7 +92,15 @@ export interface QuoteRequest {
   mode: QuoteMode;
 }
 
-/** Successful quote amounts and fee attribution. */
+/** Router-specific accounting split that does not affect quote economics. */
+export interface FeeAllocation {
+  /** Portion of the complete fee assigned to the verified partner. */
+  partnerFee: bigint;
+  /** Remaining portion assigned to the treasury. */
+  treasuryFee: bigint;
+}
+
+/** Successful quote amounts and optional verified fee attribution. */
 export interface QuoteResult {
   /** Total input required by the quote, including input-side fees. */
   amountIn: bigint;
@@ -101,10 +110,8 @@ export interface QuoteResult {
   feeAsset: Address;
   /** Full protocol fee before partner/treasury attribution. */
   feeAmount: bigint;
-  /** Portion of `feeAmount` assigned to the configured partner. */
-  partnerFee: bigint;
-  /** Portion of `feeAmount` assigned to the protocol treasury. */
-  treasuryFee: bigint;
+  /** Accounting split present only for a chain-verified router. */
+  feeAllocation?: FeeAllocation;
 }
 
 /** Structured reasons why a quote cannot be produced. */

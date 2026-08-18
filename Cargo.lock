@@ -12,6 +12,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "allocation-counter"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "beb9e990c0a33699f1984d85a6abead615ccc72dd8130bf3e15dcabe2ca149c9"
+
+[[package]]
 name = "alloy-json-abi"
 version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -580,17 +586,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-trait"
-version = "0.1.89"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -638,11 +633,10 @@ dependencies = [
 
 [[package]]
 name = "axum"
-version = "0.7.9"
+version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "edca88bc138befd0323b20752846e6587272d3b03b0343c8ea28a6f819e6e71f"
+checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
- "async-trait",
  "axum-core",
  "bytes",
  "futures-util",
@@ -657,8 +651,7 @@ dependencies = [
  "mime",
  "percent-encoding",
  "pin-project-lite",
- "rustversion",
- "serde",
+ "serde_core",
  "serde_json",
  "serde_path_to_error",
  "sync_wrapper",
@@ -670,19 +663,17 @@ dependencies = [
 
 [[package]]
 name = "axum-core"
-version = "0.4.5"
+version = "0.5.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09f2bd6146b97ae3359fa0cc6d6b376d9539582c7b4220f041a33ec24c226199"
+checksum = "08c78f31d7b1291f7ee735c1c6780ccde7785daae9a9206026862dab7d8792d1"
 dependencies = [
- "async-trait",
  "bytes",
- "futures-util",
+ "futures-core",
  "http",
  "http-body",
  "http-body-util",
  "mime",
  "pin-project-lite",
- "rustversion",
  "sync_wrapper",
  "tower-layer",
  "tower-service",
@@ -2088,10 +2079,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
-name = "lunarbase-indexer"
-version = "0.3.1"
+name = "lunarbase-event-worker"
+version = "0.4.0"
 dependencies = [
  "alloy-primitives",
+ "axum",
+ "clap",
+ "futures-util",
+ "lunarbase-pmm-v2-client",
+ "lunarbase-pmm-v2-source-arbitrum",
+ "lunarbase-pmm-v2-source-evm",
+ "lunarbase-pmm-v2-source-monad",
+ "lunarbase-source-monad-native",
+ "redis",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "lunarbase-indexer"
+version = "0.4.0"
+dependencies = [
  "axum",
  "clap",
  "lunarbase-pmm-v2-client",
@@ -2112,9 +2124,11 @@ dependencies = [
 
 [[package]]
 name = "lunarbase-pmm-v2-client"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
+ "alloy-primitives",
  "alloy-sol-types",
+ "arc-swap",
  "async-stream",
  "futures-core",
  "futures-util",
@@ -2127,7 +2141,7 @@ dependencies = [
 
 [[package]]
 name = "lunarbase-pmm-v2-math"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "alloy-primitives",
  "serde",
@@ -2137,8 +2151,9 @@ dependencies = [
 
 [[package]]
 name = "lunarbase-pmm-v2-source-arbitrum"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
+ "alloy-primitives",
  "axum",
  "futures-util",
  "lunarbase-pmm-v2-client",
@@ -2149,7 +2164,7 @@ dependencies = [
 
 [[package]]
 name = "lunarbase-pmm-v2-source-evm"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "alloy-primitives",
  "alloy-rpc-client",
@@ -2171,13 +2186,16 @@ dependencies = [
 
 [[package]]
 name = "lunarbase-pmm-v2-source-monad"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "async-stream",
  "futures-util",
  "lunarbase-pmm-v2-client",
  "lunarbase-pmm-v2-math",
  "lunarbase-pmm-v2-source-evm",
+ "monad-event-ring",
+ "monad-exec-events",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
@@ -2187,7 +2205,7 @@ dependencies = [
 
 [[package]]
 name = "lunarbase-quote-logger"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "clap",
  "dotenvy",
@@ -2202,7 +2220,7 @@ dependencies = [
 
 [[package]]
 name = "lunarbase-source-monad-native"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "async-stream",
  "lunarbase-pmm-v2-client",
@@ -2216,11 +2234,13 @@ dependencies = [
 
 [[package]]
 name = "lunarbase-tools"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
+ "allocation-counter",
  "alloy-primitives",
  "alloy-sol-types",
  "axum",
+ "bytes",
  "clap",
  "futures-util",
  "lunarbase-pmm-v2-client",
@@ -2256,9 +2276,9 @@ dependencies = [
 
 [[package]]
 name = "matchit"
-version = "0.7.3"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
+checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "memchr"
@@ -2809,6 +2829,7 @@ dependencies = [
  "num-bigint",
  "percent-encoding",
  "ryu",
+ "sha1_smol",
  "url",
 ]
 
@@ -2879,6 +2900,7 @@ dependencies = [
  "base64",
  "bytes",
  "futures-core",
+ "futures-util",
  "http",
  "http-body",
  "http-body-util",
@@ -2898,12 +2920,14 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower",
  "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
 ]
 
@@ -3314,6 +3338,12 @@ dependencies = [
  "cpufeatures 0.2.17",
  "digest 0.10.7",
 ]
+
+[[package]]
+name = "sha1_smol"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
 
 [[package]]
 name = "sha2"
@@ -4123,6 +4153,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc1b4cb0cc549fcf58d7dfc081778139b3d283a081644e833e84682ad71cea24"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "wasm-streams"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d1ec4f6517c9e11ae630e200b2b65d193279042e28edd4a2cda233e46670bbb"
+dependencies = [
+ "futures-util",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

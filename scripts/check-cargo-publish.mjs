@@ -17,8 +17,8 @@ function manifestArray(section, key) {
   return value === undefined ? undefined : [...value.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
 }
 
-if (releaseCrates.length !== 5) {
-  throw new Error("release inventory must contain exactly five crates");
+if (releaseCrates.length !== 4) {
+  throw new Error("release inventory must contain exactly four crates");
 }
 if (!/^license = "MIT OR Apache-2\.0"$/m.test(workspacePackage)) {
   throw new Error("Cargo workspace must declare the public dual-license expression");

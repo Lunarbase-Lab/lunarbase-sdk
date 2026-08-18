@@ -54,18 +54,21 @@ fn handshake_accepts_stable_duplicate_acknowledgements_and_rejects_conflicts() {
         &mut stable,
         br#"{"jsonrpc":"2.0","id":1,"result":"sub_logs"}"#.to_vec(),
         4,
+        4096,
     )
     .unwrap();
     observe_handshake_payload(
         &mut stable,
         br#"{"jsonrpc":"2.0","id":1,"result":"sub_logs"}"#.to_vec(),
         4,
+        4096,
     )
     .unwrap();
     observe_handshake_payload(
         &mut stable,
         br#"{"jsonrpc":"2.0","id":2,"result":"sub_all"}"#.to_vec(),
         4,
+        4096,
     )
     .unwrap();
     assert!(stable.is_complete());
@@ -78,12 +81,14 @@ fn handshake_accepts_stable_duplicate_acknowledgements_and_rejects_conflicts() {
         &mut conflict,
         br#"{"jsonrpc":"2.0","id":1,"result":"sub_logs"}"#.to_vec(),
         4,
+        4096,
     )
     .unwrap();
     let error = observe_handshake_payload(
         &mut conflict,
         br#"{"jsonrpc":"2.0","id":1,"result":"other_logs"}"#.to_vec(),
         4,
+        4096,
     )
     .unwrap_err();
     assert!(error.to_string().contains("changed subscription id"));
@@ -94,7 +99,8 @@ fn handshake_requires_exact_numeric_acknowledgement_ids() {
     for id in [json!("1"), json!(true), json!(1.0), json!(3)] {
         let mut state = ParserHandshakeState::default();
         let payload = json!({"jsonrpc": "2.0", "id": id, "result": "sub"}).to_string();
-        let error = observe_handshake_payload(&mut state, payload.into_bytes(), 4).unwrap_err();
+        let error =
+            observe_handshake_payload(&mut state, payload.into_bytes(), 4, 4096).unwrap_err();
         assert!(error.to_string().contains("unexpected numeric id"));
     }
 }
@@ -103,14 +109,20 @@ fn handshake_requires_exact_numeric_acknowledgement_ids() {
 fn handshake_bounds_prefetched_notifications() {
     let mut state = ParserHandshakeState::default();
     let notification = br#"{"jsonrpc":"2.0","method":"subscription","result":{"type":"health"}}"#;
-    observe_handshake_payload(&mut state, notification.to_vec(), 2).unwrap();
-    observe_handshake_payload(&mut state, notification.to_vec(), 2).unwrap();
-    let error = observe_handshake_payload(&mut state, notification.to_vec(), 2).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("prefetch exceeded configured bound")
-    );
+    observe_handshake_payload(&mut state, notification.to_vec(), 2, 4096).unwrap();
+    observe_handshake_payload(&mut state, notification.to_vec(), 2, 4096).unwrap();
+    let error = observe_handshake_payload(&mut state, notification.to_vec(), 2, 4096).unwrap_err();
+    assert!(error.to_string().contains("count or byte budget exceeded"));
+
+    let mut bytes_only = ParserHandshakeState::default();
+    let error = observe_handshake_payload(
+        &mut bytes_only,
+        notification.to_vec(),
+        4,
+        notification.len().saturating_sub(1),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("byte budget"));
 }
 
 #[test]

@@ -1,5 +1,5 @@
 /** Browser-compatible socket lifecycle and bounded frame queue. */
-import type { ContractFilter } from "@lunarbase-lab/pmm-v2-client";
+import { BoundedRingBuffer, type ContractFilter } from "@lunarbase-lab/pmm-v2-client";
 import { parseHexU64, RpcError } from "../rpc.js";
 import { subscriptionRequest } from "./protocol.js";
 
@@ -21,7 +21,7 @@ export interface EstablishedSocket {
   readonly queue: BoundedFrameQueue;
   readonly logsSubscription: string;
   readonly headsSubscription: string;
-  readonly prefetched: string[];
+  readonly prefetched: BoundedRingBuffer<string>;
   readonly close: () => void;
 }
 
@@ -32,17 +32,18 @@ export async function establishSocket(
   logsKind: "logs" | "pendingLogs",
   expectedChainId: bigint,
   queueCapacity: number,
+  queueByteCapacity: number,
+  prefetchByteCapacity: number,
   maxFrameBytes: number,
   signal?: AbortSignal,
 ): Promise<EstablishedSocket> {
   const socket = factory(url);
-  const queue = new BoundedFrameQueue(queueCapacity);
+  const queue = new BoundedFrameQueue(queueCapacity, queueByteCapacity);
   const onOpen = () => queue.open();
   const onMessage = (event: SocketEvent) => {
     const frame = decodeFrame(event.data);
     if (frame === undefined) queue.fail(new Error("RPC WebSocket delivered a non-text frame"));
-    else if (new TextEncoder().encode(frame).byteLength > maxFrameBytes)
-      queue.fail(new Error("RPC WebSocket frame exceeded configured bound"));
+    else if (utf8Bytes(frame) > maxFrameBytes) queue.fail(new Error("RPC WebSocket frame exceeded configured bound"));
     else queue.push(frame);
   };
   const onError = (event: SocketEvent) =>
@@ -55,6 +56,7 @@ export async function establishSocket(
   const abort = () => queue.close();
   signal?.addEventListener("abort", abort, { once: true });
   const close = () => {
+    queue.close();
     signal?.removeEventListener("abort", abort);
     socket.removeEventListener?.("open", onOpen);
     socket.removeEventListener?.("message", onMessage);
@@ -72,7 +74,14 @@ export async function establishSocket(
     socket.send(subscriptionRequest(1, filter, logsKind));
     socket.send(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "eth_subscribe", params: ["newHeads"] }));
     socket.send(JSON.stringify({ jsonrpc: "2.0", id: 3, method: "eth_chainId", params: [] }));
-    const result = await readAcknowledgements(queue, expectedChainId, queueCapacity, deadline, signal);
+    const result = await readAcknowledgements(
+      queue,
+      expectedChainId,
+      queueCapacity,
+      prefetchByteCapacity,
+      deadline,
+      signal,
+    );
     return { socket, queue, close, ...result };
   } catch (error) {
     queue.close();
@@ -85,13 +94,15 @@ async function readAcknowledgements(
   queue: BoundedFrameQueue,
   expectedChainId: bigint,
   prefetchCapacity: number,
+  prefetchByteCapacity: number,
   deadline: number,
   signal?: AbortSignal,
 ): Promise<Pick<EstablishedSocket, "logsSubscription" | "headsSubscription" | "prefetched">> {
   let logsSubscription: string | undefined;
   let headsSubscription: string | undefined;
   let chainVerified = false;
-  const prefetched: string[] = [];
+  const prefetched = new BoundedRingBuffer<string>(prefetchCapacity);
+  let prefetchedBytes = 0;
   while (!logsSubscription || !headsSubscription || !chainVerified) {
     const frame = await beforeHandshakeDeadline(queue.next(signal), deadline, signal);
     if (frame === undefined) throw new RpcError("TRANSPORT", "RPC WebSocket closed during subscription handshake");
@@ -107,9 +118,11 @@ async function readAcknowledgements(
         throw new RpcError("INVALID", `WebSocket RPC chain id mismatch: expected ${expectedChainId}, got ${actual}`);
       chainVerified = true;
     } else {
-      if (prefetched.length >= prefetchCapacity)
-        throw new RpcError("TRANSPORT", "RPC subscription handshake prefetch overflow");
+      const bytes = utf8Bytes(frame);
+      if (prefetched.length >= prefetchCapacity || bytes > prefetchByteCapacity - prefetchedBytes)
+        throw new RpcError("TRANSPORT", "RPC subscription handshake prefetch count or byte budget exceeded");
       prefetched.push(frame);
+      prefetchedBytes += bytes;
     }
   }
   if (performance.now() >= deadline) throw new RpcError("TRANSPORT", "RPC subscription handshake timed out");
@@ -168,82 +181,144 @@ export function defaultWebSocketFactory(url: string): WebSocketLike {
 }
 
 export class BoundedFrameQueue {
-  private readonly values: string[] = [];
-  private readonly waiters: Array<(value: string | undefined) => void> = [];
+  private readonly values: BoundedRingBuffer<{ value: string; bytes: number }>;
+  private readonly openWaiters = new Set<() => void>();
+  private readonly valueWaiters = new Set<(value: string | undefined) => void>();
   private opened = false;
   private ended = false;
   private failure?: Error;
+  private retainedBytes = 0;
 
-  constructor(private readonly capacity: number) {}
+  constructor(
+    private readonly capacity: number,
+    private readonly byteCapacity: number,
+  ) {
+    if (!Number.isSafeInteger(byteCapacity) || byteCapacity <= 0)
+      throw new Error("frame queue byte capacity must be a positive safe integer");
+    this.values = new BoundedRingBuffer(capacity);
+  }
 
   open(): void {
+    if (this.ended) return;
     this.opened = true;
-    this.resolveWaiters();
+    this.resolveOpenWaiters();
   }
 
   push(value: string): void {
     if (this.ended) return;
-    if (this.values.length >= this.capacity) {
-      this.fail(new Error("RPC WebSocket frame queue overflow; canonical recovery required"));
+    const bytes = utf8Bytes(value);
+    if (this.values.length >= this.capacity || bytes > this.byteCapacity - this.retainedBytes) {
+      this.fail(new Error("RPC WebSocket frame queue count or byte budget exceeded; canonical recovery required"));
       return;
     }
-    this.values.push(value);
-    this.resolveWaiters();
+    const waiter = this.valueWaiters.values().next().value;
+    if (waiter) {
+      waiter(value);
+      return;
+    }
+    this.values.push({ value, bytes });
+    this.retainedBytes += bytes;
   }
 
   fail(error: Error): void {
     if (this.ended) return;
     this.failure = error;
     this.ended = true;
-    this.resolveWaiters();
+    this.values.clear();
+    this.retainedBytes = 0;
+    this.resolveOpenWaiters();
+    this.resolveValueWaiters();
   }
 
   close(): void {
     if (this.ended) return;
     this.ended = true;
-    this.resolveWaiters();
+    this.resolveOpenWaiters();
+    this.resolveValueWaiters();
   }
 
   async waitUntilOpen(signal?: AbortSignal): Promise<void> {
     if (this.opened) return;
-    await this.wait(signal);
+    if (this.failure) throw this.failure;
+    if (this.ended) throw new Error("RPC WebSocket closed before open");
+    await this.waitForOpen(signal);
     if (!this.opened) throw this.failure ?? new Error("RPC WebSocket closed before open");
   }
 
   async next(signal?: AbortSignal): Promise<string | undefined> {
     if (this.failure) throw this.failure;
-    const value = this.values.shift();
-    if (value !== undefined) return value;
+    const entry = this.values.shift();
+    if (entry !== undefined) {
+      this.retainedBytes -= entry.bytes;
+      return entry.value;
+    }
     if (this.ended) return undefined;
-    return this.wait(signal);
+    return this.waitForValue(signal);
   }
 
-  private wait(signal?: AbortSignal): Promise<string | undefined> {
-    if (signal?.aborted) return Promise.resolve(undefined);
+  private waitForOpen(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.reject(new Error("RPC WebSocket operation aborted"));
     return new Promise((resolve, reject) => {
-      const waiter = (value: string | undefined) => {
+      let settled = false;
+      const waiter = () => {
+        if (settled) return;
+        settled = true;
         signal?.removeEventListener("abort", onAbort);
+        this.openWaiters.delete(waiter);
         if (this.failure) reject(this.failure);
-        else resolve(value);
-      };
-      const removeWaiter = () => {
-        const index = this.waiters.indexOf(waiter);
-        if (index >= 0) this.waiters.splice(index, 1);
+        else if (this.opened) resolve();
+        else reject(new Error("RPC WebSocket closed before open"));
       };
       const onAbort = () => {
+        if (settled) return;
+        settled = true;
         signal?.removeEventListener("abort", onAbort);
-        removeWaiter();
-        resolve(undefined);
+        this.openWaiters.delete(waiter);
+        reject(new Error("RPC WebSocket operation aborted"));
       };
+      this.openWaiters.add(waiter);
       signal?.addEventListener("abort", onAbort, { once: true });
-      this.waiters.push(waiter);
+      if (signal?.aborted) onAbort();
     });
   }
 
-  private resolveWaiters(): void {
-    while (this.waiters.length > 0 && (this.values.length > 0 || this.ended || this.opened)) {
-      this.waiters.shift()?.(this.values.shift());
-      if (!this.values.length && !this.ended && !this.opened) break;
+  private waitForValue(signal?: AbortSignal): Promise<string | undefined> {
+    if (signal?.aborted) return Promise.resolve(undefined);
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const waiter = (value: string | undefined) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", onAbort);
+        this.valueWaiters.delete(waiter);
+        if (this.failure) reject(this.failure);
+        else resolve(value);
+      };
+      const onAbort = () => {
+        waiter(undefined);
+      };
+      this.valueWaiters.add(waiter);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) onAbort();
+    });
+  }
+
+  private resolveOpenWaiters(): void {
+    for (const waiter of [...this.openWaiters]) waiter();
+  }
+
+  private resolveValueWaiters(): void {
+    while (this.valueWaiters.size > 0 && (this.values.length > 0 || this.ended)) {
+      const entry = this.values.shift();
+      if (entry) this.retainedBytes -= entry.bytes;
+      const waiter = this.valueWaiters.values().next().value;
+      if (waiter) waiter(entry?.value);
     }
   }
+}
+
+const UTF8_ENCODER = new TextEncoder();
+
+function utf8Bytes(value: string): number {
+  return UTF8_ENCODER.encode(value).byteLength;
 }
