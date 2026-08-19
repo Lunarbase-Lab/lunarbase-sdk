@@ -9,6 +9,7 @@ expected_implementation_code_hash = "0x00000000000000000000000000000000000000000
 contract_compatibility_version = "lunarbase-pmm-v2"
 http_rpc_url = "http://127.0.0.1:8545"
 realtime_url = "ws://127.0.0.1:8546"
+delivery_mode = "block-ordered"
 explicit_lane_assets = []
 bind = "127.0.0.1:8080"
 queue_bound = 4096

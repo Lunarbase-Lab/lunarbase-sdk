@@ -25,6 +25,7 @@ LUNARBASE_EXPECTED_IMPLEMENTATION=0x... \
 LUNARBASE_EXPECTED_IMPLEMENTATION_CODE_HASH=0x... \
 LUNARBASE_HTTP_RPC_URL=https://... \
 LUNARBASE_REALTIME_URL=wss://... \
+LUNARBASE_DELIVERY_MODE=realtime \
 lunarbase-indexer
 ```
 
@@ -36,8 +37,10 @@ endpoints are always explicit.
 `fee_class` is mandatory. `verified_router` is optional and enables the exact
 partner/treasury allocation; class-only deployments avoid its snapshot RPCs.
 
-The quote indexer intentionally has no event-delivery configuration or logger
-queue. Durable protocol events are handled by the separate
+`delivery_mode` controls quote-state freshness independently of durable event
+delivery. Use `realtime` for provider receive order, `block-ordered` for closed
+and transaction-sorted blocks, or `finalized` for the finalized watermark.
+Durable protocol events remain the responsibility of the separate
 `lunarbase-event-worker`, whose commitment policy uses
 `LUNARBASE_EVENT_MIN_COMMITMENT`.
 

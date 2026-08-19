@@ -3,6 +3,7 @@ network = "base"
 chain_id = 8453
 fee_class = "whitelisted"
 contract_compatibility_version = "lunarbase-pmm-v2"
+delivery_mode = "realtime"
 explicit_lane_assets = []
 bind = "0.0.0.0:8080"
 queue_bound = 16384

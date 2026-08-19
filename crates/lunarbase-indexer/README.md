@@ -16,11 +16,17 @@ LUNARBASE_EXPECTED_IMPLEMENTATION=0x... \
 LUNARBASE_EXPECTED_IMPLEMENTATION_CODE_HASH=0x... \
 LUNARBASE_HTTP_RPC_URL=https://... \
 LUNARBASE_REALTIME_URL=wss://... \
+LUNARBASE_DELIVERY_MODE=realtime \
 make run
 ```
 
 CLI values override environment values, which override TOML and operational
 defaults. Deployment identity and source endpoints are always explicit.
+
+`delivery_mode` / `LUNARBASE_DELIVERY_MODE` selects when live source updates
+become visible to quotes: `realtime` publishes provider receive order,
+`block-ordered` closes and sorts an executed block, and `finalized` follows the
+source finalized watermark. The quote-oriented default is `realtime`.
 
 Base is the default feature. Select evm, monad, monad-native, or arbitrum with
 --no-default-features and --features.
@@ -45,8 +51,10 @@ API must include a chain-verified partner/treasury allocation.
 
 ## Event delivery
 
-The quote service does not create an event queue, format protocol logs, write
-stdout events, or wait for an event consumer. Run the standalone
+Source delivery mode affects quote-state freshness; it does not create a
+durable event-delivery pipeline. The quote service does not create an event
+queue, format protocol logs, write stdout events, or wait for an event
+consumer. Run the standalone
 [`lunarbase-event-worker`](../lunarbase-event-worker/README.md) for durable
 Redis Stream delivery. It owns independent source connections, resource
 limits, health, and metrics, so event backpressure cannot delay quotes.
