@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@lunarbase-lab/pmm-v2-math": "workspace:*",
-    "ox": "0.14.30"
+    "ox": "1.6.2"
   },
   "devDependencies": {
     "@types/node": "22.20.1",
