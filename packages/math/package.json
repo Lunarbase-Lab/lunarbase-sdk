@@ -1,6 +1,6 @@
 {
   "name": "@lunarbase-lab/pmm-v2-math",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Bit-exact LunarBase quote math for TypeScript",
   "keywords": [
     "lunarbase",

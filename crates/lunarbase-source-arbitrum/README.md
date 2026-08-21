@@ -8,8 +8,8 @@ Status: **maintenance**. Updates focus on compatibility, reliability, and securi
 
 ```toml
 [dependencies]
-lunarbase-client = { package = "lunarbase-pmm-v2-client", version = "0.4.0" }
-lunarbase-source-arbitrum = { package = "lunarbase-pmm-v2-source-arbitrum", version = "0.4.0" }
+lunarbase-client = { package = "lunarbase-pmm-v2-client", version = "0.4.1" }
+lunarbase-source-arbitrum = { package = "lunarbase-pmm-v2-source-arbitrum", version = "0.4.1" }
 ```
 
 ## Use

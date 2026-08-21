@@ -10,6 +10,7 @@ contract_compatibility_version = "lunarbase-pmm-v2"
 http_rpc_url = "http://127.0.0.1:8545"
 # Durable parser v2 WS for `--features monad`; ring path for `--features monad-native`.
 realtime_url = "ws://127.0.0.1:8080/ws/v2"
+delivery_mode = "realtime"
 explicit_lane_assets = []
 bind = "127.0.0.1:8080"
 queue_bound = 4096

@@ -2,7 +2,7 @@
 
 use crate::{
     checkpoint::{RedisCheckpointStore, StoreOutcome},
-    config::Config,
+    config::{Config, DeliveryMode},
     metrics::Metrics,
 };
 use lunarbase_client::indexer::client::ConnectedQuoteClient;
@@ -114,12 +114,12 @@ async fn connect_evm(
     let rpc = lunarbase_source_evm::rpc::client::RpcHttpClient::new(config.http_rpc_url.clone())
         .map_err(lunarbase_client::model::SourceError::from)
         .map_err(IndexerError::from)?;
-    let source = Arc::new(lunarbase_source_evm::ws::EvmRpcSource::new(
+    let source = Arc::new(lunarbase_source_evm::ws::EvmRpcSource::with_delivery_mode(
         rpc,
         config.realtime_url.clone(),
         Network::Evm,
         config.client.deployment.chain_id,
-        "latest",
+        evm_delivery_mode(config.delivery_mode),
     ));
     Ok(ConnectedQuoteClient::connect(config.client.clone(), source, checkpoint).await?)
 }
@@ -140,11 +140,21 @@ async fn connect_base(
     let rpc = lunarbase_source_evm::rpc::client::RpcHttpClient::new(config.http_rpc_url.clone())
         .map_err(lunarbase_client::model::SourceError::from)
         .map_err(IndexerError::from)?;
-    let source = Arc::new(lunarbase_source_evm::ws::EvmRpcSource::base_flashblocks(
-        rpc,
-        config.realtime_url.clone(),
-        config.client.deployment.chain_id,
-    ));
+    let source = match config.delivery_mode {
+        DeliveryMode::Realtime => lunarbase_source_evm::ws::EvmRpcSource::base_flashblocks(
+            rpc,
+            config.realtime_url.clone(),
+            config.client.deployment.chain_id,
+        ),
+        mode => lunarbase_source_evm::ws::EvmRpcSource::with_delivery_mode(
+            rpc,
+            config.realtime_url.clone(),
+            Network::Base,
+            config.client.deployment.chain_id,
+            evm_delivery_mode(mode),
+        ),
+    };
+    let source = Arc::new(source);
     Ok(ConnectedQuoteClient::connect(config.client.clone(), source, checkpoint).await?)
 }
 
@@ -172,7 +182,7 @@ async fn connect_monad(
                     queue_bound: config.client.buffer_capacity,
                     queue_byte_bound: config.client.buffer_byte_capacity,
                     poll_interval: Duration::from_micros(100),
-                    delivery_mode: lunarbase_source_monad::execution::MonadDeliveryMode::Realtime,
+                    delivery_mode: monad_delivery_mode(config.delivery_mode),
                     emit_removed_logs: false,
                 },
                 config.http_rpc_url.clone(),
@@ -189,6 +199,7 @@ async fn connect_monad(
                     ws_url: config.realtime_url.clone(),
                     core: config.client.deployment.core,
                     chain_id: config.client.deployment.chain_id,
+                    delivery_mode: monad_delivery_mode(config.delivery_mode),
                     ..lunarbase_source_monad::parser::MonadParserConfig::durable_v2()
                 },
                 config.http_rpc_url.clone(),
@@ -213,10 +224,11 @@ async fn connect_arbitrum(
     checkpoint: Option<Checkpoint>,
 ) -> Result<ConnectedQuoteClient, RuntimeError> {
     let source = Arc::new(
-        lunarbase_source_arbitrum::source::ArbitrumNitroSource::from_urls(
+        lunarbase_source_arbitrum::source::ArbitrumNitroSource::from_urls_with_delivery_mode(
             config.http_rpc_url.clone(),
             config.realtime_url.clone(),
             config.client.deployment.chain_id,
+            evm_delivery_mode(config.delivery_mode),
         )
         .map_err(IndexerError::from)?,
     );
@@ -229,6 +241,48 @@ async fn connect_arbitrum(
     _checkpoint: Option<Checkpoint>,
 ) -> Result<ConnectedQuoteClient, RuntimeError> {
     Err(RuntimeError::UnsupportedNetwork(Network::Arbitrum))
+}
+
+#[cfg(any(feature = "evm", feature = "arbitrum"))]
+fn evm_delivery_mode(mode: DeliveryMode) -> lunarbase_source_evm::ws::EvmDeliveryMode {
+    use lunarbase_source_evm::ws::EvmDeliveryMode;
+    match mode {
+        DeliveryMode::Realtime => EvmDeliveryMode::Realtime,
+        DeliveryMode::BlockOrdered => EvmDeliveryMode::BlockOrdered,
+        DeliveryMode::Finalized => EvmDeliveryMode::Finalized,
+    }
+}
+
+#[cfg(feature = "monad")]
+fn monad_delivery_mode(mode: DeliveryMode) -> lunarbase_source_monad::execution::MonadDeliveryMode {
+    use lunarbase_source_monad::execution::MonadDeliveryMode;
+    match mode {
+        DeliveryMode::Realtime => MonadDeliveryMode::Realtime,
+        DeliveryMode::BlockOrdered => MonadDeliveryMode::BlockOrdered,
+        DeliveryMode::Finalized => MonadDeliveryMode::Finalized,
+    }
+}
+
+#[cfg(all(test, feature = "evm"))]
+mod delivery_mode_tests {
+    use super::{DeliveryMode, evm_delivery_mode};
+    use lunarbase_source_evm::ws::EvmDeliveryMode;
+
+    #[test]
+    fn maps_quote_delivery_modes_to_evm_source_modes() {
+        assert_eq!(
+            evm_delivery_mode(DeliveryMode::Realtime),
+            EvmDeliveryMode::Realtime
+        );
+        assert_eq!(
+            evm_delivery_mode(DeliveryMode::BlockOrdered),
+            EvmDeliveryMode::BlockOrdered
+        );
+        assert_eq!(
+            evm_delivery_mode(DeliveryMode::Finalized),
+            EvmDeliveryMode::Finalized
+        );
+    }
 }
 
 /// Loads Redis state without making Redis a startup dependency.

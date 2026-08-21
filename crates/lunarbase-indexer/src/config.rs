@@ -60,6 +60,9 @@ pub struct ConfigValues {
     /// Network-source realtime endpoint or native event-ring locator.
     #[arg(long, env = "LUNARBASE_REALTIME_URL")]
     pub realtime_url: Option<String>,
+    /// Live source delivery policy: `realtime`, `block-ordered`, or `finalized`.
+    #[arg(long, env = "LUNARBASE_DELIVERY_MODE")]
+    pub delivery_mode: Option<String>,
     /// Optional lane allowlist that avoids a full discovery replay.
     #[arg(
         long = "lane",
@@ -110,6 +113,8 @@ pub struct Config {
     pub http_rpc_url: String,
     /// Realtime endpoint or native event-ring locator used by the selected source.
     pub realtime_url: String,
+    /// Validated live source delivery and confidence policy.
+    pub delivery_mode: DeliveryMode,
     /// Parsed HTTP listen address.
     pub bind: SocketAddr,
     /// Hard admission bound for concurrently executing quote requests.
@@ -120,6 +125,17 @@ pub struct Config {
     pub checkpoint_interval: Duration,
     /// Deadline shared by client shutdown and final checkpoint handling.
     pub shutdown_timeout: Duration,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Live source delivery and confidence policy selected for quote state.
+pub enum DeliveryMode {
+    /// Publish provider updates immediately in receive order.
+    Realtime,
+    /// Close each executed block and publish its logs in transaction order.
+    BlockOrdered,
+    /// Publish only updates covered by the source's finalized watermark.
+    Finalized,
 }
 
 #[derive(Debug, Error)]
@@ -177,6 +193,7 @@ impl ConfigValues {
             .or(self.contract_compatibility_version);
         self.http_rpc_url = overrides.http_rpc_url.or(self.http_rpc_url);
         self.realtime_url = overrides.realtime_url.or(self.realtime_url);
+        self.delivery_mode = overrides.delivery_mode.or(self.delivery_mode);
         if !overrides.explicit_lane_assets.is_empty() {
             self.explicit_lane_assets = overrides.explicit_lane_assets;
         }
@@ -212,6 +229,8 @@ impl ConfigValues {
             "arbitrum" => Network::Arbitrum,
             _ => return invalid("network", "expected evm, base, monad, or arbitrum"),
         };
+        let delivery_mode =
+            parse_delivery_mode(self.delivery_mode.as_deref().unwrap_or("realtime"))?;
         let chain_id = required(self.chain_id, "chain_id")?;
         let core = parse_address(&required(self.core, "core")?, "core")?;
         let fee_class = match required(self.fee_class, "fee_class")?
@@ -330,6 +349,7 @@ impl ConfigValues {
             client,
             http_rpc_url,
             realtime_url,
+            delivery_mode,
             bind,
             max_in_flight_quotes,
             redis_url: self.redis_url,
@@ -355,6 +375,18 @@ fn parse_hash(value: &str, field: &'static str) -> Result<B256, ConfigError> {
         field,
         detail: error.to_string(),
     })
+}
+
+fn parse_delivery_mode(value: &str) -> Result<DeliveryMode, ConfigError> {
+    match value.to_ascii_lowercase().as_str() {
+        "realtime" => Ok(DeliveryMode::Realtime),
+        "block-ordered" | "block_ordered" | "canonical" => Ok(DeliveryMode::BlockOrdered),
+        "finalized" => Ok(DeliveryMode::Finalized),
+        _ => invalid(
+            "delivery_mode",
+            "expected realtime, block-ordered, or finalized",
+        ),
+    }
 }
 
 fn invalid<T>(field: &'static str, detail: &str) -> Result<T, ConfigError> {
@@ -397,7 +429,7 @@ fn default_shutdown_seconds() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, ConfigError, ConfigValues};
+    use super::{Cli, ConfigError, ConfigValues, DeliveryMode};
     use clap::Parser;
     use lunarbase_client::protocol::abi::quote_critical_topics;
 
@@ -425,6 +457,7 @@ mod tests {
     fn accepts_configuration_without_a_file() {
         let config = complete_values().validate().unwrap();
         assert_eq!(config.client.deployment.chain_id, 8453);
+        assert_eq!(config.delivery_mode, DeliveryMode::Realtime);
         assert_eq!(config.client.buffer_capacity, 4096);
         assert_eq!(config.max_in_flight_quotes, 1024);
         assert_eq!(
@@ -449,12 +482,14 @@ mod tests {
             network: Some("evm".into()),
             chain_id: Some(97),
             http_rpc_url: Some("https://rpc.example".into()),
+            delivery_mode: Some("block-ordered".into()),
             explicit_lane_assets: vec![CORE.into()],
             ..Default::default()
         };
         let config = file_values.overlay(direct).validate().unwrap();
         assert_eq!(config.client.deployment.chain_id, 97);
         assert_eq!(config.http_rpc_url, "https://rpc.example");
+        assert_eq!(config.delivery_mode, DeliveryMode::BlockOrdered);
         assert_eq!(config.client.deployment.explicit_lane_assets.len(), 1);
     }
 
@@ -481,6 +516,19 @@ mod tests {
             values.validate(),
             Err(ConfigError::Invalid {
                 field: "runtime",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_unknown_delivery_mode() {
+        let mut values = complete_values();
+        values.delivery_mode = Some("latest".into());
+        assert!(matches!(
+            values.validate(),
+            Err(ConfigError::Invalid {
+                field: "delivery_mode",
                 ..
             })
         ));

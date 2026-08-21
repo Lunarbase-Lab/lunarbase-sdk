@@ -71,6 +71,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         core = %config.client.deployment.core,
         fee_class = ?config.client.deployment.fee_class,
         verified_router = ?config.client.deployment.verified_router,
+        delivery_mode = ?config.delivery_mode,
         bind = %config.bind,
         redis = store.is_some(),
         "lunarbase-indexer is ready"

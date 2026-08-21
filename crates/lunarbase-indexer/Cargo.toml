@@ -18,7 +18,7 @@ monad-native = [
     "dep:lunarbase-source-monad-native",
     "lunarbase-source-monad-native/native-event-ring",
 ]
-arbitrum = ["dep:lunarbase-source-arbitrum"]
+arbitrum = ["dep:lunarbase-source-arbitrum", "dep:lunarbase-source-evm"]
 all-networks = ["base", "monad", "arbitrum"]
 
 [lints]

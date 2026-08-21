@@ -11,7 +11,7 @@ one network source:
 | Monad       | Workspace/Git only               | Not published (workspace compatibility) |
 | Arbitrum    | lunarbase-pmm-v2-source-arbitrum | @lunarbase-lab/pmm-v2-source-arbitrum   |
 
-Use package version 0.4.0 consistently.
+Use package version 0.4.1 consistently.
 
 The Monad sources are not part of the registry release inventory. Rust protocol
 v2 uses pinned upstream Git dependencies. The TypeScript workspace adapter
