@@ -1,6 +1,6 @@
 {
   "name": "@lunarbase-lab/pmm-v2-source-monad",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": true,
   "description": "Monad execution-event data source for LunarBase",
   "keywords": [

@@ -8,7 +8,7 @@ Status: **fully supported**.
 
 ```toml
 [dependencies]
-lunarbase-math = { package = "lunarbase-pmm-v2-math", version = "0.4.0" }
+lunarbase-math = { package = "lunarbase-pmm-v2-math", version = "0.4.1" }
 ```
 
 ## Use
