@@ -6,6 +6,9 @@ use std::time::Duration;
 use tokio::process::{Child, Command};
 use tokio::time::timeout;
 
+const INDEXER_SHUTDOWN_TIMEOUT_SECONDS: u64 = 8;
+const PROCESS_EXIT_TIMEOUT_SECONDS: u64 = 12;
+
 pub(super) fn write_config(
     path: &Path,
     mock: &MockChain,
@@ -25,12 +28,13 @@ expected_implementation = "{IMPLEMENTATION}"
 expected_implementation_code_hash = "{EMPTY_CODE_HASH}"
 http_rpc_url = "{}"
 realtime_url = "{}"
+delivery_mode = "realtime"
 bind = "127.0.0.1:{port}"
 explicit_lane_assets = ["{ASSET}"]
 queue_bound = 128
 reconnect_delay_milliseconds = 100
 {redis}checkpoint_interval_seconds = 1
-shutdown_timeout_seconds = 4
+shutdown_timeout_seconds = {INDEXER_SHUTDOWN_TIMEOUT_SECONDS}
 "#,
         mock.rpc_url(),
         mock.websocket_url(),
@@ -131,9 +135,12 @@ pub(super) async fn terminate(child: &mut Child) -> Result<(), E2eError> {
             "failed to send SIGTERM to process {pid}"
         )));
     }
-    let exit = timeout(Duration::from_secs(8), child.wait())
-        .await
-        .map_err(|_| E2eError::Scenario(format!("process {pid} ignored SIGTERM")))??;
+    let exit = timeout(
+        Duration::from_secs(PROCESS_EXIT_TIMEOUT_SECONDS),
+        child.wait(),
+    )
+    .await
+    .map_err(|_| E2eError::Scenario(format!("process {pid} ignored SIGTERM")))??;
     if !exit.success() {
         return Err(E2eError::Scenario(format!(
             "process {pid} exited unsuccessfully: {exit}"
