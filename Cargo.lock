@@ -108,9 +108,9 @@ dependencies = [
 
 [[package]]
 name = "alloy-serde"
-version = "2.2.0"
+version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07758cbde42596b66da52bb661d77e253c3f7f9b3f553faf07adbadeb6419502"
+checksum = "2ff89f75b8a9d00f659750e9220c31b42d67c69ffc43b2ac8911dfd0506eb4a6"
 dependencies = [
  "alloy-primitives",
  "serde",
