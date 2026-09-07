@@ -25,7 +25,7 @@
   },
   "dependencies": {
     "@lunarbase-lab/pmm-v2-math": "workspace:*",
-    "@noble/hashes": "1.8.0",
+    "@noble/hashes": "2.4.0",
     "ox": "0.14.30"
   },
   "devDependencies": {
